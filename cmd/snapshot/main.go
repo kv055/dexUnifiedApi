@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"database/sql"
+	"dexunifiedapi/internal/dbutil"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,16 +19,14 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	_ "modernc.org/sqlite"
 )
 
 var (
-	snapshotDBPath  string
+	databaseURL     string
 	bisqGRPCHost    string
 	bisqAPIPassword string
 	priceProvider   string
 	torProxy        string
-	dexMonitorURL   string
 	robosatsOnions  = []string{
 		"http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion",
 		"http://mmhaqzuirth5rx7gl24d4773lknltjhik57k7ahec5iefktezv4b3uid.onion",
@@ -38,9 +36,9 @@ var (
 )
 
 func init() {
-	snapshotDBPath = os.Getenv("DB_PATH")
-	if snapshotDBPath == "" {
-		snapshotDBPath = "/home/claudio_clawd_bot/orderbook/orderbook.db"
+	databaseURL = os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://postgres:postgres@localhost:5432/dexarb?sslmode=disable"
 	}
 	bisqGRPCHost = os.Getenv("BISQ_GRPC_HOST")
 	if bisqGRPCHost == "" {
@@ -54,10 +52,6 @@ func init() {
 	torProxy = os.Getenv("TOR_PROXY_URL")
 	if torProxy == "" {
 		torProxy = "socks5h://127.0.0.1:9050"
-	}
-	dexMonitorURL = os.Getenv("DEXMONITOR_INTERNAL_URL")
-	if dexMonitorURL == "" {
-		dexMonitorURL = "http://localhost:5000"
 	}
 }
 
@@ -73,6 +67,7 @@ func (c bisqCreds) RequireTransportSecurity() bool { return false }
 
 type offer struct {
 	OfferID       string   `json:"offer_id,omitempty"`
+	FiatCurrency  string   `json:"fiat_currency,omitempty"`
 	Price         float64  `json:"price"`
 	PriceDiffPct  *float64 `json:"price_diff_percent,omitempty"`
 	BTCMin        *float64 `json:"btc_min,omitempty"`
@@ -86,6 +81,23 @@ type offer struct {
 type fetchResult struct {
 	BTCPrice float64
 	Offers   []offer
+}
+
+type livePayload struct {
+	ID            int64    `json:"id"`
+	Exchange      string   `json:"exchange"`
+	FiatCurrency  string   `json:"fiat_currency"`
+	Direction     string   `json:"direction"`
+	Price         float64  `json:"price"`
+	BTCMin        *float64 `json:"btc_min"`
+	BTCMax        *float64 `json:"btc_max"`
+	FiatMin       *int64   `json:"fiat_min"`
+	FiatMax       *int64   `json:"fiat_max"`
+	PaymentMethod *string  `json:"payment_method"`
+	OfferID       *string  `json:"offer_id"`
+	FirstSeen     string   `json:"first_seen"`
+	LastSeen      string   `json:"last_seen"`
+	PriceType     *string  `json:"price_type"`
 }
 
 func priceTypeFixed() *string    { s := "fixed"; return &s }
@@ -245,6 +257,7 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 		}
 		offers = append(offers, offer{
 			OfferID:       o.Id,
+			FiatCurrency:  "EUR",
 			Price:         price,
 			BTCMin:        &btcMin,
 			BTCMax:        &btcMax,
@@ -321,6 +334,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 		btcMax := round8(float64(fiatMax) / price)
 		offers = append(offers, offer{
 			OfferID:       o.ID,
+			FiatCurrency:  "EUR",
 			Price:         price,
 			BTCMin:        &btcMin,
 			BTCMax:        &btcMax,
@@ -411,6 +425,7 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 
 			offers = append(offers, offer{
 				OfferID:       line.ID.String(),
+				FiatCurrency:  "EUR",
 				Price:         price,
 				BTCMin:        &btcMin,
 				BTCMax:        &btcMax,
@@ -431,22 +446,23 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 
 // --- Database ---
 
-func saveSnapshot(sdb *sql.DB, exchange, fiat, direction string, btcPrice float64, offers []offer) {
+func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice float64, offers []offer) []livePayload {
 	if len(offers) == 0 {
 		fmt.Printf("[%s] No offers to save\n", exchange)
-		return
+		return nil
 	}
 
 	tx, err := sdb.Begin()
 	if err != nil {
 		fmt.Printf("[%s] DB error: %v\n", exchange, err)
-		return
+		return nil
 	}
 	defer tx.Rollback()
 
 	tx.Exec("INSERT INTO snapshots (exchange, fiat_currency, direction, btc_price) VALUES (?, ?, ?, ?)",
 		exchange, fiat, direction, btcPrice)
 
+	liveOffers := make([]livePayload, 0, len(offers))
 	updated, inserted := 0, 0
 	for _, o := range offers {
 		var existingID int64
@@ -458,32 +474,76 @@ func saveSnapshot(sdb *sql.DB, exchange, fiat, direction string, btcPrice float6
 		}
 		if !found {
 			err := tx.QueryRow(`SELECT id FROM offers
-				WHERE exchange = ? AND direction = ? AND price = ?
+				WHERE exchange = ? AND fiat_currency = ? AND direction = ?
 				  AND btc_min = ? AND btc_max = ? AND payment_method = ?`,
-				exchange, direction, o.Price, o.BTCMin, o.BTCMax, o.PaymentMethod).Scan(&existingID)
+				exchange, fiat, direction, o.BTCMin, o.BTCMax, o.PaymentMethod).Scan(&existingID)
 			found = err == nil
 		}
 
+		live := livePayload{
+			Exchange:     exchange,
+			FiatCurrency: fiat,
+			Direction:    direction,
+			Price:        o.Price,
+			BTCMin:       o.BTCMin,
+			BTCMax:       o.BTCMax,
+			PriceType:    o.PriceType,
+		}
+		if o.FiatMin != nil {
+			v := int64(*o.FiatMin)
+			live.FiatMin = &v
+		}
+		if o.FiatMax != nil {
+			v := int64(*o.FiatMax)
+			live.FiatMax = &v
+		}
+		if o.PaymentMethod != "" {
+			method := o.PaymentMethod
+			live.PaymentMethod = &method
+		}
+		if o.OfferID != "" {
+			offerID := o.OfferID
+			live.OfferID = &offerID
+		}
+
 		if found {
-			tx.Exec("UPDATE offers SET last_seen = CURRENT_TIMESTAMP, price = ?, price_type = ? WHERE id = ?",
-				o.Price, o.PriceType, existingID)
+			_ = tx.QueryRow(`UPDATE offers SET
+				last_seen = CURRENT_TIMESTAMP,
+				price_type = ?,
+				price = ?,
+				fiat_min = ?,
+				fiat_max = ?,
+				payment_method = ?,
+				offer_id = COALESCE(offer_id, ?)
+				WHERE id = ?
+				RETURNING id,
+					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
+				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID), existingID,
+			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 			updated++
 		} else {
-			tx.Exec(`INSERT INTO offers
-				(exchange, direction, price, btc_min, btc_max,
-				 fiat_min, fiat_max, payment_method, offer_id, price_type)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				exchange, direction, o.Price, o.BTCMin, o.BTCMax,
-				o.FiatMin, o.FiatMax, o.PaymentMethod, nilIfEmpty(o.OfferID), o.PriceType)
+			_ = tx.QueryRow(`INSERT INTO offers
+				(exchange, fiat_currency, direction, btc_min, btc_max,
+				 fiat_min, fiat_max, payment_method, offer_id, price_type, price)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				RETURNING id,
+					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
+				exchange, fiat, direction, o.BTCMin, o.BTCMax,
+				o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
+			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 			inserted++
 		}
+		liveOffers = append(liveOffers, live)
 	}
 
 	tx.Commit()
 	fmt.Printf("[%s] %d new, %d updated (%s)\n", exchange, inserted, updated, direction)
+	return liveOffers
 }
 
-func writeSnapshotLog(sdb *sql.DB, exchangeData map[string]map[string]bool) {
+func writeSnapshotLog(sdb *dbutil.DB, exchangeData map[string]map[string]bool) {
 	exchanges := make(map[string]any)
 	total := 0
 	for ex, ids := range exchangeData {
@@ -498,7 +558,7 @@ func writeSnapshotLog(sdb *sql.DB, exchangeData map[string]map[string]bool) {
 		total += len(ids)
 	}
 	jsonBytes, _ := json.Marshal(exchanges)
-	sdb.Exec("INSERT INTO snapshot_log (exchanges, offers_count) VALUES (?, ?)", string(jsonBytes), total)
+	sdb.Exec("INSERT INTO snapshot_log (exchanges, offers_count) VALUES (?::jsonb, ?)", string(jsonBytes), total)
 }
 
 // --- Main ---
@@ -513,67 +573,27 @@ func main() {
 	}
 	fmt.Printf("Reference price: %d EUR\n", refPrice)
 
-	sdb, err := sql.Open("sqlite", snapshotDBPath)
+	sdb, err := dbutil.Open(databaseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
 		os.Exit(1)
 	}
 	defer sdb.Close()
 
-	// Migrate: add columns to existing databases
-	sdb.Exec("ALTER TABLE offers ADD COLUMN is_live BOOLEAN NOT NULL DEFAULT 0")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN duration INTEGER")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN historical_analysis_status TEXT")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_ref_price_10m REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_premium_10m_pct REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_trade_cost_pct_10m REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_trade_cost_btc_10m REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_net_premium_10m_pct REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_estimated_profit_btc_10m REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_estimated_profit_fiat_10m REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_btc_amount_10m REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN best_route_cex_10m TEXT")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN best_route_method_10m TEXT")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN price_type TEXT")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN cex_taker_fee_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN cex_withdraw_fee_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN network_fee_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN avg_hedge_fee_sum_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN hedge_open_fee_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN hedge_close_fee_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN hedge_funding_fee_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN hedge_fee_sum_btc REAL")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN hedge_venue TEXT")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN hedge_instrument TEXT")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN hedge_transfer_minutes INTEGER")
-	sdb.Exec("ALTER TABLE offers ADD COLUMN dex_fee_btc REAL")
-	sdb.Exec("ALTER TABLE order_lifecycle ADD COLUMN cex_taker_fee_btc REAL")
-	sdb.Exec("ALTER TABLE order_lifecycle ADD COLUMN cex_withdraw_fee_btc REAL")
-	sdb.Exec("ALTER TABLE order_lifecycle ADD COLUMN network_fee_btc REAL")
-	sdb.Exec("ALTER TABLE order_lifecycle ADD COLUMN dex_fee_btc REAL")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN hedge_open_fee_btc")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN hedge_close_fee_btc")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN hedge_funding_fee_btc")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN hedge_fee_btc")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN hedge_venue")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN hedge_instrument")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN hedge_transfer_minutes")
-	sdb.Exec("ALTER TABLE offers DROP COLUMN avg_cex_fee_btc")
-	sdb.Exec("ALTER TABLE offers DROP COLUMN avg_network_fee_btc")
-	sdb.Exec("ALTER TABLE order_lifecycle DROP COLUMN cex_fee_btc")
-	sdb.Exec(`CREATE TABLE IF NOT EXISTS kraken_ohlc (
-		time  DATETIME PRIMARY KEY,
-		open  REAL NOT NULL,
-		high  REAL NOT NULL,
-		low   REAL NOT NULL,
-		close REAL NOT NULL
-	)`)
+	if err := sdb.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to ping database: %v\n", err)
+		os.Exit(1)
+	}
+	if err := dbutil.EnsureUnifiedSchema(sdb); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize schema: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Fetch and store Kraken OHLC candles before settlement
 	fetchAndStoreKrakenOHLC(sdb)
 
 	// Record start time; used after the run to mark which offers were seen
-	snapshotStart := time.Now().UTC().Format("2006-01-02 15:04:05")
+	snapshotStart := time.Now().UTC()
 
 	type exchFetcher struct {
 		name string
@@ -586,6 +606,7 @@ func main() {
 	}
 
 	exchangeData := make(map[string]map[string]bool)
+	liveOffers := make([]livePayload, 0)
 
 	for _, direction := range []string{"sell", "buy"} {
 		fmt.Printf("\n--- Fetching %s offers ---\n", direction)
@@ -596,7 +617,7 @@ func main() {
 				if price == 0 {
 					price = float64(refPrice)
 				}
-				saveSnapshot(sdb, f.name, "EUR", direction, price, result.Offers)
+				liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, "EUR", direction, price, result.Offers)...)
 				if exchangeData[f.name] == nil {
 					exchangeData[f.name] = make(map[string]bool)
 				}
@@ -610,19 +631,19 @@ func main() {
 	}
 
 	// Update is_live and duration in one pass:
-	// - live offers: is_live=1, duration=NULL
-	// - closed offers: is_live=0, duration=seconds between first_seen and last_seen
+	// - live offers: is_live=true, duration=NULL
+	// - closed offers: is_live=false, duration=seconds between first_seen and last_seen
 	sdb.Exec(`UPDATE offers SET
 		is_live = (last_seen >= ?),
-		duration = CASE WHEN last_seen < ? THEN (strftime('%s', last_seen) - strftime('%s', first_seen)) ELSE NULL END`,
+		duration = CASE WHEN last_seen < ? THEN EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT ELSE NULL END`,
 		snapshotStart, snapshotStart)
 
 	// Explicitly close offers from any exchange that failed entirely this run
 	for _, f := range fetchers {
 		if _, ok := exchangeData[f.name]; !ok {
 			res, _ := sdb.Exec(`UPDATE offers SET
-				is_live = 0,
-				duration = (strftime('%s', last_seen) - strftime('%s', first_seen))
+				is_live = FALSE,
+				duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
 				WHERE exchange = ?`, f.name)
 			if n, _ := res.RowsAffected(); n > 0 {
 				fmt.Printf("[%s] Exchange offline — marked %d offers as closed\n", f.name, n)
@@ -630,19 +651,16 @@ func main() {
 		}
 	}
 
-	// Settle closed offers: compute avg_ref_price and price_diff_percent from historical OHLC
+	// Settle closed offers: compute avg_ref_price from historical OHLC
 	settleClosedOffers(sdb)
 	analyzeClosedOffers(sdb)
-
-	// Push recently analyzed closed offers to dexMonitor (best-effort)
-	pushClosedOffersToMonitor(sdb)
 
 	// Push live offers directly to the server's in-memory hub.
 	serverURL := os.Getenv("SERVER_INTERNAL_URL")
 	if serverURL == "" {
 		serverURL = "http://localhost:5010"
 	}
-	pushLiveOffersToServer(sdb, serverURL)
+	pushLiveOffersToServer(liveOffers, serverURL)
 
 	writeSnapshotLog(sdb, exchangeData)
 	total := 0
@@ -655,7 +673,7 @@ func main() {
 }
 
 // fetchAndStoreKrakenOHLC fetches 1-min Kraken OHLC candles and upserts them into kraken_ohlc.
-func fetchAndStoreKrakenOHLC(sdb *sql.DB) {
+func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
 	resp, err := clearnetClient().Get("https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval=1")
 	if err != nil {
 		fmt.Printf("[OHLC] fetch error: %v\n", err)
@@ -713,14 +731,15 @@ func fetchAndStoreKrakenOHLC(sdb *sql.DB) {
 	fmt.Printf("[OHLC] upserted %d candles\n", n)
 }
 
-// settleClosedOffers computes avg_ref_price and price_diff_percent for offers that
-// just closed and do not have a settled historical reference price yet.
-// over the offer's lifetime.
-func settleClosedOffers(sdb *sql.DB) {
+// settleClosedOffers computes avg_ref_price for offers that just closed and do
+// not have a settled historical reference price yet.
+func settleClosedOffers(sdb *dbutil.DB) {
 	rows, err := sdb.Query(`
-		SELECT id, direction, price, first_seen, last_seen
+		SELECT id,
+		       to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+		       to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 		FROM offers
-		WHERE is_live = 0 AND avg_ref_price IS NULL
+		WHERE is_live = FALSE AND avg_ref_price IS NULL
 	`)
 	if err != nil {
 		fmt.Printf("[Settle] query error: %v\n", err)
@@ -730,15 +749,13 @@ func settleClosedOffers(sdb *sql.DB) {
 
 	type toSettle struct {
 		id        int64
-		direction string
-		price     float64
 		firstSeen string
 		lastSeen  string
 	}
 	var batch []toSettle
 	for rows.Next() {
 		var o toSettle
-		if err := rows.Scan(&o.id, &o.direction, &o.price, &o.firstSeen, &o.lastSeen); err != nil {
+		if err := rows.Scan(&o.id, &o.firstSeen, &o.lastSeen); err != nil {
 			continue
 		}
 		batch = append(batch, o)
@@ -770,7 +787,7 @@ func settleClosedOffers(sdb *sql.DB) {
 		if avgClose == 0 {
 			sdb.QueryRow(`
 				SELECT close FROM kraken_ohlc
-				ORDER BY ABS(strftime('%s', time) - strftime('%s', ?))
+				ORDER BY ABS(EXTRACT(EPOCH FROM (time - ?::timestamptz)))
 				LIMIT 1
 			`, o.lastSeen).Scan(&avgClose)
 		}
@@ -779,12 +796,8 @@ func settleClosedOffers(sdb *sql.DB) {
 			continue
 		}
 
-		pct := math.Round((o.price/avgClose-1)*10000) / 100
-		if o.direction == "sell" {
-			pct = -pct
-		}
-		sdb.Exec(`UPDATE offers SET avg_ref_price = ?, price_diff_percent = ? WHERE id = ?`,
-			avgClose, pct, o.id)
+		sdb.Exec(`UPDATE offers SET avg_ref_price = ? WHERE id = ?`,
+			avgClose, o.id)
 		settled++
 	}
 	if settled > 0 {
@@ -792,76 +805,10 @@ func settleClosedOffers(sdb *sql.DB) {
 	}
 }
 
-// pushLiveOffersToServer queries all is_live=1 offers from the DB and POSTs
-// them to the server's /internal/live_offers endpoint so the hub can serve
-// them directly from memory without any DB reads.
-func pushLiveOffersToServer(sdb *sql.DB, serverURL string) {
-	type livePayload struct {
-		ID            int64    `json:"id"`
-		Exchange      string   `json:"exchange"`
-		Direction     string   `json:"direction"`
-		Price         float64  `json:"price"`
-		BTCMin        *float64 `json:"btc_min"`
-		BTCMax        *float64 `json:"btc_max"`
-		FiatMin       *int64   `json:"fiat_min"`
-		FiatMax       *int64   `json:"fiat_max"`
-		PaymentMethod *string  `json:"payment_method"`
-		OfferID       *string  `json:"offer_id"`
-		FirstSeen     string   `json:"first_seen"`
-		LastSeen      string   `json:"last_seen"`
-		PriceType     *string  `json:"price_type"`
-	}
-
-	rows, err := sdb.Query(`
-		SELECT id, exchange, direction, price, btc_min, btc_max,
-		       fiat_min, fiat_max, payment_method, offer_id, first_seen, last_seen, price_type
-		FROM offers WHERE is_live = 1
-	`)
-	if err != nil {
-		fmt.Printf("[LivePush] query error: %v\n", err)
-		return
-	}
-	defer rows.Close()
-
-	var offers []livePayload
-	for rows.Next() {
-		var o livePayload
-		var btcMin, btcMax sql.NullFloat64
-		var fiatMin, fiatMax sql.NullInt64
-		var paymentMethod, offerID, priceType sql.NullString
-		if err := rows.Scan(
-			&o.ID, &o.Exchange, &o.Direction, &o.Price,
-			&btcMin, &btcMax, &fiatMin, &fiatMax,
-			&paymentMethod, &offerID, &o.FirstSeen, &o.LastSeen, &priceType,
-		); err != nil {
-			fmt.Printf("[LivePush] scan error: %v\n", err)
-			continue
-		}
-		if btcMin.Valid {
-			o.BTCMin = &btcMin.Float64
-		}
-		if btcMax.Valid {
-			o.BTCMax = &btcMax.Float64
-		}
-		if fiatMin.Valid {
-			o.FiatMin = &fiatMin.Int64
-		}
-		if fiatMax.Valid {
-			o.FiatMax = &fiatMax.Int64
-		}
-		if paymentMethod.Valid {
-			o.PaymentMethod = &paymentMethod.String
-		}
-		if offerID.Valid {
-			o.OfferID = &offerID.String
-		}
-		if priceType.Valid {
-			o.PriceType = &priceType.String
-		}
-		offers = append(offers, o)
-	}
-	rows.Close()
-
+// pushLiveOffersToServer posts the freshly fetched live offers to the server's
+// /internal/live_offers endpoint so the hub can serve them from memory without
+// any DB reads.
+func pushLiveOffersToServer(offers []livePayload, serverURL string) {
 	body, err := json.Marshal(offers)
 	if err != nil {
 		fmt.Printf("[LivePush] marshal error: %v\n", err)
@@ -880,7 +827,7 @@ func pushLiveOffersToServer(sdb *sql.DB, serverURL string) {
 // fetchAndStoreKrakenOHLCSince fetches 1-min candles starting from sinceUnix
 // and upserts them into kraken_ohlc. Used to backfill history for offers whose
 // lifetime predates the standard OHLC cache window (~7.5 days).
-func fetchAndStoreKrakenOHLCSince(sdb *sql.DB, sinceUnix int64) {
+func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64) {
 	url := fmt.Sprintf("https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval=1&since=%d", sinceUnix)
 	resp, err := clearnetClient().Get(url)
 	if err != nil {
@@ -970,70 +917,4 @@ func nilIfEmpty(s string) any {
 		return nil
 	}
 	return s
-}
-
-// pushClosedOffersToMonitor queries recently analyzed closed offers and POSTs
-// their summaries to dexMonitor's /internal/closed_offers endpoint (best-effort).
-func pushClosedOffersToMonitor(sdb *sql.DB) {
-	rows, err := sdb.Query(`
-		SELECT id, exchange, direction, price, price_diff_percent,
-		       btc_min, btc_max, fiat_min, fiat_max,
-		       payment_method, offer_id, first_seen, last_seen,
-		       is_live, duration, historical_analysis_status,
-		       avg_ref_price, avg_premium_pct, avg_trade_cost_pct, avg_trade_cost_btc,
-		       cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc, dex_fee_btc,
-		       avg_net_premium_pct, avg_estimated_profit_btc, avg_estimated_profit_fiat,
-		       avg_btc_amount, price_type, best_route_cex, best_route_method,
-		       hedge_open_fee_btc, hedge_close_fee_btc, hedge_funding_fee_btc,
-		       hedge_fee_sum_btc, hedge_venue, hedge_instrument, hedge_transfer_minutes
-		FROM offers
-		WHERE is_live = 0
-		  AND historical_analysis_status IN ('analyzed', 'non_premium')
-		  AND last_seen >= datetime('now', '-10 minutes')
-	`)
-	if err != nil {
-		fmt.Printf("[MonitorPush] closed offers query error: %v\n", err)
-		return
-	}
-	defer rows.Close()
-
-	var offers []map[string]any
-	cols, _ := rows.Columns()
-	for rows.Next() {
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			continue
-		}
-		row := make(map[string]any, len(cols))
-		for i, col := range cols {
-			row[col] = values[i]
-		}
-		offers = append(offers, row)
-	}
-
-	if len(offers) == 0 {
-		return
-	}
-
-	body, err := json.Marshal(offers)
-	if err != nil {
-		fmt.Printf("[MonitorPush] closed offers marshal error: %v\n", err)
-		return
-	}
-	targetURL := strings.TrimRight(dexMonitorURL, "/") + "/internal/closed_offers"
-	resp, err := http.Post(targetURL, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		fmt.Printf("[MonitorPush] closed offers push error (non-fatal): %v\n", err)
-		return
-	}
-	resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		fmt.Printf("[MonitorPush] closed offers push returned %d\n", resp.StatusCode)
-	} else {
-		fmt.Printf("[MonitorPush] pushed %d closed offers to dexMonitor\n", len(offers))
-	}
 }

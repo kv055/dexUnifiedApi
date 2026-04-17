@@ -1,29 +1,26 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
+	"dexunifiedapi/internal/dbutil"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	gorillaws "github.com/gorilla/websocket"
-	_ "modernc.org/sqlite"
 )
 
 var (
-	dbPath              string
+	databaseURL         string
 	snapshotIntervalMin int
 	listenAddr          string
-	dexMonitorURL       string
-	db                  *sql.DB
+	db                  *dbutil.DB
 )
 
 var (
@@ -41,87 +38,24 @@ var supportedCEXes = []string{"kraken", "binance", "bitstamp", "coinbase"}
 var tradeCostEstimators map[string]*TradeCostEstimator
 var tradeRouteOptimizer *TradeRouteOptimizer
 
-// seedHubFromDB loads is_live=1 offers from the DB into the hub once at startup
-// so live data is available before the first snapshot push arrives.
 func seedHubFromDB() {
-	const maxAttempts = 10
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if !coreTablesReady() {
-			fmt.Printf("[Hub] core tables not ready yet (attempt %d/%d)\n", attempt, maxAttempts)
-			time.Sleep(3 * time.Second)
-			continue
-		}
-
-		rows, err := db.Query(`
-			SELECT id, exchange, direction, price, btc_min, btc_max,
-			       fiat_min, fiat_max, payment_method, offer_id, first_seen, last_seen, price_type
-			FROM offers WHERE is_live = 1
-		`)
-		if err != nil {
-			fmt.Printf("[Hub] seed error (attempt %d/%d): %v\n", attempt, maxAttempts, err)
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		defer rows.Close()
-
-		offers := make([]LiveOffer, 0)
-		for rows.Next() {
-			var o LiveOffer
-			var btcMin, btcMax sql.NullFloat64
-			var fiatMin, fiatMax sql.NullInt64
-			var paymentMethod, offerID, priceType sql.NullString
-			if err := rows.Scan(
-				&o.ID, &o.Exchange, &o.Direction, &o.Price,
-				&btcMin, &btcMax, &fiatMin, &fiatMax,
-				&paymentMethod, &offerID, &o.FirstSeen, &o.LastSeen, &priceType,
-			); err != nil {
-				continue
-			}
-			if btcMin.Valid {
-				o.BTCMin = &btcMin.Float64
-			}
-			if btcMax.Valid {
-				o.BTCMax = &btcMax.Float64
-			}
-			if fiatMin.Valid {
-				o.FiatMin = &fiatMin.Int64
-			}
-			if fiatMax.Valid {
-				o.FiatMax = &fiatMax.Int64
-			}
-			if paymentMethod.Valid {
-				o.PaymentMethod = &paymentMethod.String
-			}
-			if offerID.Valid {
-				o.OfferID = &offerID.String
-			}
-			if priceType.Valid {
-				o.PriceType = &priceType.String
-			}
-			offers = append(offers, o)
-		}
-		ids := make([]int64, len(offers))
-		for i, o := range offers {
-			ids[i] = o.ID
-		}
-		hub.setLifecycle(fetchOfferLifecycle(ids))
-		hub.setOffers(offers)
-		fmt.Printf("[Hub] seeded %d live offers from DB\n", len(offers))
-		return
-	}
-	fmt.Printf("[Hub] giving up seeding after %d attempts\n", maxAttempts)
+	// Live offers are now sourced from snapshot memory and pushed into the hub
+	// directly, so we intentionally avoid reconstructing them from persisted DB
+	// rows on startup.
+	hub.setOffers(nil)
+	fmt.Printf("[Hub] waiting for next snapshot push to seed live offers\n")
 }
 
 func coreTablesReady() bool {
-	var count int
+	var ready bool
 	if err := db.QueryRow(`
-		SELECT COUNT(*)
-		FROM sqlite_master
-		WHERE type = 'table' AND name IN ('offers', 'snapshot_log')
-	`).Scan(&count); err != nil {
+		SELECT
+			to_regclass('public.offers') IS NOT NULL
+			AND to_regclass('public.snapshot_log') IS NOT NULL
+	`).Scan(&ready); err != nil {
 		return false
 	}
-	return count == 2
+	return ready
 }
 
 func getCexPrice(cex string) float64 {
@@ -324,9 +258,9 @@ func runCoinbaseFeed(ctx context.Context, cex string) error {
 // --- Init & Main ---
 
 func init() {
-	dbPath = os.Getenv("DB_PATH")
-	if dbPath == "" {
-		dbPath = filepath.Join("db", "unified.db")
+	databaseURL = os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://postgres:postgres@localhost:5432/dexarb?sslmode=disable"
 	}
 	interval := os.Getenv("SNAPSHOT_INTERVAL_MIN")
 	if interval == "" {
@@ -345,19 +279,11 @@ func init() {
 		listenAddr = ":5010"
 	}
 
-	dexMonitorURL = os.Getenv("DEXMONITOR_INTERNAL_URL")
-	if dexMonitorURL == "" {
-		dexMonitorURL = "http://localhost:5000"
-	}
 }
 
 func main() {
 	var err error
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create database directory: %v\n", err)
-		os.Exit(1)
-	}
-	db, err = sql.Open("sqlite", dbPath)
+	db, err = dbutil.Open(databaseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
 		os.Exit(1)
@@ -367,7 +293,10 @@ func main() {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(2)
 
-	db.Exec("PRAGMA journal_mode=WAL")
+	if err := db.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to ping database: %v\n", err)
+		os.Exit(1)
+	}
 
 	tradeCostEstimators = make(map[string]*TradeCostEstimator, len(supportedCEXes))
 	for _, c := range supportedCEXes {
@@ -377,118 +306,10 @@ func main() {
 	}
 	tradeRouteOptimizer = NewTradeRouteOptimizer(tradeCostEstimators)
 
-	// Schema initialization (idempotent)
-	for _, stmt := range []string{
-		`CREATE TABLE IF NOT EXISTS snapshots (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-			exchange TEXT NOT NULL,
-			fiat_currency TEXT NOT NULL,
-			direction TEXT NOT NULL,
-			btc_price REAL NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS offers (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			exchange TEXT NOT NULL,
-			direction TEXT NOT NULL,
-			price REAL NOT NULL,
-			price_diff_percent REAL,
-			btc_min REAL,
-			btc_max REAL,
-			fiat_min INTEGER,
-			fiat_max INTEGER,
-			payment_method TEXT,
-			offer_id TEXT,
-			first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-			last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-			is_live BOOLEAN NOT NULL DEFAULT 0,
-			duration INTEGER,
-			historical_analysis_status TEXT,
-			avg_ref_price REAL,
-			avg_premium_pct REAL,
-			avg_trade_cost_pct REAL,
-			avg_trade_cost_btc REAL,
-			cex_taker_fee_btc REAL,
-			cex_withdraw_fee_btc REAL,
-			network_fee_btc REAL,
-			dex_fee_btc REAL,
-			avg_net_premium_pct REAL,
-			avg_estimated_profit_btc REAL,
-			avg_estimated_profit_fiat REAL,
-			avg_btc_amount REAL,
-			price_type TEXT,
-			best_route_cex TEXT,
-			best_route_method TEXT
-		)`,
-		`CREATE TABLE IF NOT EXISTS order_lifecycle (
-			id               INTEGER PRIMARY KEY AUTOINCREMENT,
-			offer_db_id      INTEGER NOT NULL,
-			snapshot_time    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			price            REAL    NOT NULL,
-			ref_price        REAL    NOT NULL,
-			premium_pct      REAL    NOT NULL,
-			trade_cost_pct   REAL,
-			trade_cost_btc   REAL,
-			cex_taker_fee_btc REAL,
-			cex_withdraw_fee_btc REAL,
-			network_fee_btc  REAL,
-			dex_fee_btc      REAL,
-			net_premium_pct  REAL,
-			net_premium_btc  REAL,
-			btc_amount       REAL
-		)`,
-		`CREATE TABLE IF NOT EXISTS snapshot_log (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-			exchanges TEXT NOT NULL,
-			offers_count INTEGER NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_snapshots_time ON snapshots(timestamp)`,
-		`CREATE INDEX IF NOT EXISTS idx_snapshots_exchange ON snapshots(exchange)`,
-		`CREATE INDEX IF NOT EXISTS idx_offers_exchange ON offers(exchange)`,
-		`CREATE INDEX IF NOT EXISTS idx_offers_direction ON offers(direction)`,
-		`CREATE INDEX IF NOT EXISTS idx_offers_last_seen ON offers(last_seen)`,
-		`CREATE INDEX IF NOT EXISTS idx_offers_fingerprint ON offers(exchange, direction, price, btc_min, btc_max, payment_method)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_offer_id ON offers(offer_id) WHERE offer_id IS NOT NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_lifecycle_offer ON order_lifecycle(offer_db_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_lifecycle_time  ON order_lifecycle(snapshot_time)`,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			fmt.Fprintf(os.Stderr, "schema init error: %v\n", err)
-		}
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		fmt.Fprintf(os.Stderr, "schema init error: %v\n", err)
+		os.Exit(1)
 	}
-
-	// Migrations (for databases created before schema versioning)
-	db.Exec("ALTER TABLE offers ADD COLUMN is_live BOOLEAN NOT NULL DEFAULT 0")
-	db.Exec("ALTER TABLE offers ADD COLUMN duration INTEGER")
-	db.Exec("ALTER TABLE offers ADD COLUMN historical_analysis_status TEXT")
-	db.Exec("ALTER TABLE offers ADD COLUMN price_type TEXT")
-	db.Exec("ALTER TABLE offers ADD COLUMN best_route_cex TEXT")
-	db.Exec("ALTER TABLE offers ADD COLUMN best_route_method TEXT")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_ref_price REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_premium_pct REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_trade_cost_pct REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_trade_cost_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_hedge_fee_sum_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN cex_taker_fee_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN cex_withdraw_fee_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN network_fee_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN hedge_open_fee_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN hedge_close_fee_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN hedge_funding_fee_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN hedge_fee_sum_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN hedge_venue TEXT")
-	db.Exec("ALTER TABLE offers ADD COLUMN hedge_instrument TEXT")
-	db.Exec("ALTER TABLE offers ADD COLUMN hedge_transfer_minutes INTEGER")
-	db.Exec("ALTER TABLE offers ADD COLUMN dex_fee_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_net_premium_pct REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_estimated_profit_btc REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_estimated_profit_fiat REAL")
-	db.Exec("ALTER TABLE offers ADD COLUMN avg_btc_amount REAL")
-	db.Exec("ALTER TABLE order_lifecycle ADD COLUMN cex_taker_fee_btc REAL")
-	db.Exec("ALTER TABLE order_lifecycle ADD COLUMN cex_withdraw_fee_btc REAL")
-	db.Exec("ALTER TABLE order_lifecycle ADD COLUMN network_fee_btc REAL")
-	db.Exec("ALTER TABLE order_lifecycle ADD COLUMN dex_fee_btc REAL")
 
 	// Seed hub from DB in the background
 	go seedHubFromDB()
@@ -568,7 +389,13 @@ func fetchOfferLifecycle(ids []int64) map[int64][]LifecyclePoint {
 		args[i] = id
 	}
 	rows, err := db.Query(fmt.Sprintf(
-		`SELECT offer_db_id, snapshot_time, price, net_premium_pct FROM order_lifecycle WHERE offer_db_id IN (%s) ORDER BY offer_db_id, snapshot_time`,
+		`SELECT offer_db_id,
+		        to_char(snapshot_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+		        price,
+		        net_premium_pct
+		   FROM order_lifecycle
+		  WHERE offer_db_id IN (%s)
+		  ORDER BY offer_db_id, snapshot_time`,
 		placeholders,
 	), args...)
 	if err != nil {
@@ -698,7 +525,7 @@ func nullIfZeroInt(v int) any {
 }
 
 // handleInternalLiveOffers receives the live offer list from the snapshot tool,
-// updates the hub, persists lifecycle locally, and pushes to dexMonitor.
+// updates the hub, and persists lifecycle to the DB.
 func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	var offers []LiveOffer
 	if err := json.NewDecoder(r.Body).Decode(&offers); err != nil {
@@ -714,7 +541,6 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	price := getCexPrice(defaultCEX)
 	outOffers := hub.computeOutOffers(price, liveSubscription{cex: defaultCEX})
 	go writeLifecycleEntries(outOffers)
-	go pushLifecycleToMonitor(outOffers)
 	fmt.Printf("[LiveHub] updated with %d live offers from snapshot\n", len(offers))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -768,100 +594,6 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"timestamp": time.Now().UTC().Format("2006-01-02T15:04:05"),
 	})
-}
-
-// --- Push to dexMonitor (best-effort) ---
-
-// lifecycleEntry is the JSON payload pushed to dexMonitor's /internal/lifecycle.
-type lifecycleEntry struct {
-	OfferDBID       int64    `json:"offer_db_id"`
-	Price           float64  `json:"price"`
-	RefPrice        float64  `json:"ref_price"`
-	PremiumPct      float64  `json:"premium_pct"`
-	TradeCostPct    *float64 `json:"trade_cost_pct,omitempty"`
-	TradeCostBTC    *float64 `json:"trade_cost_btc,omitempty"`
-	CexTakerFeeBTC  *float64 `json:"cex_taker_fee_btc,omitempty"`
-	CexWithdrawBTC  *float64 `json:"cex_withdraw_fee_btc,omitempty"`
-	NetworkFeeBTC   *float64 `json:"network_fee_btc,omitempty"`
-	DexFeeBTC       *float64 `json:"dex_fee_btc,omitempty"`
-	NetPremiumPct   *float64 `json:"net_premium_pct,omitempty"`
-	NetPremiumBTC   *float64 `json:"net_premium_btc,omitempty"`
-	BTCAmount       *float64 `json:"btc_amount,omitempty"`
-}
-
-func pushLifecycleToMonitor(offers []liveOutOffer) {
-	if len(offers) == 0 {
-		return
-	}
-	entries := make([]lifecycleEntry, 0, len(offers))
-	for _, o := range offers {
-		if o.RefPrice <= 0 {
-			continue
-		}
-		bd := o.CostBreakdown
-		e := lifecycleEntry{
-			OfferDBID:  o.ID,
-			Price:      round4(o.Price),
-			RefPrice:   round4(o.RefPrice),
-			PremiumPct: round4(o.PriceDiffPct),
-		}
-		totalCostPct := round4(bd.TotalCostPct)
-		e.TradeCostPct = &totalCostPct
-		totalCostBTC := round8(bd.TotalCostBTC)
-		e.TradeCostBTC = &totalCostBTC
-		cexTaker := round8(bd.CexTakerFeeBTC)
-		e.CexTakerFeeBTC = &cexTaker
-		if bd.TradeDirection != "ask" {
-			cexWithdraw := round8(bd.WithdrawalFeeBTC)
-			e.CexWithdrawBTC = &cexWithdraw
-		}
-		networkFee := round8(bd.NetworkFeeBTC)
-		e.NetworkFeeBTC = &networkFee
-		dexFee := round8(bd.DexFeeBTC)
-		e.DexFeeBTC = &dexFee
-		netPremPct := round4(o.NetPremiumPct)
-		e.NetPremiumPct = &netPremPct
-		profitBTC := round8(bd.EstimatedProfitBTC)
-		e.NetPremiumBTC = &profitBTC
-		btcAmt := round8(bd.BTCAmount)
-		e.BTCAmount = &btcAmt
-		entries = append(entries, e)
-	}
-
-	body, err := json.Marshal(entries)
-	if err != nil {
-		fmt.Printf("[MonitorPush] lifecycle marshal error: %v\n", err)
-		return
-	}
-	url := strings.TrimRight(dexMonitorURL, "/") + "/internal/lifecycle"
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		fmt.Printf("[MonitorPush] lifecycle push error: %v\n", err)
-		return
-	}
-	resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		fmt.Printf("[MonitorPush] lifecycle push returned %d\n", resp.StatusCode)
-	}
-}
-
-// pushClosedOffersToMonitor sends closed offer summaries to dexMonitor (best-effort).
-func pushClosedOffersToMonitor(payload any) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		fmt.Printf("[MonitorPush] closed offers marshal error: %v\n", err)
-		return
-	}
-	url := strings.TrimRight(dexMonitorURL, "/") + "/internal/closed_offers"
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		fmt.Printf("[MonitorPush] closed offers push error: %v\n", err)
-		return
-	}
-	resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		fmt.Printf("[MonitorPush] closed offers push returned %d\n", resp.StatusCode)
-	}
 }
 
 // --- Query helpers ---

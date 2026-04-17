@@ -6,26 +6,20 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY bisq_grpc/go/ ./bisq_grpc/go/
 COPY cmd/snapshot/ ./cmd/snapshot/
+COPY internal/ ./internal/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o snapshot ./cmd/snapshot
 
 # Stage 2: Minimal runtime
 FROM alpine:3.21
 
-RUN apk add --no-cache curl sqlite su-exec
+RUN apk add --no-cache curl
 
 WORKDIR /app
 
 COPY --from=builder /build/snapshot ./
-COPY db/schema.sql ./
 
-RUN mkdir -p /app/data && adduser -D appuser && chown -R appuser:appuser /app
+RUN adduser -D appuser && chown -R appuser:appuser /app
 
-USER root
+USER appuser
 
-CMD ["sh", "-c", \
-    "chown -R appuser:appuser /app/data && \
-     mkdir -p \"$(dirname \"$DB_PATH\")\" && \
-     if ! sqlite3 \"$DB_PATH\" \"SELECT 1 FROM sqlite_master WHERE type='table' AND name='offers';\" | grep -q 1; then \
-       sqlite3 \"$DB_PATH\" < /app/schema.sql; \
-     fi && \
-     exec su-exec appuser sh -c 'while true; do /app/snapshot; sleep $((SNAPSHOT_INTERVAL_MIN * 60)); done'"]
+CMD ["sh", "-c", "while true; do /app/snapshot; sleep $((SNAPSHOT_INTERVAL_MIN * 60)); done"]

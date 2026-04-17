@@ -17,7 +17,7 @@ WORKDIR /app
 
 COPY --from=builder /build/server ./
 
-RUN mkdir -p /app/data && adduser -D appuser && chown -R appuser:appuser /app
+RUN adduser -D appuser && chown -R appuser:appuser /app
 
 USER appuser
 

@@ -20,6 +20,7 @@ var upgrader = websocket.Upgrader{
 type LiveOffer struct {
 	ID            int64    `json:"id"`
 	Exchange      string   `json:"exchange"`
+	FiatCurrency  string   `json:"fiat_currency"`
 	Direction     string   `json:"direction"`
 	Price         float64  `json:"price"`
 	BTCMin        *float64 `json:"btc_min"`
@@ -42,29 +43,30 @@ type LifecyclePoint struct {
 
 // liveOutOffer is the shape sent to clients — includes computed premium fields.
 type liveOutOffer struct {
-	ID            int64            `json:"id"`
-	Exchange      string           `json:"exchange"`
-	Direction     string           `json:"direction"`
-	Price         float64          `json:"price"`
-	PriceDiffPct  float64          `json:"price_diff_percent"`
-	RefPrice      float64          `json:"ref_price"`
-	TradeCostPct  float64          `json:"trade_cost_percent"`  // estimated CEX→DEX arbitrage cost as % of trade value
-	NetPremiumPct float64          `json:"net_premium_percent"` // PriceDiffPct minus TradeCostPct
-	CostBreakdown       CostBreakdown  `json:"cost_breakdown"`               // per-component cost detail (full size)
-	CostBreakdownCapped *CostBreakdown `json:"cost_breakdown_capped,omitempty"` // capped to max fiat limit (only set when limit < offer size)
-	TradeCostPctCapped  *float64       `json:"trade_cost_percent_capped,omitempty"`
-	NetPremiumPctCapped *float64       `json:"net_premium_percent_capped,omitempty"`
-	BTCMin        *float64         `json:"btc_min"`
-	BTCMax        *float64         `json:"btc_max"`
-	FiatMin       *int64           `json:"fiat_min"`
-	FiatMax       *int64           `json:"fiat_max"`
-	PaymentMethod *string          `json:"payment_method"`
-	OfferID       *string          `json:"offer_id"`
-	FirstSeen     string           `json:"first_seen"`
-	LastSeen      string           `json:"last_seen"`
-	IsLive        bool             `json:"is_live"`
-	PriceType     *string          `json:"price_type"`
-	Lifecycle     []LifecyclePoint `json:"lifecycle,omitempty"`
+	ID                  int64            `json:"id"`
+	Exchange            string           `json:"exchange"`
+	FiatCurrency        string           `json:"fiat_currency"`
+	Direction           string           `json:"direction"`
+	Price               float64          `json:"price"`
+	PriceDiffPct        float64          `json:"price_diff_percent"`
+	RefPrice            float64          `json:"ref_price"`
+	TradeCostPct        float64          `json:"trade_cost_percent"`              // estimated CEX→DEX arbitrage cost as % of trade value
+	NetPremiumPct       float64          `json:"net_premium_percent"`             // PriceDiffPct minus TradeCostPct
+	CostBreakdown       CostBreakdown    `json:"cost_breakdown"`                  // per-component cost detail (full size)
+	CostBreakdownCapped *CostBreakdown   `json:"cost_breakdown_capped,omitempty"` // capped to max fiat limit (only set when limit < offer size)
+	TradeCostPctCapped  *float64         `json:"trade_cost_percent_capped,omitempty"`
+	NetPremiumPctCapped *float64         `json:"net_premium_percent_capped,omitempty"`
+	BTCMin              *float64         `json:"btc_min"`
+	BTCMax              *float64         `json:"btc_max"`
+	FiatMin             *int64           `json:"fiat_min"`
+	FiatMax             *int64           `json:"fiat_max"`
+	PaymentMethod       *string          `json:"payment_method"`
+	OfferID             *string          `json:"offer_id"`
+	FirstSeen           string           `json:"first_seen"`
+	LastSeen            string           `json:"last_seen"`
+	IsLive              bool             `json:"is_live"`
+	PriceType           *string          `json:"price_type"`
+	Lifecycle           []LifecyclePoint `json:"lifecycle,omitempty"`
 }
 
 func computePriceDiffPct(offerPrice, refPrice float64) float64 {
@@ -282,6 +284,7 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		result = append(result, liveOutOffer{
 			ID:                  o.ID,
 			Exchange:            o.Exchange,
+			FiatCurrency:        o.FiatCurrency,
 			Direction:           o.Direction,
 			Price:               o.Price,
 			PriceDiffPct:        pct,
@@ -293,16 +296,16 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			TradeCostPctCapped:  tcCapped,
 			NetPremiumPctCapped: npCapped,
 			BTCMin:              o.BTCMin,
-			BTCMax:        o.BTCMax,
-			FiatMin:       o.FiatMin,
-			FiatMax:       o.FiatMax,
-			PaymentMethod: o.PaymentMethod,
-			OfferID:       o.OfferID,
-			FirstSeen:     o.FirstSeen,
-			LastSeen:      o.LastSeen,
-			IsLive:        true,
-			PriceType:     o.PriceType,
-			Lifecycle:     lc[o.ID],
+			BTCMax:              o.BTCMax,
+			FiatMin:             o.FiatMin,
+			FiatMax:             o.FiatMax,
+			PaymentMethod:       o.PaymentMethod,
+			OfferID:             o.OfferID,
+			FirstSeen:           o.FirstSeen,
+			LastSeen:            o.LastSeen,
+			IsLive:              true,
+			PriceType:           o.PriceType,
+			Lifecycle:           lc[o.ID],
 		})
 	}
 	return result

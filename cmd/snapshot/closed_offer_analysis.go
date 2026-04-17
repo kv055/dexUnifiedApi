@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"dexunifiedapi/internal/dbutil"
 	"fmt"
 	"math"
 )
@@ -19,11 +20,13 @@ type closedOfferRecord struct {
 	lastSeen  string
 }
 
-func analyzeClosedOffers(sdb *sql.DB) {
+func analyzeClosedOffers(sdb *dbutil.DB) {
 	rows, err := sdb.Query(`
-		SELECT id, exchange, direction, price, btc_min, btc_max, first_seen, last_seen
+		SELECT id, exchange, direction, price, btc_min, btc_max,
+		       to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+		       to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 		FROM offers
-		WHERE is_live = 0
+		WHERE is_live = FALSE
 		  AND historical_analysis_status IS NULL
 	`)
 	if err != nil {
@@ -63,7 +66,7 @@ func analyzeClosedOffers(sdb *sql.DB) {
 	}
 }
 
-func analyzeSingleClosedOffer(sdb *sql.DB, offer closedOfferRecord) (string, bool) {
+func analyzeSingleClosedOffer(sdb *dbutil.DB, offer closedOfferRecord) (string, bool) {
 	// Single query: overall aggregates + profitable-only conditional aggregates.
 	// AVG(CASE WHEN net_premium_pct > 0 THEN col END) returns NULL when no row matches,
 	// which maps cleanly to sql.NullFloat64.
