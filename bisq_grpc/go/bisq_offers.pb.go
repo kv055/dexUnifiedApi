@@ -414,7 +414,7 @@ const file_bisq_offers_proto_rawDesc = "" +
 	"\x13is_my_pending_offer\x18\x1a \x01(\bR\x10isMyPendingOffer\x12)\n" +
 	"\x11is_bsq_swap_offer\x18\x1b \x01(\bR\x0eisBsqSwapOffer2c\n" +
 	"\x06Offers\x12Y\n" +
-	"\tGetOffers\x12%.io.bisq.protobuffer.GetOffersRequest\x1a#.io.bisq.protobuffer.GetOffersReply\"\x00B\"Z dexunifiedapi/bisq_grpc/go;bisqgrpcb\x06proto3"
+	"\tGetOffers\x12%.io.bisq.protobuffer.GetOffersRequest\x1a#.io.bisq.protobuffer.GetOffersReply\"\x00B\"Z dexmonitor/bisq_grpc/go;bisqgrpcb\x06proto3"
 
 var (
 	file_bisq_offers_proto_rawDescOnce sync.Once
