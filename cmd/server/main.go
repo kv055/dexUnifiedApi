@@ -18,11 +18,12 @@ import (
 )
 
 var (
-	adminDatabaseURL    string
-	databaseURL         string
-	snapshotIntervalMin int
-	listenAddr          string
-	db                  *dbutil.DB
+	adminDatabaseURL          string
+	databaseURL               string
+	snapshotIntervalMin       int
+	listenAddr                string
+	paymentNotificationSecret string
+	db                        *dbutil.DB
 )
 
 var (
@@ -261,6 +262,11 @@ func runCoinbaseFeed(ctx context.Context, cex string) error {
 
 func init() {
 	if err := config.LoadRequiredDotEnv(".env"); err != nil {
+		if runningUnderGoTest() {
+			listenAddr = ":5010"
+			paymentNotificationSecret = strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATIONS_SHARED_SECRET"))
+			return
+		}
 		panic(err)
 	}
 	config.RequireEnvSet(
@@ -287,7 +293,12 @@ func init() {
 	if listenAddr == "" {
 		listenAddr = ":5010"
 	}
+	paymentNotificationSecret = strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATIONS_SHARED_SECRET"))
 
+}
+
+func runningUnderGoTest() bool {
+	return strings.HasSuffix(os.Args[0], ".test") || strings.HasSuffix(os.Args[0], ".test.exe")
 }
 
 func main() {
@@ -355,12 +366,14 @@ func main() {
 
 	// API — live offers only
 	mux.HandleFunc("GET /api/live_offers", handleLiveOffersREST)
+	mux.HandleFunc("GET /api/payment_notifications", handlePaymentNotifications)
 	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)
 	mux.HandleFunc("GET /api/trade_cost_config", handleTradeCostConfig)
 	mux.HandleFunc("GET /health", handleHealth)
 
 	// Internal: snapshot tool pushes live offer data after each run
 	mux.HandleFunc("POST /internal/live_offers", handleInternalLiveOffers)
+	mux.HandleFunc("POST /internal/payment_notifications", handleInternalPaymentNotifications)
 
 	handler := corsMiddleware(mux)
 
