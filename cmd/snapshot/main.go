@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"dexunifiedapi/internal/config"
 	"dexunifiedapi/internal/dbutil"
 	"encoding/json"
 	"fmt"
@@ -22,12 +23,13 @@ import (
 )
 
 var (
-	databaseURL     string
-	bisqGRPCHost    string
-	bisqAPIPassword string
-	priceProvider   string
-	torProxy        string
-	robosatsOnions  = []string{
+	adminDatabaseURL string
+	databaseURL      string
+	bisqGRPCHost     string
+	bisqAPIPassword  string
+	priceProvider    string
+	torProxy         string
+	robosatsOnions   = []string{
 		"http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion",
 		"http://mmhaqzuirth5rx7gl24d4773lknltjhik57k7ahec5iefktezv4b3uid.onion",
 		"http://4t4jxmivv6uqej6xzx2jx3fxh75gtt65v3szjoqmc4ugdlhipzdat6yd.onion",
@@ -36,10 +38,17 @@ var (
 )
 
 func init() {
-	databaseURL = os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		databaseURL = "postgres://postgres:postgres@localhost:5432/dexarb?sslmode=disable"
+	if err := config.LoadRequiredDotEnv(".env"); err != nil {
+		panic(err)
 	}
+	config.RequireEnvSet(
+		"POSTGRES_UNIFIED_API_PASSWORD",
+		"POSTGRES_MONITOR_PASSWORD",
+		"POSTGRES_MM_CONTROLLER_PASSWORD",
+		"POSTGRES_FIAT_CONTROLLER_PASSWORD",
+	)
+	adminDatabaseURL = config.PostgresAdminURLFromEnv()
+	databaseURL = config.PostgresURLFromEnv()
 	bisqGRPCHost = os.Getenv("BISQ_GRPC_HOST")
 	if bisqGRPCHost == "" {
 		bisqGRPCHost = "localhost:9998"
@@ -572,6 +581,28 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("Reference price: %d EUR\n", refPrice)
+
+	adminDB, err := dbutil.Open(adminDatabaseURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open admin database: %v\n", err)
+		os.Exit(1)
+	}
+	defer adminDB.Close()
+
+	if err := adminDB.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to ping admin database: %v\n", err)
+		os.Exit(1)
+	}
+	if err := dbutil.EnsureAppRoles(adminDB, dbutil.RoleBootstrapConfig{
+		DatabaseName:           config.EnvOrDefault("POSTGRES_DB", "dexarb"),
+		UnifiedAPIPassword:     config.RequireEnv("POSTGRES_UNIFIED_API_PASSWORD"),
+		MonitorPassword:        config.RequireEnv("POSTGRES_MONITOR_PASSWORD"),
+		MMControllerPassword:   config.RequireEnv("POSTGRES_MM_CONTROLLER_PASSWORD"),
+		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "database admin setup error: %v\n", err)
+		os.Exit(1)
+	}
 
 	sdb, err := dbutil.Open(databaseURL)
 	if err != nil {

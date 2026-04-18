@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"dexunifiedapi/internal/config"
 	"dexunifiedapi/internal/dbutil"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 )
 
 var (
+	adminDatabaseURL    string
 	databaseURL         string
 	snapshotIntervalMin int
 	listenAddr          string
@@ -258,10 +260,17 @@ func runCoinbaseFeed(ctx context.Context, cex string) error {
 // --- Init & Main ---
 
 func init() {
-	databaseURL = os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		databaseURL = "postgres://postgres:postgres@localhost:5432/dexarb?sslmode=disable"
+	if err := config.LoadRequiredDotEnv(".env"); err != nil {
+		panic(err)
 	}
+	config.RequireEnvSet(
+		"POSTGRES_UNIFIED_API_PASSWORD",
+		"POSTGRES_MONITOR_PASSWORD",
+		"POSTGRES_MM_CONTROLLER_PASSWORD",
+		"POSTGRES_FIAT_CONTROLLER_PASSWORD",
+	)
+	adminDatabaseURL = config.PostgresAdminURLFromEnv()
+	databaseURL = config.PostgresURLFromEnv()
 	interval := os.Getenv("SNAPSHOT_INTERVAL_MIN")
 	if interval == "" {
 		snapshotIntervalMin = 1
@@ -282,7 +291,29 @@ func init() {
 }
 
 func main() {
-	var err error
+	adminDB, err := dbutil.Open(adminDatabaseURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open admin database: %v\n", err)
+		os.Exit(1)
+	}
+	defer adminDB.Close()
+
+	if err := adminDB.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to ping admin database: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := dbutil.EnsureAppRoles(adminDB, dbutil.RoleBootstrapConfig{
+		DatabaseName:           config.EnvOrDefault("POSTGRES_DB", "dexarb"),
+		UnifiedAPIPassword:     config.RequireEnv("POSTGRES_UNIFIED_API_PASSWORD"),
+		MonitorPassword:        config.RequireEnv("POSTGRES_MONITOR_PASSWORD"),
+		MMControllerPassword:   config.RequireEnv("POSTGRES_MM_CONTROLLER_PASSWORD"),
+		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "database admin setup error: %v\n", err)
+		os.Exit(1)
+	}
+
 	db, err = dbutil.Open(databaseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
