@@ -1,0 +1,50 @@
+# dexUnifiedApi — Internal Routes
+# These routes are intended for trusted local services only.
+
+### Push live orders into the in-memory hub
+# Returns: HTTP 204 No Content on success.
+POST http://localhost:5010/internal/live_offers
+Content-Type: application/json
+
+[
+  {
+    "id": 1,
+    "exchange": "bisq",
+    "fiat_currency": "EUR",
+    "direction": "buy",
+    "price": 92500.00,
+    "btc_min": 0.01,
+    "btc_max": 0.50,
+    "fiat_min": 925,
+    "fiat_max": 46250,
+    "payment_method": "SEPA",
+    "offer_id": "abc123-example",
+    "first_seen": "2026-04-18T10:00:00Z",
+    "last_seen": "2026-04-18T10:15:00Z",
+    "price_type": "fixed"
+  }
+]
+
+###
+
+### Push payment notification
+# Optional auth:
+#   X-Webhook-Secret: <PAYMENT_NOTIFICATIONS_SHARED_SECRET>
+# Returns: HTTP 202 Accepted with { accepted, id, received_at }.
+POST http://localhost:5010/internal/payment_notifications
+Content-Type: application/json
+
+{
+  "amount": 1500.00,
+  "currency": "EUR",
+  "type": "incoming",
+  "transaction_id": "bank-tx-2026-04-18-001",
+  "dex": "bisq",
+  "connector": "sparkasse",
+  "transfer_message": "Order settlement",
+  "metadata": {
+    "account_holder": "Alice Example",
+    "reference": "ORDER-123"
+  },
+  "timestamp": "2026-04-18T10:30:00Z"
+}

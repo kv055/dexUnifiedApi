@@ -1,0 +1,72 @@
+# dexUnifiedApi — Live Order Routes
+# Suggested local base URL: http://localhost:5010
+
+### Live Orders (REST) — default
+# Returns the current live offer array in the new nested schema.
+# Main response sections:
+#   status
+#   pricing
+#   volume_limits
+#   btc_network_fee
+#   analysis.full_volume
+#   analysis.capped_volume (only when max_fiat_limit caps the trade size)
+GET http://localhost:5010/api/live_offers
+
+###
+
+### Live Orders (REST) — custom pricing inputs
+# Query params:
+#   cex=kraken|binance|bitstamp|coinbase
+#   confirmations=0..6
+#   fee_tier=economic|standard|fast|express
+#   exclude_cexes=comma,separated,list
+#   coupled_hedge=true|false
+#   max_fiat_limit=<EUR amount>
+# Notes:
+#   pricing.raw_premium_percent = raw premium
+#   analysis.full_volume.premium.net_percent = net premium on full offer volume
+#   analysis.capped_volume.premium.net_percent = net premium on capped volume
+GET http://localhost:5010/api/live_offers?cex=coinbase&confirmations=2&fee_tier=fast&exclude_cexes=coinbase,bitstamp&coupled_hedge=true&max_fiat_limit=500
+
+###
+
+### Live Orders (REST) — raw premium reference example
+# Useful when comparing frontend "Raw Premium" mode against the API payload.
+GET http://localhost:5010/api/live_offers?cex=coinbase
+
+###
+
+### Live Orders (REST) — net premium full-volume example
+# Check:
+#   analysis.full_volume.premium.net_percent
+#   analysis.full_volume.profit
+GET http://localhost:5010/api/live_offers?cex=coinbase&confirmations=2&fee_tier=fast&exclude_cexes=coinbase,bitstamp&coupled_hedge=true
+
+###
+
+### Live Orders (REST) — net premium capped-volume example
+# Check:
+#   analysis.capped_volume.cap_fiat
+#   analysis.capped_volume.premium.net_percent
+#   analysis.capped_volume.profit
+GET http://localhost:5010/api/live_offers?cex=coinbase&confirmations=2&fee_tier=fast&exclude_cexes=coinbase,bitstamp&coupled_hedge=true&max_fiat_limit=500
+
+###
+
+### Live Offer Lifecycle (REST)
+# Path param:
+#   id=<live offer DB id>
+# Returns the separate lifecycle series for one live-offer record.
+GET http://localhost:5010/api/live_offers/207/lifecycle
+
+###
+
+### Trade Cost Config
+# Returns available CEXes and fee tiers for the live-order filters.
+GET http://localhost:5010/api/trade_cost_config
+
+###
+
+### Payment Notifications — recent accepted events
+# Default limit is 50.
+GET http://localhost:5010/api/payment_notifications?limit=20

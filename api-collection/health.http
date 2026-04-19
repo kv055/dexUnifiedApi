@@ -1,0 +1,5 @@
+# dexUnifiedApi — Health Check
+
+### Health
+# Returns { "status": "ok" | "starting", "timestamp": "<ISO 8601>" }
+GET http://localhost:5010/health

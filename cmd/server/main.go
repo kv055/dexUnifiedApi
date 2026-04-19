@@ -366,6 +366,7 @@ func main() {
 
 	// API — live offers only
 	mux.HandleFunc("GET /api/live_offers", handleLiveOffersREST)
+	mux.HandleFunc("GET /api/live_offers/{id}/lifecycle", handleLiveOfferLifecycleREST)
 	mux.HandleFunc("GET /api/payment_notifications", handlePaymentNotifications)
 	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)
 	mux.HandleFunc("GET /api/trade_cost_config", handleTradeCostConfig)

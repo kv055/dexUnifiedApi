@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,32 +42,271 @@ type LifecyclePoint struct {
 	NetPremiumPct *float64 `json:"net_premium_pct,omitempty"`
 }
 
+type liveOfferStatus struct {
+	IsLive    bool   `json:"is_live"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+}
+
+type liveOfferPricing struct {
+	PriceType         string  `json:"price_type"`
+	FiatCurrency      string  `json:"fiat_currency"`
+	OfferPrice        float64 `json:"offer_price"`
+	RefPrice          float64 `json:"ref_price"`
+	RawPremiumPercent float64 `json:"raw_premium_percent"`
+}
+
+type liveOfferVolumeLimits struct {
+	BTCMin  *float64 `json:"btc_min"`
+	BTCMax  *float64 `json:"btc_max"`
+	FiatMin *int64   `json:"fiat_min"`
+	FiatMax *int64   `json:"fiat_max"`
+}
+
+type liveOfferBTCNetworkFee struct {
+	BTC                     float64              `json:"btc"`
+	Method                  string               `json:"method"`
+	Tier                    string               `json:"tier"`
+	Confidence              float64              `json:"confidence"`
+	NumTxs                  int                  `json:"num_txs"`
+	RequiredConfirmations   int                  `json:"required_confirmations"`
+	EstimatedArrivalMinutes int                  `json:"estimated_arrival_minutes"`
+	Detail                  *BTCNetworkFeeDetail `json:"detail,omitempty"`
+}
+
+type liveOfferRoute struct {
+	CEX        string `json:"cex"`
+	Settlement string `json:"settlement"`
+}
+
+type liveOfferPremium struct {
+	TradeCostPercent float64 `json:"trade_cost_percent"`
+	NetPercent       float64 `json:"net_percent"`
+}
+
+type liveOfferProfit struct {
+	BTC  float64 `json:"btc"`
+	Fiat float64 `json:"fiat"`
+}
+
+type liveOfferCostComponent struct {
+	Pct float64 `json:"pct"`
+	BTC float64 `json:"btc"`
+}
+
+type liveOfferNetworkCost struct {
+	Pct float64 `json:"pct"`
+}
+
+type liveOfferHedgeCost struct {
+	Pct             float64              `json:"pct"`
+	BTC             float64              `json:"btc"`
+	Venue           string               `json:"venue"`
+	Instrument      string               `json:"instrument"`
+	TransferMinutes int                  `json:"transfer_minutes"`
+	Position        *HedgePositionDetail `json:"position,omitempty"`
+}
+
+type liveOfferScenarioCosts struct {
+	CexTaker   liveOfferCostComponent `json:"cex_taker"`
+	Withdrawal liveOfferCostComponent `json:"withdrawal"`
+	DexFee     liveOfferCostComponent `json:"dex_fee"`
+	Network    liveOfferNetworkCost   `json:"network"`
+	Hedge      liveOfferHedgeCost     `json:"hedge"`
+	Total      liveOfferCostComponent `json:"total"`
+}
+
+type liveOfferScenario struct {
+	CapFiat       *float64               `json:"cap_fiat,omitempty"`
+	TradeSizeBTC  float64                `json:"trade_size_btc"`
+	TradeSizeFiat float64                `json:"trade_size_fiat"`
+	Route         liveOfferRoute         `json:"route"`
+	Premium       liveOfferPremium       `json:"premium"`
+	Profit        liveOfferProfit        `json:"profit"`
+	Costs         liveOfferScenarioCosts `json:"costs"`
+}
+
+type liveOfferAnalysis struct {
+	FullVolume   liveOfferScenario  `json:"full_volume"`
+	CappedVolume *liveOfferScenario `json:"capped_volume,omitempty"`
+}
+
+type liveOfferAPI struct {
+	ID            int64                  `json:"id"`
+	Exchange      string                 `json:"exchange"`
+	OfferID       string                 `json:"offer_id"`
+	PaymentMethod string                 `json:"payment_method"`
+	Direction     string                 `json:"direction"`
+	Status        liveOfferStatus        `json:"status"`
+	Pricing       liveOfferPricing       `json:"pricing"`
+	VolumeLimits  liveOfferVolumeLimits  `json:"volume_limits"`
+	BTCNetworkFee liveOfferBTCNetworkFee `json:"btc_network_fee"`
+	Analysis      liveOfferAnalysis      `json:"analysis"`
+}
+
 // liveOutOffer is the shape sent to clients — includes computed premium fields.
 type liveOutOffer struct {
-	ID                  int64            `json:"id"`
-	Exchange            string           `json:"exchange"`
-	FiatCurrency        string           `json:"fiat_currency"`
-	Direction           string           `json:"direction"`
-	Price               float64          `json:"price"`
-	PriceDiffPct        float64          `json:"price_diff_percent"`
-	RefPrice            float64          `json:"ref_price"`
-	TradeCostPct        float64          `json:"trade_cost_percent"`              // estimated CEX→DEX arbitrage cost as % of trade value
-	NetPremiumPct       float64          `json:"net_premium_percent"`             // PriceDiffPct minus TradeCostPct
-	CostBreakdown       CostBreakdown    `json:"cost_breakdown"`                  // per-component cost detail (full size)
-	CostBreakdownCapped *CostBreakdown   `json:"cost_breakdown_capped,omitempty"` // capped to max fiat limit (only set when limit < offer size)
-	TradeCostPctCapped  *float64         `json:"trade_cost_percent_capped,omitempty"`
-	NetPremiumPctCapped *float64         `json:"net_premium_percent_capped,omitempty"`
-	BTCMin              *float64         `json:"btc_min"`
-	BTCMax              *float64         `json:"btc_max"`
-	FiatMin             *int64           `json:"fiat_min"`
-	FiatMax             *int64           `json:"fiat_max"`
-	PaymentMethod       *string          `json:"payment_method"`
-	OfferID             *string          `json:"offer_id"`
-	FirstSeen           string           `json:"first_seen"`
-	LastSeen            string           `json:"last_seen"`
-	IsLive              bool             `json:"is_live"`
-	PriceType           *string          `json:"price_type"`
-	Lifecycle           []LifecyclePoint `json:"lifecycle,omitempty"`
+	ID                        int64            `json:"id"`
+	Exchange                  string           `json:"exchange"`
+	FiatCurrency              string           `json:"fiat_currency"`
+	Direction                 string           `json:"direction"`
+	Price                     float64          `json:"price"`
+	RawPremiumPct             float64          `json:"raw_premium_percent"` // explicit alias for PriceDiffPct
+	PriceDiffPct              float64          `json:"price_diff_percent"`
+	RefPrice                  float64          `json:"ref_price"`
+	TradeCostPct              float64          `json:"trade_cost_percent"`              // estimated CEX→DEX arbitrage cost as % of trade value
+	NetPremiumPct             float64          `json:"net_premium_percent"`             // PriceDiffPct minus TradeCostPct
+	EstimatedProfitBTC        float64          `json:"estimated_profit_btc"`            // estimated BTC profit for the offer's full trade size
+	EstimatedProfitFiat       float64          `json:"estimated_profit_fiat"`           // estimated fiat profit for the offer's full trade size
+	CostBreakdown             CostBreakdown    `json:"cost_breakdown"`                  // per-component cost detail (full size)
+	CostBreakdownCapped       *CostBreakdown   `json:"cost_breakdown_capped,omitempty"` // capped to max fiat limit (only set when limit < offer size)
+	TradeCostPctCapped        *float64         `json:"trade_cost_percent_capped,omitempty"`
+	NetPremiumPctCapped       *float64         `json:"net_premium_percent_capped,omitempty"`
+	EstimatedProfitBTCCapped  *float64         `json:"estimated_profit_btc_capped,omitempty"`  // estimated BTC profit at the max fiat cap
+	EstimatedProfitFiatCapped *float64         `json:"estimated_profit_fiat_capped,omitempty"` // estimated fiat profit at the max fiat cap
+	BTCMin                    *float64         `json:"btc_min"`
+	BTCMax                    *float64         `json:"btc_max"`
+	FiatMin                   *int64           `json:"fiat_min"`
+	FiatMax                   *int64           `json:"fiat_max"`
+	PaymentMethod             *string          `json:"payment_method"`
+	OfferID                   *string          `json:"offer_id"`
+	FirstSeen                 string           `json:"first_seen"`
+	LastSeen                  string           `json:"last_seen"`
+	IsLive                    bool             `json:"is_live"`
+	PriceType                 *string          `json:"price_type"`
+	Lifecycle                 []LifecyclePoint `json:"lifecycle,omitempty"`
+}
+
+func normalizePriceType(priceType *string) string {
+	if priceType == nil {
+		return "unknown"
+	}
+	switch strings.ToLower(strings.TrimSpace(*priceType)) {
+	case "fixed":
+		return "fixed"
+	case "floating":
+		return "floating"
+	default:
+		return "unknown"
+	}
+}
+
+func derefStringOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func buildScenarioFromBreakdown(bd CostBreakdown, refPrice float64, capFiat *float64, tradeCostPct float64, netPremiumPct float64) liveOfferScenario {
+	return liveOfferScenario{
+		CapFiat:       capFiat,
+		TradeSizeBTC:  bd.BTCAmount,
+		TradeSizeFiat: round2(bd.BTCAmount * refPrice),
+		Route: liveOfferRoute{
+			CEX:        bd.RouteCEX,
+			Settlement: bd.RouteMethod,
+		},
+		Premium: liveOfferPremium{
+			TradeCostPercent: tradeCostPct,
+			NetPercent:       netPremiumPct,
+		},
+		Profit: liveOfferProfit{
+			BTC:  bd.EstimatedProfitBTC,
+			Fiat: round2(bd.EstimatedProfitBTC * refPrice),
+		},
+		Costs: liveOfferScenarioCosts{
+			CexTaker: liveOfferCostComponent{
+				Pct: bd.CexTakerFeePct,
+				BTC: bd.CexTakerFeeBTC,
+			},
+			Withdrawal: liveOfferCostComponent{
+				Pct: bd.WithdrawalFeePct,
+				BTC: bd.WithdrawalFeeBTC,
+			},
+			DexFee: liveOfferCostComponent{
+				Pct: bd.DexFeePct,
+				BTC: bd.DexFeeBTC,
+			},
+			Network: liveOfferNetworkCost{
+				Pct: bd.NetworkFeePct,
+			},
+			Hedge: liveOfferHedgeCost{
+				Pct:             bd.Hedge.FeeSumPct,
+				BTC:             bd.Hedge.FeeSumBTC,
+				Venue:           bd.Hedge.Venue,
+				Instrument:      bd.Hedge.Instrument,
+				TransferMinutes: bd.Hedge.TransferMinutes,
+				Position:        bd.Hedge.Position,
+			},
+			Total: liveOfferCostComponent{
+				Pct: bd.TotalCostPct,
+				BTC: bd.TotalCostBTC,
+			},
+		},
+	}
+}
+
+func buildBTCLiveNetworkFee(bd CostBreakdown, requiredConfirmations int) liveOfferBTCNetworkFee {
+	etaMinutes := 0
+	if bd.NetworkFeeDetail != nil {
+		etaMinutes = bd.NetworkFeeDetail.SelectedFullConfirmationMinutes
+		if bd.NetworkFeeDetail.RequiredConfirmations > 0 {
+			requiredConfirmations = bd.NetworkFeeDetail.RequiredConfirmations
+		}
+	}
+	return liveOfferBTCNetworkFee{
+		BTC:                     bd.NetworkFeeBTC,
+		Method:                  bd.NetworkFeeMethod,
+		Tier:                    bd.NetworkFeeTier,
+		Confidence:              bd.NetworkFeeConfidence,
+		NumTxs:                  bd.NumNetworkTxs,
+		RequiredConfirmations:   requiredConfirmations,
+		EstimatedArrivalMinutes: etaMinutes,
+		Detail:                  bd.NetworkFeeDetail,
+	}
+}
+
+func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
+	requiredConfirmations := resolveRequiredConfirmations(o.Direction, sub.requiredConfirmations)
+	api := liveOfferAPI{
+		ID:            o.ID,
+		Exchange:      o.Exchange,
+		OfferID:       derefStringOrEmpty(o.OfferID),
+		PaymentMethod: derefStringOrEmpty(o.PaymentMethod),
+		Direction:     o.Direction,
+		Status: liveOfferStatus{
+			IsLive:    o.IsLive,
+			FirstSeen: o.FirstSeen,
+			LastSeen:  o.LastSeen,
+		},
+		Pricing: liveOfferPricing{
+			PriceType:         normalizePriceType(o.PriceType),
+			FiatCurrency:      o.FiatCurrency,
+			OfferPrice:        o.Price,
+			RefPrice:          o.RefPrice,
+			RawPremiumPercent: o.RawPremiumPct,
+		},
+		VolumeLimits: liveOfferVolumeLimits{
+			BTCMin:  o.BTCMin,
+			BTCMax:  o.BTCMax,
+			FiatMin: o.FiatMin,
+			FiatMax: o.FiatMax,
+		},
+		BTCNetworkFee: buildBTCLiveNetworkFee(o.CostBreakdown, requiredConfirmations),
+		Analysis: liveOfferAnalysis{
+			FullVolume: buildScenarioFromBreakdown(o.CostBreakdown, o.RefPrice, nil, o.TradeCostPct, o.NetPremiumPct),
+		},
+	}
+	if o.CostBreakdownCapped != nil && o.TradeCostPctCapped != nil && o.NetPremiumPctCapped != nil {
+		capFiat := round2(o.CostBreakdownCapped.BTCAmount * o.RefPrice)
+		api.Analysis.CappedVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownCapped, o.RefPrice, &capFiat, *o.TradeCostPctCapped, *o.NetPremiumPctCapped))
+	}
+	return api
+}
+
+func ptrScenario(s liveOfferScenario) *liveOfferScenario {
+	return &s
 }
 
 func computePriceDiffPct(offerPrice, refPrice float64) float64 {
@@ -271,6 +511,7 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		// breakdown capped to that fiat amount so the frontend can show both side by side.
 		var bdCapped *CostBreakdown
 		var tcCapped, npCapped *float64
+		var profitBTCCapped, profitFiatCapped *float64
 		if sub.maxFiatLimitEUR > 0 && price > 0 {
 			btcCap := sub.maxFiatLimitEUR / price
 			if btcSize > btcCap {
@@ -278,34 +519,43 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 				bdCapped = &bd2
 				tcCapped = &tc2
 				npCapped = &np2
+				profitBTC := bd2.EstimatedProfitBTC
+				profitFiat := round2(profitBTC * price)
+				profitBTCCapped = &profitBTC
+				profitFiatCapped = &profitFiat
 			}
 		}
 
 		result = append(result, liveOutOffer{
-			ID:                  o.ID,
-			Exchange:            o.Exchange,
-			FiatCurrency:        o.FiatCurrency,
-			Direction:           o.Direction,
-			Price:               o.Price,
-			PriceDiffPct:        pct,
-			RefPrice:            price,
-			TradeCostPct:        tradeCostPct,
-			NetPremiumPct:       netPremium,
-			CostBreakdown:       bd,
-			CostBreakdownCapped: bdCapped,
-			TradeCostPctCapped:  tcCapped,
-			NetPremiumPctCapped: npCapped,
-			BTCMin:              o.BTCMin,
-			BTCMax:              o.BTCMax,
-			FiatMin:             o.FiatMin,
-			FiatMax:             o.FiatMax,
-			PaymentMethod:       o.PaymentMethod,
-			OfferID:             o.OfferID,
-			FirstSeen:           o.FirstSeen,
-			LastSeen:            o.LastSeen,
-			IsLive:              true,
-			PriceType:           o.PriceType,
-			Lifecycle:           lc[o.ID],
+			ID:                        o.ID,
+			Exchange:                  o.Exchange,
+			FiatCurrency:              o.FiatCurrency,
+			Direction:                 o.Direction,
+			Price:                     o.Price,
+			RawPremiumPct:             pct,
+			PriceDiffPct:              pct,
+			RefPrice:                  price,
+			TradeCostPct:              tradeCostPct,
+			NetPremiumPct:             netPremium,
+			EstimatedProfitBTC:        bd.EstimatedProfitBTC,
+			EstimatedProfitFiat:       round2(bd.EstimatedProfitBTC * price),
+			CostBreakdown:             bd,
+			CostBreakdownCapped:       bdCapped,
+			TradeCostPctCapped:        tcCapped,
+			NetPremiumPctCapped:       npCapped,
+			EstimatedProfitBTCCapped:  profitBTCCapped,
+			EstimatedProfitFiatCapped: profitFiatCapped,
+			BTCMin:                    o.BTCMin,
+			BTCMax:                    o.BTCMax,
+			FiatMin:                   o.FiatMin,
+			FiatMax:                   o.FiatMax,
+			PaymentMethod:             o.PaymentMethod,
+			OfferID:                   o.OfferID,
+			FirstSeen:                 o.FirstSeen,
+			LastSeen:                  o.LastSeen,
+			IsLive:                    true,
+			PriceType:                 o.PriceType,
+			Lifecycle:                 lc[o.ID],
 		})
 	}
 	return result
@@ -314,13 +564,43 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 // computePayload builds the JSON payload for a given subscription config.
 // Returns nil on marshal error.
 func (h *LiveHub) computePayload(price float64, sub liveSubscription) []byte {
-	result := h.computeOutOffers(price, sub)
+	internal := h.computeOutOffers(price, sub)
+	result := make([]liveOfferAPI, 0, len(internal))
+	for _, offer := range internal {
+		result = append(result, buildLiveOfferAPI(offer, sub))
+	}
 	data, err := json.Marshal(result)
 	if err != nil {
 		fmt.Printf("[LiveHub] marshal error: %v\n", err)
 		return nil
 	}
 	return data
+}
+
+func handleLiveOfferLifecycleREST(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid offer id", http.StatusBadRequest)
+		return
+	}
+
+	hub.offersMu.RLock()
+	if pts, ok := hub.lifecycle[id]; ok {
+		hub.offersMu.RUnlock()
+		if pts == nil {
+			pts = []LifecyclePoint{}
+		}
+		writeJSON(w, pts)
+		return
+	}
+	hub.offersMu.RUnlock()
+
+	lifecycle := fetchOfferLifecycle([]int64{id})
+	pts := lifecycle[id]
+	if pts == nil {
+		pts = []LifecyclePoint{}
+	}
+	writeJSON(w, pts)
 }
 
 // handleLiveOffersWS is the WebSocket handler. It sends the current state

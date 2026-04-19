@@ -256,7 +256,7 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var offers []liveOutOffer
+	var offers []liveOfferAPI
 	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -265,12 +265,141 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	}
 
 	offer := offers[0]
-	assertFloat(t, offer.PriceDiffPct, 2.5)
-	assertFloat(t, offer.TradeCostPct, 0.6)
-	assertFloat(t, offer.NetPremiumPct, 1.9)
-	assertFloat(t, offer.CostBreakdown.BTCAmount, 0.1)
-	assertFloat(t, offer.CostBreakdown.TotalCostPct, 0.6)
-	assertFloat(t, offer.CostBreakdown.TotalCostBTC, 0.0006)
-	assertFloat(t, offer.CostBreakdown.EstimatedProfitBTC, 0.0019)
+	assertFloat(t, offer.Pricing.RawPremiumPercent, 2.5)
+	assertFloat(t, offer.Pricing.OfferPrice, 102.5)
+	assertFloat(t, offer.Pricing.RefPrice, 100)
+	if offer.Pricing.PriceType != "unknown" {
+		t.Fatalf("price type = %q, want unknown", offer.Pricing.PriceType)
+	}
+	assertFloat(t, offer.BTCNetworkFee.BTC, 0.0001)
+	assertFloat(t, offer.BTCNetworkFee.Confidence, 0.875)
+	if offer.BTCNetworkFee.Method != "onchain" {
+		t.Fatalf("network fee method = %q, want onchain", offer.BTCNetworkFee.Method)
+	}
+	if offer.BTCNetworkFee.RequiredConfirmations != 2 {
+		t.Fatalf("required confirmations = %d, want 2", offer.BTCNetworkFee.RequiredConfirmations)
+	}
+	if offer.BTCNetworkFee.EstimatedArrivalMinutes != 30 {
+		t.Fatalf("estimated arrival minutes = %d, want 30", offer.BTCNetworkFee.EstimatedArrivalMinutes)
+	}
+	if offer.BTCNetworkFee.Detail == nil {
+		t.Fatal("expected btc_network_fee.detail")
+	}
+	assertFloat(t, offer.Analysis.FullVolume.TradeSizeBTC, 0.1)
+	assertFloat(t, offer.Analysis.FullVolume.TradeSizeFiat, 10)
+	assertFloat(t, offer.Analysis.FullVolume.Premium.TradeCostPercent, 0.6)
+	assertFloat(t, offer.Analysis.FullVolume.Premium.NetPercent, 1.9)
+	assertFloat(t, offer.Analysis.FullVolume.Profit.BTC, 0.0019)
+	assertFloat(t, offer.Analysis.FullVolume.Profit.Fiat, 0.19)
+	assertFloat(t, offer.Analysis.FullVolume.Costs.CexTaker.BTC, 0.00025)
+	assertFloat(t, offer.Analysis.FullVolume.Costs.Withdrawal.BTC, 0.00015)
+	assertFloat(t, offer.Analysis.FullVolume.Costs.Network.Pct, 0.1)
+	assertFloat(t, offer.Analysis.FullVolume.Costs.Total.BTC, 0.0006)
 }
 
+func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	oldHubOffers := hub.getOffers()
+	oldKrakenPrice := getCexPrice("kraken")
+	defer func() {
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+		setCexPrice("kraken", oldKrakenPrice)
+		hub.setOffers(oldHubOffers)
+	}()
+
+	setCexPrice("kraken", 100)
+
+	est := fixedCostEstimator("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.02
+	btcMax := 0.1
+	hub.setOffers([]LiveOffer{{
+		ID:        1,
+		Exchange:  "bisq",
+		Direction: "buy",
+		Price:     102.5,
+		BTCMin:    &btcMin,
+		BTCMax:    &btcMax,
+		FirstSeen: "2026-04-01 12:00:00",
+		LastSeen:  "2026-04-01 12:00:00",
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken&max_fiat_limit=5", nil)
+	rec := httptest.NewRecorder()
+
+	handleLiveOffersREST(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var offers []liveOfferAPI
+	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offer count = %d, want 1", len(offers))
+	}
+
+	offer := offers[0]
+	if offer.Analysis.CappedVolume == nil {
+		t.Fatal("expected capped cost breakdown")
+	}
+	assertFloat(t, offer.BTCNetworkFee.BTC, 0.0001)
+	if offer.Analysis.CappedVolume.CapFiat == nil {
+		t.Fatal("expected capped volume cap_fiat")
+	}
+	assertFloat(t, *offer.Analysis.CappedVolume.CapFiat, 5)
+	assertFloat(t, offer.Analysis.CappedVolume.TradeSizeBTC, 0.05)
+	assertFloat(t, offer.Analysis.CappedVolume.TradeSizeFiat, 5)
+	assertFloat(t, offer.Analysis.CappedVolume.Premium.TradeCostPercent, 0.85)
+	assertFloat(t, offer.Analysis.CappedVolume.Premium.NetPercent, 1.65)
+	assertFloat(t, offer.Analysis.CappedVolume.Profit.BTC, 0.000825)
+	assertFloat(t, offer.Analysis.CappedVolume.Profit.Fiat, 0.08)
+	assertFloat(t, offer.Analysis.CappedVolume.Costs.Network.Pct, 0.2)
+}
+
+func TestHandleLiveOfferLifecycleRESTReturnsLifecyclePoints(t *testing.T) {
+	oldLifecycle := hub.lifecycle
+	defer func() {
+		hub.lifecycle = oldLifecycle
+	}()
+
+	value := 1.23
+	hub.lifecycle = map[int64][]LifecyclePoint{
+		7: {
+			{Time: "2026-04-19 10:00:00", Price: 101.5, NetPremiumPct: &value},
+		},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/live_offers/{id}/lifecycle", handleLiveOfferLifecycleREST)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers/7/lifecycle", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var points []LifecyclePoint
+	if err := json.Unmarshal(rec.Body.Bytes(), &points); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("point count = %d, want 1", len(points))
+	}
+	if points[0].Time != "2026-04-19 10:00:00" {
+		t.Fatalf("time = %q, want %q", points[0].Time, "2026-04-19 10:00:00")
+	}
+	assertFloat(t, points[0].Price, 101.5)
+	if points[0].NetPremiumPct == nil {
+		t.Fatal("expected net premium pct")
+	}
+	assertFloat(t, *points[0].NetPremiumPct, 1.23)
+}

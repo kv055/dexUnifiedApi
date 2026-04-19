@@ -1,0 +1,15 @@
+# dexUnifiedApi — Live Order WebSocket
+# REST Client does not support WebSocket requests directly.
+
+# --- websocat ---
+#   websocat ws://127.0.0.1:5010/ws/live_offers
+#
+# Example with query params:
+#   websocat "ws://127.0.0.1:5010/ws/live_offers?cex=kraken&fee_tier=standard&confirmations=1&exclude_cexes=binance&max_fiat_limit=1000"
+
+# --- Hoppscotch ---
+# Realtime -> WebSocket
+#   ws://127.0.0.1:5010/ws/live_offers
+
+# --- wscat ---
+#   wscat -c ws://127.0.0.1:5010/ws/live_offers
