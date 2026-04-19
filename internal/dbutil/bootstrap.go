@@ -54,6 +54,7 @@ func EnsureAppRoles(admin *DB, cfg RoleBootstrapConfig) error {
 		`REVOKE CREATE ON SCHEMA public FROM PUBLIC`,
 		fmt.Sprintf(`GRANT CONNECT ON DATABASE "%s" TO %s`, cfg.DatabaseName, roleList),
 		fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, roleList),
+		fmt.Sprintf(`GRANT CREATE ON SCHEMA public TO %s`, roleUnifiedAPI),
 		fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s`, roleList),
 		fmt.Sprintf(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s`, roleList),
 		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`,
