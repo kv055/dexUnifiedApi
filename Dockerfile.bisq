@@ -19,6 +19,19 @@ RUN mkdir -p /opt/bisq && \
 
 FROM eclipse-temurin:11-jre-jammy AS java-runtime
 
+FROM eclipse-temurin:11-jdk-jammy AS bisq-seed-helper-build
+
+ARG BISQ_VERSION=1.9.22
+
+COPY bisqseed/ExtractBisqSeed.java /src/ExtractBisqSeed.java
+COPY --from=bisq-downloader /opt/bisq /opt/bisq
+
+RUN mkdir -p /build && \
+    javac \
+      -cp "/opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar:/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib/*" \
+      -d /build \
+      /src/ExtractBisqSeed.java
+
 FROM debian:bookworm-slim
 
 ARG BISQ_VERSION=1.9.22
@@ -34,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1 \
     libfreetype6 \
     libgcc-s1 \
+    postgresql-client \
     procps \
     libstdc++6 \
     zlib1g \
@@ -41,10 +55,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=java-runtime /opt/java/openjdk /opt/java/openjdk
 COPY --from=bisq-downloader /opt/bisq /opt/bisq
+COPY --from=bisq-seed-helper-build /build /opt/bisq/bisq-seed-helper
+COPY bisqseed/bisq-startup.sh /usr/local/bin/bisq-startup.sh
 
 RUN useradd -m -s /bin/sh appuser && \
     mkdir -p /home/appuser/.local/share/Bisq && \
-    chown -R appuser:appuser /home/appuser/.local
+    chown -R appuser:appuser /home/appuser/.local && \
+    chmod 0755 /usr/local/bin/bisq-startup.sh
 
 EXPOSE 9998 9999
 
@@ -52,40 +69,4 @@ HEALTHCHECK --interval=30s --timeout=15s --start-period=300s --retries=3 \
     CMD java -jar /opt/bisq/bisq-cli-${BISQ_VERSION}/cli.jar --port 9998 --password= getversion > /dev/null 2>&1 || exit 1
 
 WORKDIR /opt/bisq/bisq-daemon-${BISQ_VERSION}
-ENTRYPOINT ["/bin/sh", "-c", "\
-  APP_DIR=/home/appuser/.local/share/Bisq; \
-  mkdir -p \"$APP_DIR\"; \
-  chown -R appuser:appuser \"$APP_DIR\"; \
-  DB=$APP_DIR/btc_mainnet/db; \
-  if [ -d \"$DB\" ]; then \
-    echo '[startup] Purging re-syncable P2P data...'; \
-    rm -f \"$DB\"/TradeStatistics3Store_* \"$DB\"/AccountAgeWitnessStore_* \
-          \"$DB/SignedWitnessStore\" \"$DB/AccountAgeWitnessStore\" \
-          \"$DB/TradeStatistics3Store\" \"$DB/SequenceNumberMap\" \
-          \"$DB/BlindVoteStore\" \
-          \"$DB/ProposalStore\" \"$DB/TempProposalStore\" \
-          \"$DB/BallotList\" \"$DB/BurningManAccountingStore_v3\" \
-          \"$DB/RemovedPayloadsMap\" \"$DB/IgnoredMailboxMap\" \
-          \"$DB/MailboxMessageList\"; \
-    rm -rf $DB/backup/backups_TradeStatistics3Store* \
-          $DB/backup/backups_AccountAgeWitnessStore* \
-          $DB/backup/backups_SignedWitnessStore* \
-          $DB/backup/backups_SequenceNumberMap* \
-          $DB/backup/backups_BlindVoteStore* \
-          $DB/backup/backups_ProposalStore* \
-          $DB/backup/backups_BallotList* \
-          $DB/backup/backups_MailboxMessageList* \
-          $DB/backup/backups_IgnoredMailboxMap*; \
-    echo \"[startup] Done. DB size: $(du -sh $DB | cut -f1)\"; \
-  fi; \
-  exec su -s /bin/sh appuser -c 'exec java \
-    -Xmx2g \
-    -XX:MaxMetaspaceSize=256m \
-    -XX:ReservedCodeCacheSize=128m \
-    -XX:MaxDirectMemorySize=128m \
-    -XX:+UseG1GC \
-    -jar daemon.jar \
-    --apiPort=9998 \
-    --apiPassword= \
-    --appDataDir=/home/appuser/.local/share/Bisq \
-    --nodePort=9999'"]
+ENTRYPOINT ["/usr/local/bin/bisq-startup.sh"]
