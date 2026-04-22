@@ -48,11 +48,11 @@ public final class ExtractBisqSeed {
         String mnemonic = String.join(" ", mnemonicWords).trim();
 
         long creationTimeSeconds = seed.getCreationTimeSeconds();
-        System.out.println(mnemonic);
+        System.out.println("BISQ_SEED_MNEMONIC=" + mnemonic);
         if (creationTimeSeconds > 0) {
-            System.out.println(java.time.Instant.ofEpochSecond(creationTimeSeconds));
+            System.out.println("BISQ_SEED_CREATED_AT=" + java.time.Instant.ofEpochSecond(creationTimeSeconds));
         } else {
-            System.out.println();
+            System.out.println("BISQ_SEED_CREATED_AT=");
         }
     }
 

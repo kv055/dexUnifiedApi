@@ -23,6 +23,9 @@ var (
 	snapshotIntervalMin       int
 	listenAddr                string
 	paymentNotificationSecret string
+	bisqGRPCHost              string
+	bisqAPIPassword           string
+	accountHealthInterval     time.Duration
 	db                        *dbutil.DB
 )
 
@@ -265,6 +268,8 @@ func init() {
 		if runningUnderGoTest() {
 			listenAddr = ":5010"
 			paymentNotificationSecret = strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATIONS_SHARED_SECRET"))
+			bisqGRPCHost = "localhost:9998"
+			accountHealthInterval = time.Minute
 			return
 		}
 		panic(err)
@@ -294,6 +299,12 @@ func init() {
 		listenAddr = ":5010"
 	}
 	paymentNotificationSecret = strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATIONS_SHARED_SECRET"))
+	bisqGRPCHost = strings.TrimSpace(os.Getenv("BISQ_GRPC_HOST"))
+	if bisqGRPCHost == "" {
+		bisqGRPCHost = "localhost:9998"
+	}
+	bisqAPIPassword = os.Getenv("BISQ_API_PASSWORD")
+	accountHealthInterval = parseAccountHealthInterval(os.Getenv("ACCOUNT_HEALTH_INTERVAL"))
 
 }
 
@@ -353,11 +364,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runPeriodicAccountHealthCheck(
+		ctx,
+		accountHealthInterval,
+		accountHealthDB{db: db},
+		bisqAccountProvider,
+		func(ctx context.Context) error {
+			return checkBisqAccountHealth(ctx, bisqGRPCAccountChecker{
+				host:     bisqGRPCHost,
+				password: bisqAPIPassword,
+			})
+		},
+	)
+
 	// Seed hub from DB in the background
 	go seedHubFromDB()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	for _, c := range supportedCEXes {
 		go runCexPriceFeed(ctx, c)
 	}
