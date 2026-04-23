@@ -1,0 +1,23 @@
+# Stage 1: Build Go binary
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/pgbackup/ ./cmd/pgbackup/
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o pgbackup ./cmd/pgbackup
+
+# Stage 2: Backup runtime with PostgreSQL client tools and rclone
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates postgresql-client rclone
+
+WORKDIR /app
+
+COPY --from=builder /build/pgbackup ./
+
+RUN adduser -D appuser && mkdir -p /backups && chown -R appuser:appuser /app /backups
+
+USER appuser
+
+CMD ["sh", "-ec", "interval=\"${PG_BACKUP_INTERVAL:-6h}\"; while true; do if [ \"${PG_BACKUP_ENABLED:-true}\" = \"false\" ]; then echo \"pgbackup disabled by PG_BACKUP_ENABLED=false\"; sleep \"$interval\"; elif /app/pgbackup; then sleep \"$interval\"; else status=$?; echo \"pgbackup failed with status $status; sleeping $interval before exit\" >&2; sleep \"$interval\"; exit \"$status\"; fi; done"]
