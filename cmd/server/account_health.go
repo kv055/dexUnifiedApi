@@ -8,7 +8,7 @@ import (
 	"log"
 	"time"
 
-	"dexunifiedapi/internal/dbutil"
+	"dexunifiedapi/db"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

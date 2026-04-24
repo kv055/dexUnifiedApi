@@ -2,12 +2,17 @@ package main
 
 import (
 	"database/sql"
-	"dexunifiedapi/internal/dbutil"
 	"fmt"
 	"math"
 )
 
 const deleteBelowPremiumPct = -3.0
+
+type closedOfferDB interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
 
 type closedOfferRecord struct {
 	id        int64
@@ -20,14 +25,19 @@ type closedOfferRecord struct {
 	lastSeen  string
 }
 
-func analyzeClosedOffers(sdb *dbutil.DB) {
+func analyzeClosedOffers(sdb closedOfferDB) {
+	resetIgnoredClosedOffersWithLifecycle(sdb)
+
 	rows, err := sdb.Query(`
 		SELECT id, exchange, direction, price, btc_min, btc_max,
 		       to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 		       to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 		FROM offers
 		WHERE is_live = FALSE
-		  AND historical_analysis_status IS NULL
+		  AND (
+			historical_analysis_status IS NULL
+			OR historical_analysis_status = 'ignored_no_lifecycle'
+		  )
 	`)
 	if err != nil {
 		fmt.Printf("[ClosedAnalysis] query error: %v\n", err)
@@ -47,6 +57,7 @@ func analyzeClosedOffers(sdb *dbutil.DB) {
 	analyzed := 0
 	deleted := 0
 	ignored := 0
+	errors := 0
 
 	for _, offer := range batch {
 		status, removed := analyzeSingleClosedOffer(sdb, offer)
@@ -55,6 +66,8 @@ func analyzeClosedOffers(sdb *dbutil.DB) {
 			analyzed++
 		case "ignored_no_lifecycle":
 			ignored++
+		case "analysis_error":
+			errors++
 		}
 		if removed {
 			deleted++
@@ -62,21 +75,41 @@ func analyzeClosedOffers(sdb *dbutil.DB) {
 	}
 
 	if len(batch) > 0 {
-		fmt.Printf("[ClosedAnalysis] processed=%d analyzed=%d ignored=%d deleted=%d\n", len(batch), analyzed, ignored, deleted)
+		fmt.Printf("[ClosedAnalysis] processed=%d analyzed=%d ignored=%d errors=%d deleted=%d\n", len(batch), analyzed, ignored, errors, deleted)
 	}
 }
 
-func analyzeSingleClosedOffer(sdb *dbutil.DB, offer closedOfferRecord) (string, bool) {
+func resetIgnoredClosedOffersWithLifecycle(sdb closedOfferDB) {
+	res, err := sdb.Exec(`
+		UPDATE offers
+		SET historical_analysis_status = NULL
+		WHERE historical_analysis_status = 'ignored_no_lifecycle'
+		  AND EXISTS (
+			SELECT 1
+			FROM order_lifecycle
+			WHERE order_lifecycle.offer_db_id = offers.id
+		  )
+	`)
+	if err != nil {
+		fmt.Printf("[ClosedAnalysis] stale ignored recovery error: %v\n", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		fmt.Printf("[ClosedAnalysis] reset %d ignored_no_lifecycle offers with lifecycle rows\n", n)
+	}
+}
+
+func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (string, bool) {
 	// Single query: overall aggregates + profitable-only conditional aggregates.
 	// AVG(CASE WHEN net_premium_pct > 0 THEN col END) returns NULL when no row matches,
 	// which maps cleanly to sql.NullFloat64.
 	var totalCount, profitableCount int
 	var overallAvgPremium sql.NullFloat64 // all entries — used for delete threshold
 	var avgRefPrice sql.NullFloat64       // all entries — market reference
+	var avgBTCAmount sql.NullFloat64      // all entries — stored for non-premium entries too
 	var profAvgPremium sql.NullFloat64    // profitable entries only
 	var profAvgTradeCostPct sql.NullFloat64
 	var profAvgTradeCostBTC sql.NullFloat64
-	var profAvgHedgeFeeSumBTC sql.NullFloat64
 	var profAvgNetPremiumPct sql.NullFloat64
 	var profAvgNetPremiumBTC sql.NullFloat64
 	var profAvgBTCAmount sql.NullFloat64
@@ -86,11 +119,11 @@ func analyzeSingleClosedOffer(sdb *dbutil.DB, offer closedOfferRecord) (string, 
 			COUNT(*),
 			AVG(ref_price),
 			AVG(premium_pct),
+			AVG(btc_amount),
 			COUNT(CASE WHEN net_premium_pct > 0 THEN 1 END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN premium_pct    END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN trade_cost_pct END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN trade_cost_btc END),
-			AVG(CASE WHEN net_premium_pct > 0 THEN hedge_fee_sum_btc END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN net_premium_pct END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN net_premium_btc END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN btc_amount     END)
@@ -100,16 +133,20 @@ func analyzeSingleClosedOffer(sdb *dbutil.DB, offer closedOfferRecord) (string, 
 		&totalCount,
 		&avgRefPrice,
 		&overallAvgPremium,
+		&avgBTCAmount,
 		&profitableCount,
 		&profAvgPremium,
 		&profAvgTradeCostPct,
 		&profAvgTradeCostBTC,
-		&profAvgHedgeFeeSumBTC,
 		&profAvgNetPremiumPct,
 		&profAvgNetPremiumBTC,
 		&profAvgBTCAmount,
 	)
-	if err != nil || totalCount == 0 || !avgRefPrice.Valid {
+	if err != nil {
+		fmt.Printf("[ClosedAnalysis] aggregate query error for offer %d: %v\n", offer.id, err)
+		return "analysis_error", false
+	}
+	if totalCount == 0 || !avgRefPrice.Valid {
 		_, _ = sdb.Exec(`UPDATE offers SET historical_analysis_status = ? WHERE id = ?`, "ignored_no_lifecycle", offer.id)
 		return "ignored_no_lifecycle", false
 	}
@@ -132,7 +169,7 @@ func analyzeSingleClosedOffer(sdb *dbutil.DB, offer closedOfferRecord) (string, 
 		`, "non_premium",
 			historicalRound4(avgRefPrice.Float64),
 			historicalRound4(overallAvgPremium.Float64),
-			historicalRound8(profAvgBTCAmount.Float64),
+			historicalRound8(avgBTCAmount.Float64),
 			offer.id,
 		)
 		return "non_premium", false
@@ -200,7 +237,7 @@ func analyzeSingleClosedOffer(sdb *dbutil.DB, offer closedOfferRecord) (string, 
 		historicalRound4(profAvgPremium.Float64),
 		historicalRound4(profAvgTradeCostPct.Float64),
 		historicalRound8(profAvgTradeCostBTC.Float64),
-		nullHistoricalRound8(profAvgHedgeFeeSumBTC),
+		nullHistoricalRound8(hedgeFeeSumBTC),
 		nullHistoricalRound8(cexTakerFeeBTC),
 		nullHistoricalRound8(cexWithdrawFeeBTC),
 		nullHistoricalRound8(networkFeeBTC),

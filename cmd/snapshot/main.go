@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"dexunifiedapi/internal/config"
-	"dexunifiedapi/internal/dbutil"
+	"dexunifiedapi/db"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,6 +38,10 @@ var (
 )
 
 func init() {
+	if runningUnderGoTest() {
+		_ = config.LoadRequiredDotEnv(".env")
+		return
+	}
 	if err := config.LoadRequiredDotEnv(".env"); err != nil {
 		panic(err)
 	}
@@ -62,6 +66,10 @@ func init() {
 	if torProxy == "" {
 		torProxy = "socks5h://127.0.0.1:9050"
 	}
+}
+
+func runningUnderGoTest() bool {
+	return strings.HasSuffix(os.Args[0], ".test")
 }
 
 // bisqCreds injects the Bisq API password header on every gRPC call.
@@ -682,16 +690,18 @@ func main() {
 		}
 	}
 
-	// Settle closed offers: compute avg_ref_price from historical OHLC
-	settleClosedOffers(sdb)
-	analyzeClosedOffers(sdb)
-
 	// Push live offers directly to the server's in-memory hub.
 	serverURL := os.Getenv("SERVER_INTERNAL_URL")
 	if serverURL == "" {
 		serverURL = "http://localhost:5010"
 	}
 	pushLiveOffersToServer(liveOffers, serverURL)
+
+	// Settle closed offers: compute avg_ref_price from historical OHLC.
+	// Keep this after the live push so the server can persist the latest
+	// lifecycle snapshot before we decide whether a closed offer has history.
+	settleClosedOffers(sdb)
+	analyzeClosedOffers(sdb)
 
 	writeSnapshotLog(sdb, exchangeData)
 	total := 0

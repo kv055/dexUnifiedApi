@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"database/sql"
+	"dexunifiedapi/db"
 	"encoding/json"
 	"errors"
 	"math"
@@ -8,6 +11,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func seededCachedFee(value float64) *cachedFee {
@@ -402,4 +407,104 @@ func TestHandleLiveOfferLifecycleRESTReturnsLifecyclePoints(t *testing.T) {
 		t.Fatal("expected net premium pct")
 	}
 	assertFloat(t, *points[0].NetPremiumPct, 1.23)
+}
+
+const internalLiveOffersSQLiteSchema = `
+CREATE TABLE offers (
+	id INTEGER PRIMARY KEY,
+	best_route_cex TEXT,
+	best_route_method TEXT,
+	hedge_open_fee_btc REAL,
+	hedge_close_fee_btc REAL,
+	hedge_funding_fee_btc REAL,
+	hedge_fee_sum_btc REAL,
+	hedge_venue TEXT,
+	hedge_instrument TEXT,
+	hedge_transfer_minutes INTEGER
+);
+
+CREATE TABLE order_lifecycle (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	offer_db_id INTEGER NOT NULL,
+	snapshot_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	price REAL NOT NULL,
+	ref_price REAL NOT NULL,
+	premium_pct REAL NOT NULL,
+	trade_cost_pct REAL,
+	trade_cost_btc REAL,
+	cex_taker_fee_btc REAL,
+	cex_withdraw_fee_btc REAL,
+	network_fee_btc REAL,
+	dex_fee_btc REAL,
+	net_premium_pct REAL,
+	net_premium_btc REAL,
+	btc_amount REAL
+);
+`
+
+func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
+	oldDB := db
+	oldHub := hub
+	oldPrices := cexPrices
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	t.Cleanup(func() {
+		db = oldDB
+		hub = oldHub
+		cexPrices = oldPrices
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+	})
+
+	testSQLDB, err := sql.Open("sqlite", t.TempDir()+"/live-offers.db")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		testSQLDB.Close()
+	})
+	if _, err := testSQLDB.Exec(internalLiveOffersSQLiteSchema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := testSQLDB.Exec(`INSERT INTO offers (id) VALUES (1)`); err != nil {
+		t.Fatalf("insert offer: %v", err)
+	}
+	db = &dbutil.DB{DB: testSQLDB}
+
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	cexPrices = map[string]float64{"kraken": 100}
+	est := fixedCostEstimator("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.01
+	btcMax := 0.1
+	payload, err := json.Marshal([]LiveOffer{{
+		ID:        1,
+		Exchange:  "bisq",
+		Direction: "buy",
+		Price:     102.5,
+		BTCMin:    &btcMin,
+		BTCMax:    &btcMax,
+		FirstSeen: "2026-04-01 12:00:00",
+		LastSeen:  "2026-04-01 12:00:00",
+	}})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/live_offers", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	handleInternalLiveOffers(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	var lifecycleRows int
+	if err := testSQLDB.QueryRow(`SELECT COUNT(*) FROM order_lifecycle WHERE offer_db_id = 1`).Scan(&lifecycleRows); err != nil {
+		t.Fatalf("count lifecycle rows: %v", err)
+	}
+	if lifecycleRows != 1 {
+		t.Fatalf("lifecycle rows = %d, want 1", lifecycleRows)
+	}
 }

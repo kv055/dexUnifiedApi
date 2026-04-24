@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"dexunifiedapi/internal/config"
-	"dexunifiedapi/internal/dbutil"
+	"dexunifiedapi/db"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -609,7 +609,7 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	hub.setOffers(offers)
 	price := getCexPrice(defaultCEX)
 	outOffers := hub.computeOutOffers(price, liveSubscription{cex: defaultCEX})
-	go writeLifecycleEntries(outOffers)
+	writeLifecycleEntries(outOffers)
 	fmt.Printf("[LiveHub] updated with %d live offers from snapshot\n", len(offers))
 	w.WriteHeader(http.StatusNoContent)
 }
