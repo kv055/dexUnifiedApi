@@ -1,4 +1,4 @@
-package main
+package tradecost
 
 // WithdrawalMethod is the settlement network used to move BTC from CEX to DEX.
 type WithdrawalMethod string
@@ -81,6 +81,12 @@ func cexProfileFor(exchange string) CexWithdrawalProfile {
 		return p
 	}
 	return defaultCexProfile
+}
+
+// ProfileFor returns the withdrawal profile for the given exchange,
+// falling back to the default profile for unknown exchanges.
+func ProfileFor(exchange string) CexWithdrawalProfile {
+	return cexProfileFor(exchange)
 }
 
 // resolveWithdrawalMethod returns the settlement method for a CEX→DEX trade.

@@ -1,4 +1,4 @@
-package main
+package accounthealth
 
 import (
 	"context"
@@ -18,17 +18,21 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-const bisqAccountProvider = "Bisq"
+const BisqAccountProvider = "Bisq"
 
-type accountHealthRecorder interface {
+type Recorder interface {
 	UpdateAccountHealth(ctx context.Context, provider string, healthy bool) error
 }
 
-type accountHealthDB struct {
+type DBRecorder struct {
 	db *dbutil.DB
 }
 
-func (s accountHealthDB) UpdateAccountHealth(ctx context.Context, provider string, healthy bool) error {
+func NewDBRecorder(db *dbutil.DB) DBRecorder {
+	return DBRecorder{db: db}
+}
+
+func (s DBRecorder) UpdateAccountHealth(ctx context.Context, provider string, healthy bool) error {
 	result, err := s.db.DB.ExecContext(ctx, `
 		UPDATE accounts
 		SET last_health_check = CURRENT_TIMESTAMP,
@@ -49,17 +53,25 @@ func (s accountHealthDB) UpdateAccountHealth(ctx context.Context, provider strin
 	return nil
 }
 
-type bisqPaymentAccountChecker interface {
+type Checker interface {
+	Check(ctx context.Context) error
+}
+
+type BisqPaymentAccountChecker interface {
 	PaymentAccountCount(ctx context.Context) (int, error)
 }
 
-type bisqGRPCAccountChecker struct {
+type BisqGRPCAccountChecker struct {
 	host     string
 	password string
 	timeout  time.Duration
 }
 
-func (c bisqGRPCAccountChecker) PaymentAccountCount(ctx context.Context) (int, error) {
+func NewBisqGRPCAccountChecker(host string, password string, timeout time.Duration) BisqGRPCAccountChecker {
+	return BisqGRPCAccountChecker{host: host, password: password, timeout: timeout}
+}
+
+func (c BisqGRPCAccountChecker) PaymentAccountCount(ctx context.Context) (int, error) {
 	timeout := c.timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -101,7 +113,7 @@ func (c bisqAccountCreds) RequireTransportSecurity() bool {
 	return false
 }
 
-func checkBisqAccountHealth(ctx context.Context, checker bisqPaymentAccountChecker) error {
+func CheckBisqAccountHealth(ctx context.Context, checker BisqPaymentAccountChecker) error {
 	count, err := checker.PaymentAccountCount(ctx)
 	if err != nil {
 		return err
@@ -112,9 +124,9 @@ func checkBisqAccountHealth(ctx context.Context, checker bisqPaymentAccountCheck
 	return nil
 }
 
-func runAccountHealthCheck(
+func RunAccountHealthCheck(
 	ctx context.Context,
-	recorder accountHealthRecorder,
+	recorder Recorder,
 	provider string,
 	check func(context.Context) error,
 ) {
@@ -130,17 +142,17 @@ func runAccountHealthCheck(
 	log.Printf("[AccountHealth] %s healthy", provider)
 }
 
-func runPeriodicAccountHealthCheck(
+func RunPeriodicAccountHealthCheck(
 	ctx context.Context,
 	interval time.Duration,
-	recorder accountHealthRecorder,
+	recorder Recorder,
 	provider string,
 	check func(context.Context) error,
 ) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	runAccountHealthCheck(ctx, recorder, provider, check)
+	RunAccountHealthCheck(ctx, recorder, provider, check)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -148,12 +160,12 @@ func runPeriodicAccountHealthCheck(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runAccountHealthCheck(ctx, recorder, provider, check)
+			RunAccountHealthCheck(ctx, recorder, provider, check)
 		}
 	}
 }
 
-func parseAccountHealthInterval(raw string) time.Duration {
+func ParseInterval(raw string) time.Duration {
 	if raw == "" {
 		return time.Minute
 	}
@@ -162,6 +174,32 @@ func parseAccountHealthInterval(raw string) time.Duration {
 		return time.Minute
 	}
 	return interval
+}
+
+type Runner struct {
+	recorder Recorder
+	checker  Checker
+	provider string
+	interval time.Duration
+}
+
+func NewRunner(recorder Recorder, checker Checker, interval time.Duration) *Runner {
+	return &Runner{
+		recorder: recorder,
+		checker:  checker,
+		provider: BisqAccountProvider,
+		interval: interval,
+	}
+}
+
+func (r *Runner) Start(ctx context.Context) {
+	RunPeriodicAccountHealthCheck(ctx, r.interval, r.recorder, r.provider, r.checker.Check)
+}
+
+type CheckFunc func(context.Context) error
+
+func (f CheckFunc) Check(ctx context.Context) error {
+	return f(ctx)
 }
 
 var bisqAccountFileDesc protoreflect.FileDescriptor

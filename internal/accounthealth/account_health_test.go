@@ -1,4 +1,4 @@
-package main
+package accounthealth
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func TestCheckBisqAccountHealth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkBisqAccountHealth(context.Background(), tc.checker)
+			err := CheckBisqAccountHealth(context.Background(), tc.checker)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr %t", err, tc.wantErr)
 			}
@@ -51,18 +51,18 @@ func TestCheckBisqAccountHealth(t *testing.T) {
 
 func TestRunAccountHealthCheckPersistsProviderHealth(t *testing.T) {
 	recorder := &fakeAccountHealthRecorder{}
-	runAccountHealthCheck(context.Background(), recorder, bisqAccountProvider, func(context.Context) error {
+	RunAccountHealthCheck(context.Background(), recorder, BisqAccountProvider, func(context.Context) error {
 		return nil
 	})
 
-	if recorder.provider != bisqAccountProvider {
-		t.Fatalf("provider = %q, want %q", recorder.provider, bisqAccountProvider)
+	if recorder.provider != BisqAccountProvider {
+		t.Fatalf("provider = %q, want %q", recorder.provider, BisqAccountProvider)
 	}
 	if !recorder.healthy {
 		t.Fatal("healthy = false, want true")
 	}
 
-	runAccountHealthCheck(context.Background(), recorder, bisqAccountProvider, func(context.Context) error {
+	RunAccountHealthCheck(context.Background(), recorder, BisqAccountProvider, func(context.Context) error {
 		return errors.New("not ready")
 	})
 	if recorder.healthy {
@@ -82,8 +82,8 @@ func TestParseAccountHealthInterval(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		if got := parseAccountHealthInterval(tc.raw); got != tc.want {
-			t.Fatalf("parseAccountHealthInterval(%q) = %s, want %s", tc.raw, got, tc.want)
+		if got := ParseInterval(tc.raw); got != tc.want {
+			t.Fatalf("ParseInterval(%q) = %s, want %s", tc.raw, got, tc.want)
 		}
 	}
 }

@@ -1,4 +1,4 @@
-package main
+package tradecost
 
 import (
 	"bytes"
@@ -63,6 +63,26 @@ const (
 	// defaultBTCTradeSize is the fallback BTC amount used when an offer has no size set.
 	defaultBTCTradeSize = 0.01
 )
+
+var supportedCEXes = []string{"kraken", "binance", "bitstamp", "coinbase"}
+
+func SupportedCEXes() []string {
+	out := make([]string, len(supportedCEXes))
+	copy(out, supportedCEXes)
+	return out
+}
+
+func DefaultBTCTradeSize() float64 {
+	return defaultBTCTradeSize
+}
+
+func TakerFeeFallback(exchange string) float64 {
+	return takerFeeFallbacks[exchange]
+}
+
+func WithdrawalFallback(exchange string, method WithdrawalMethod) float64 {
+	return withdrawalFallbacks[exchange][method]
+}
 
 // loadCredentials reads {EXCHANGE}_API_KEY and {EXCHANGE}_API_SECRET from env.
 func loadCredentials(exchange string) (key, secret string) {
@@ -644,6 +664,42 @@ func NewTradeCostEstimator(exchange string) *TradeCostEstimator {
 	}
 }
 
+// NewFixedEstimatorForTesting builds an estimator with deterministic costs.
+// It is used by handler tests in packages that cannot access the estimator's
+// unexported cache internals.
+func NewFixedEstimatorForTesting(exchange, dexExchange string, takerFeeFrac, withdrawalFeeBTC, dexFeeFrac, networkFeeBTC float64) *TradeCostEstimator {
+	cache := func(value float64) *cachedFee {
+		return &cachedFee{value: value, fetchedAt: time.Now(), ttl: feeTTL}
+	}
+	withdrawal := newWithdrawalFeeFetcher(exchange)
+	withdrawal.caches[MethodOnchain] = cache(withdrawalFeeBTC)
+	withdrawal.caches[MethodLightning] = cache(withdrawalFeeBTC)
+
+	return &TradeCostEstimator{
+		exchange:   exchange,
+		taker:      &takerFeeFetcher{exchange: exchange, cache: cache(takerFeeFrac)},
+		withdrawal: withdrawal,
+		dexFees: map[string]*cachedFee{
+			dexExchange: cache(dexFeeFrac),
+		},
+		cexProfile: cexProfileFor(exchange),
+		networkFeeOverride: func(method WithdrawalMethod, btcAmount float64) networkFeeDetails {
+			return networkFeeDetails{
+				feeBTC:     networkFeeBTC,
+				method:     method,
+				tier:       "standard",
+				confidence: 0.875,
+				detail: &BTCNetworkFeeDetail{
+					SelectedFullConfirmationMinutes: 30,
+				},
+			}
+		},
+		hedgeCostOverride: func(btcAmount float64, refPriceEUR float64, transferMinutes float64) hedgeCostDetails {
+			return hedgeCostDetails{}
+		},
+	}
+}
+
 func (e *TradeCostEstimator) getDexFeeFrac(dexExchange string) float64 {
 	fallback := dexTakerFees[dexExchange]
 	cache := e.dexFees[dexExchange]
@@ -665,10 +721,17 @@ func (e *TradeCostEstimator) getDexFeeFrac(dexExchange string) float64 {
 
 type TradeRouteOptimizer struct {
 	estimators map[string]*TradeCostEstimator
+	supported  []string
 }
 
 func NewTradeRouteOptimizer(estimators map[string]*TradeCostEstimator) *TradeRouteOptimizer {
-	return &TradeRouteOptimizer{estimators: estimators}
+	return NewOptimizer(SupportedCEXes(), estimators)
+}
+
+func NewOptimizer(supported []string, estimators map[string]*TradeCostEstimator) *TradeRouteOptimizer {
+	list := make([]string, len(supported))
+	copy(list, supported)
+	return &TradeRouteOptimizer{estimators: estimators, supported: list}
 }
 
 // BTCNetworkFeeDetail carries the full onchain fee calculation context for display.
@@ -733,6 +796,10 @@ func resolveRequiredConfirmations(direction string, requested int) int {
 		return 4
 	}
 	return 2
+}
+
+func ResolveRequiredConfirmations(direction string, requested int) int {
+	return resolveRequiredConfirmations(direction, requested)
 }
 
 // CostPct returns the estimated total arbitrage cost as a percentage of btcAmount.
@@ -896,47 +963,59 @@ type CostBreakdown struct {
 }
 
 type HedgeBreakdown struct {
-	OpenFeePct      float64              `json:"open_fee_pct"`      // perp opening fee as % of trade
-	OpenFeeBTC      float64              `json:"open_fee_btc"`      // perp opening fee in BTC
-	CloseFeePct     float64              `json:"close_fee_pct"`     // perp closing fee as % of trade
-	CloseFeeBTC     float64              `json:"close_fee_btc"`     // perp closing fee in BTC
-	FundingFeePct   float64              `json:"funding_fee_pct"`   // perp funding cost over transfer window as % of trade
-	FundingFeeBTC   float64              `json:"funding_fee_btc"`   // perp funding cost over transfer window in BTC
-	FeeSumPct       float64              `json:"fee_sum_pct"`       // perp open+close+funding as % of trade
-	FeeSumBTC       float64              `json:"fee_sum_btc"`       // perp open+close+funding in BTC
-	Venue           string               `json:"venue"`             // chosen hedge venue
-	Instrument      string               `json:"instrument"`        // chosen perp instrument
-	TransferMinutes int                  `json:"transfer_minutes"`  // transfer-time input used for hedge costing
-	Position        *HedgePositionDetail `json:"position"`          // position sizing simulation; nil when unavailable (e.g. ask side or missing ref price)
+	OpenFeePct      float64              `json:"open_fee_pct"`     // perp opening fee as % of trade
+	OpenFeeBTC      float64              `json:"open_fee_btc"`     // perp opening fee in BTC
+	CloseFeePct     float64              `json:"close_fee_pct"`    // perp closing fee as % of trade
+	CloseFeeBTC     float64              `json:"close_fee_btc"`    // perp closing fee in BTC
+	FundingFeePct   float64              `json:"funding_fee_pct"`  // perp funding cost over transfer window as % of trade
+	FundingFeeBTC   float64              `json:"funding_fee_btc"`  // perp funding cost over transfer window in BTC
+	FeeSumPct       float64              `json:"fee_sum_pct"`      // perp open+close+funding as % of trade
+	FeeSumBTC       float64              `json:"fee_sum_btc"`      // perp open+close+funding in BTC
+	Venue           string               `json:"venue"`            // chosen hedge venue
+	Instrument      string               `json:"instrument"`       // chosen perp instrument
+	TransferMinutes int                  `json:"transfer_minutes"` // transfer-time input used for hedge costing
+	Position        *HedgePositionDetail `json:"position"`         // position sizing simulation; nil when unavailable (e.g. ask side or missing ref price)
 }
 
 // HedgePositionDetail is the per-offer simulation of how the short perp hedge
 // would be executed: hedge notional, leverage, collateral, and liquidation
 // headroom. All EUR amounts are rounded to 2 decimals; rates are unrounded.
 type HedgePositionDetail struct {
-	HedgeRatio                   float64 `json:"hedge_ratio"`                       // fraction of spot transfer that is hedged (1.0 = full)
-	LeverageUsed                 float64 `json:"leverage_used"`                     // leverage assumed for sizing (venue max)
-	HedgeNotionalEUR             float64 `json:"hedge_notional_eur"`                // short perp notional in EUR
-	InitialMarginEUR             float64 `json:"initial_margin_eur"`                // required initial margin = notional / leverage
-	RecommendedCollateralEUR     float64 `json:"recommended_collateral_eur"`        // collateral to post so the position survives the stress move
-	StressMovePct                float64 `json:"stress_move_pct"`                   // adverse BTC move assumed in the stress scenario (e.g. 0.10)
-	StressLossEUR                float64 `json:"stress_loss_eur"`                   // unrealized loss on the short under the stress move
-	MaintenanceRequirementEUR    float64 `json:"maintenance_requirement_eur"`       // venue maintenance margin on the notional
-	FreeCollateralAfterStressEUR float64 `json:"free_collateral_after_stress_eur"`  // equity left above maintenance after the stress move
-	LiquidationMovePct           float64 `json:"liquidation_move_pct"`              // adverse BTC move that would liquidate the position at the chosen leverage
-	BTCPriceEUR                  float64 `json:"btc_price_eur"`                     // CEX ref price used to size the notional
+	HedgeRatio                   float64 `json:"hedge_ratio"`                      // fraction of spot transfer that is hedged (1.0 = full)
+	LeverageUsed                 float64 `json:"leverage_used"`                    // leverage assumed for sizing (venue max)
+	HedgeNotionalEUR             float64 `json:"hedge_notional_eur"`               // short perp notional in EUR
+	InitialMarginEUR             float64 `json:"initial_margin_eur"`               // required initial margin = notional / leverage
+	RecommendedCollateralEUR     float64 `json:"recommended_collateral_eur"`       // collateral to post so the position survives the stress move
+	StressMovePct                float64 `json:"stress_move_pct"`                  // adverse BTC move assumed in the stress scenario (e.g. 0.10)
+	StressLossEUR                float64 `json:"stress_loss_eur"`                  // unrealized loss on the short under the stress move
+	MaintenanceRequirementEUR    float64 `json:"maintenance_requirement_eur"`      // venue maintenance margin on the notional
+	FreeCollateralAfterStressEUR float64 `json:"free_collateral_after_stress_eur"` // equity left above maintenance after the stress move
+	LiquidationMovePct           float64 `json:"liquidation_move_pct"`             // adverse BTC move that would liquidate the position at the chosen leverage
+	BTCPriceEUR                  float64 `json:"btc_price_eur"`                    // CEX ref price used to size the notional
 }
 
 func round8(v float64) float64 {
 	return math.Round(v*1e8) / 1e8
 }
 
+func Round8(v float64) float64 {
+	return round8(v)
+}
+
 func round4(v float64) float64 {
 	return math.Round(v*1e4) / 1e4
 }
 
+func Round4(v float64) float64 {
+	return round4(v)
+}
+
 func round2(v float64) float64 {
 	return math.Round(v*1e2) / 1e2
+}
+
+func Round2(v float64) float64 {
+	return round2(v)
 }
 
 // Breakdown returns a full per-component cost breakdown for a given trade size, DEX, and offer direction.
@@ -1033,10 +1112,10 @@ func (e *TradeCostEstimator) breakdownForMethodWithTier(btcAmount float64, refPr
 			TransferMinutes: int(math.Round(hedgeCost.transferMinutes)),
 			Position:        hedgeCost.position,
 		},
-		DexFeePct:            pct(dexBTC),
-		DexFeeBTC:            round8(dexBTC),
-		TotalCostPct:         round4(totalPct),
-		TotalCostBTC:         round8(totalBTC),
+		DexFeePct:    pct(dexBTC),
+		DexFeeBTC:    round8(dexBTC),
+		TotalCostPct: round4(totalPct),
+		TotalCostBTC: round8(totalBTC),
 	}
 }
 
@@ -1157,7 +1236,11 @@ func (o *TradeRouteOptimizer) BestBreakdownFull(btcAmount float64, refPriceEUR f
 
 	best := CostBreakdown{}
 	found := false
-	for _, cex := range supportedCEXes {
+	supported := o.supported
+	if len(supported) == 0 {
+		supported = supportedCEXes
+	}
+	for _, cex := range supported {
 		if _, skip := excluded[cex]; skip {
 			continue
 		}

@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"dexunifiedapi/internal/config"
 	"dexunifiedapi/db"
+	"dexunifiedapi/internal/accounthealth"
+	"dexunifiedapi/internal/config"
+	"dexunifiedapi/internal/lifecycle"
+	"dexunifiedapi/internal/paymentnotifications"
+	"dexunifiedapi/internal/prices"
+	"dexunifiedapi/internal/tradecost"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,8 +17,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	gorillaws "github.com/gorilla/websocket"
 )
 
 var (
@@ -27,6 +29,9 @@ var (
 	bisqAPIPassword           string
 	accountHealthInterval     time.Duration
 	db                        *dbutil.DB
+	priceManager              *prices.Manager
+	lifecycleRepo             lifecycle.Repository
+	paymentNotifications      *paymentnotifications.Service
 )
 
 var (
@@ -35,14 +40,13 @@ var (
 )
 
 const (
-	defaultCEX     = "kraken"
-	defaultCEXPair = "BTC/EUR"
+	defaultCEX = "kraken"
 )
 
-var supportedCEXes = []string{"kraken", "binance", "bitstamp", "coinbase"}
+var supportedCEXes = tradecost.SupportedCEXes()
 
-var tradeCostEstimators map[string]*TradeCostEstimator
-var tradeRouteOptimizer *TradeRouteOptimizer
+var tradeCostEstimators map[string]*tradecost.TradeCostEstimator
+var tradeRouteOptimizer *tradecost.TradeRouteOptimizer
 
 func seedHubFromDB() {
 	// Live offers are now sourced from snapshot memory and pushed into the hub
@@ -65,200 +69,23 @@ func coreTablesReady() bool {
 }
 
 func getCexPrice(cex string) float64 {
+	if priceManager != nil {
+		return priceManager.Get(cex)
+	}
 	cexPricesMu.RLock()
 	defer cexPricesMu.RUnlock()
 	return cexPrices[cex]
 }
 
 func setCexPrice(cex string, p float64) {
+	if priceManager != nil {
+		priceManager.Set(cex, p)
+		return
+	}
 	cexPricesMu.Lock()
 	cexPrices[cex] = p
 	cexPricesMu.Unlock()
 	hub.broadcastForCex(cex)
-}
-
-// --- CEX WebSocket price feeds ---
-
-func runCexPriceFeed(ctx context.Context, cex string) {
-	backoff := time.Second
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		var err error
-		switch cex {
-		case "kraken":
-			err = runKrakenFeed(ctx, cex)
-		case "binance":
-			err = runBinanceFeed(ctx, cex)
-		case "bitstamp":
-			err = runBitstampFeed(ctx, cex)
-		case "coinbase":
-			err = runCoinbaseFeed(ctx, cex)
-		default:
-			return
-		}
-
-		if err != nil {
-			fmt.Printf("[%sFeed] error: %v, retrying in %s\n", cex, err, backoff)
-		}
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
-			return
-		}
-		if backoff < 30*time.Second {
-			backoff *= 2
-		} else {
-			backoff = time.Second
-		}
-	}
-}
-
-func runKrakenFeed(ctx context.Context, cex string) error {
-	ws, _, err := gorillaws.DefaultDialer.DialContext(ctx, "wss://ws.kraken.com/v2", nil)
-	if err != nil {
-		return err
-	}
-	defer ws.Close()
-	fmt.Printf("[%sFeed] connected\n", cex)
-
-	sub := fmt.Sprintf(`{"method":"subscribe","params":{"channel":"ticker","symbol":["%s"]}}`, defaultCEXPair)
-	if err := ws.WriteMessage(gorillaws.TextMessage, []byte(sub)); err != nil {
-		return err
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		_, msgBytes, err := ws.ReadMessage()
-		if err != nil {
-			return err
-		}
-		var envelope struct {
-			Channel string `json:"channel"`
-			Data    []struct {
-				Last float64 `json:"last"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(msgBytes, &envelope) == nil &&
-			envelope.Channel == "ticker" && len(envelope.Data) > 0 && envelope.Data[0].Last > 0 {
-			setCexPrice(cex, envelope.Data[0].Last)
-		}
-	}
-}
-
-func runBinanceFeed(ctx context.Context, cex string) error {
-	ws, _, err := gorillaws.DefaultDialer.DialContext(ctx, "wss://stream.binance.com:9443/ws/btceur@miniTicker", nil)
-	if err != nil {
-		return err
-	}
-	defer ws.Close()
-	fmt.Printf("[%sFeed] connected\n", cex)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		_, msgBytes, err := ws.ReadMessage()
-		if err != nil {
-			return err
-		}
-		var msg struct {
-			EventType string `json:"e"`
-			Close     string `json:"c"`
-		}
-		if json.Unmarshal(msgBytes, &msg) == nil && msg.EventType == "24hrMiniTicker" {
-			if p, err := strconv.ParseFloat(msg.Close, 64); err == nil && p > 0 {
-				setCexPrice(cex, p)
-			}
-		}
-	}
-}
-
-func runBitstampFeed(ctx context.Context, cex string) error {
-	ws, _, err := gorillaws.DefaultDialer.DialContext(ctx, "wss://ws.bitstamp.net", nil)
-	if err != nil {
-		return err
-	}
-	defer ws.Close()
-	fmt.Printf("[%sFeed] connected\n", cex)
-
-	sub := `{"event":"bts:subscribe","data":{"channel":"live_trades_btceur"}}`
-	if err := ws.WriteMessage(gorillaws.TextMessage, []byte(sub)); err != nil {
-		return err
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		_, msgBytes, err := ws.ReadMessage()
-		if err != nil {
-			return err
-		}
-		var msg struct {
-			Event   string `json:"event"`
-			Channel string `json:"channel"`
-			Data    struct {
-				Price float64 `json:"price"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(msgBytes, &msg) == nil &&
-			msg.Event == "trade" && msg.Data.Price > 0 {
-			setCexPrice(cex, msg.Data.Price)
-		}
-	}
-}
-
-func runCoinbaseFeed(ctx context.Context, cex string) error {
-	ws, _, err := gorillaws.DefaultDialer.DialContext(ctx, "wss://advanced-trade-ws.coinbase.com", nil)
-	if err != nil {
-		return err
-	}
-	defer ws.Close()
-	fmt.Printf("[%sFeed] connected\n", cex)
-
-	sub := `{"type":"subscribe","product_ids":["BTC-EUR"],"channel":"ticker"}`
-	if err := ws.WriteMessage(gorillaws.TextMessage, []byte(sub)); err != nil {
-		return err
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		_, msgBytes, err := ws.ReadMessage()
-		if err != nil {
-			return err
-		}
-		var msg struct {
-			Channel string `json:"channel"`
-			Events  []struct {
-				Tickers []struct {
-					Price string `json:"price"`
-				} `json:"tickers"`
-			} `json:"events"`
-		}
-		if json.Unmarshal(msgBytes, &msg) == nil && msg.Channel == "ticker" {
-			for _, ev := range msg.Events {
-				for _, t := range ev.Tickers {
-					if p, err := strconv.ParseFloat(t.Price, 64); err == nil && p > 0 {
-						setCexPrice(cex, p)
-					}
-				}
-			}
-		}
-	}
 }
 
 // --- Init & Main ---
@@ -304,7 +131,7 @@ func init() {
 		bisqGRPCHost = "localhost:9998"
 	}
 	bisqAPIPassword = os.Getenv("BISQ_API_PASSWORD")
-	accountHealthInterval = parseAccountHealthInterval(os.Getenv("ACCOUNT_HEALTH_INTERVAL"))
+	accountHealthInterval = accounthealth.ParseInterval(os.Getenv("ACCOUNT_HEALTH_INTERVAL"))
 
 }
 
@@ -351,13 +178,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	tradeCostEstimators = make(map[string]*TradeCostEstimator, len(supportedCEXes))
+	tradeCostEstimators = make(map[string]*tradecost.TradeCostEstimator, len(supportedCEXes))
 	for _, c := range supportedCEXes {
-		tradeCostEstimators[c] = NewTradeCostEstimator(c)
+		tradeCostEstimators[c] = tradecost.NewTradeCostEstimator(c)
 		fmt.Printf("[TradeCost] initialized %s (taker fallback %.2f%%, onchain withdrawal fallback %.8f BTC)\n",
-			c, takerFeeFallbacks[c]*100, withdrawalFallbacks[c][MethodOnchain])
+			c, tradecost.TakerFeeFallback(c)*100, tradecost.WithdrawalFallback(c, tradecost.MethodOnchain))
 	}
-	tradeRouteOptimizer = NewTradeRouteOptimizer(tradeCostEstimators)
+	tradeRouteOptimizer = tradecost.NewOptimizer(supportedCEXes, tradeCostEstimators)
 
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		fmt.Fprintf(os.Stderr, "schema init error: %v\n", err)
@@ -366,25 +193,27 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runPeriodicAccountHealthCheck(
+	lifecycleRepo = lifecycle.NewRepository(db)
+	paymentNotifications = paymentnotifications.NewService(250)
+	priceManager = prices.NewManager(supportedCEXes)
+	priceManager.SetUpdateCallback(func(cex string) {
+		hub.broadcastForCex(cex)
+	})
+
+	go accounthealth.RunPeriodicAccountHealthCheck(
 		ctx,
 		accountHealthInterval,
-		accountHealthDB{db: db},
-		bisqAccountProvider,
+		accounthealth.NewDBRecorder(db),
+		accounthealth.BisqAccountProvider,
 		func(ctx context.Context) error {
-			return checkBisqAccountHealth(ctx, bisqGRPCAccountChecker{
-				host:     bisqGRPCHost,
-				password: bisqAPIPassword,
-			})
+			return accounthealth.CheckBisqAccountHealth(ctx, accounthealth.NewBisqGRPCAccountChecker(bisqGRPCHost, bisqAPIPassword, 0))
 		},
 	)
 
 	// Seed hub from DB in the background
 	go seedHubFromDB()
 
-	for _, c := range supportedCEXes {
-		go runCexPriceFeed(ctx, c)
-	}
+	priceManager.Start(ctx)
 
 	mux := http.NewServeMux()
 
@@ -451,39 +280,21 @@ func fetchOfferLifecycle(ids []int64) map[int64][]LifecyclePoint {
 	if len(ids) == 0 {
 		return result
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
+	if lifecycleRepo == (lifecycle.Repository{}) && db != nil {
+		lifecycleRepo = lifecycle.NewRepository(db)
 	}
-	rows, err := db.Query(fmt.Sprintf(
-		`SELECT offer_db_id,
-		        to_char(snapshot_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
-		        price,
-		        net_premium_pct
-		   FROM order_lifecycle
-		  WHERE offer_db_id IN (%s)
-		  ORDER BY offer_db_id, snapshot_time`,
-		placeholders,
-	), args...)
+	points, err := lifecycleRepo.LoadByOfferIDs(context.Background(), ids)
 	if err != nil {
 		return result
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var offerID int64
-		var snapTime string
-		var price float64
-		var netPremiumPct sql.NullFloat64
-		if err := rows.Scan(&offerID, &snapTime, &price, &netPremiumPct); err != nil {
-			continue
+	for id, pts := range points {
+		for _, pt := range pts {
+			result[id] = append(result[id], LifecyclePoint{
+				Time:          pt.Time,
+				Price:         pt.Price,
+				NetPremiumPct: pt.NetPremiumPct,
+			})
 		}
-		pt := LifecyclePoint{Time: snapTime, Price: price}
-		if netPremiumPct.Valid {
-			pt.NetPremiumPct = &netPremiumPct.Float64
-		}
-		result[offerID] = append(result[offerID], pt)
 	}
 	return result
 }
@@ -495,102 +306,23 @@ func writeLifecycleEntries(offers []liveOutOffer) {
 	if len(offers) == 0 || db == nil {
 		return
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		fmt.Printf("[Lifecycle] begin tx error: %v\n", err)
-		return
+	if lifecycleRepo == (lifecycle.Repository{}) {
+		lifecycleRepo = lifecycle.NewRepository(db)
 	}
-	insStmt, err := tx.Prepare(`
-		INSERT INTO order_lifecycle
-			(offer_db_id, price, ref_price, premium_pct,
-			 trade_cost_pct, trade_cost_btc, cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc, dex_fee_btc,
-			 net_premium_pct, net_premium_btc, btc_amount)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		tx.Rollback()
-		fmt.Printf("[Lifecycle] prepare insert error: %v\n", err)
-		return
-	}
-	defer insStmt.Close()
-
-	updStmt, err := tx.Prepare(`
-		UPDATE offers SET
-			best_route_cex = ?,
-			best_route_method = ?,
-			hedge_open_fee_btc = ?,
-			hedge_close_fee_btc = ?,
-			hedge_funding_fee_btc = ?,
-			hedge_fee_sum_btc = ?,
-			hedge_venue = ?,
-			hedge_instrument = ?,
-			hedge_transfer_minutes = ?
-		WHERE id = ?
-	`)
-	if err != nil {
-		tx.Rollback()
-		fmt.Printf("[Lifecycle] prepare update error: %v\n", err)
-		return
-	}
-	defer updStmt.Close()
-
+	records := make([]lifecycle.Record, 0, len(offers))
 	for _, o := range offers {
-		if o.RefPrice <= 0 {
-			continue
-		}
-		bd := o.CostBreakdown
-		var cexWithdrawFee any
-		if bd.TradeDirection != "ask" {
-			cexWithdrawFee = round8(bd.WithdrawalFeeBTC)
-		}
-		_, _ = insStmt.Exec(
-			o.ID,
-			round4(o.Price),
-			round4(o.RefPrice),
-			round4(o.PriceDiffPct),
-			round4(bd.TotalCostPct),
-			round8(bd.TotalCostBTC),
-			round8(bd.CexTakerFeeBTC),
-			cexWithdrawFee,
-			round8(bd.NetworkFeeBTC),
-			round8(bd.DexFeeBTC),
-			round4(o.NetPremiumPct),
-			round8(bd.EstimatedProfitBTC),
-			round8(bd.BTCAmount),
-		)
-		if bd.RouteCEX != "" {
-			_, _ = updStmt.Exec(
-				bd.RouteCEX,
-				bd.RouteMethod,
-				round8(bd.Hedge.OpenFeeBTC),
-				round8(bd.Hedge.CloseFeeBTC),
-				round8(bd.Hedge.FundingFeeBTC),
-				round8(bd.Hedge.FeeSumBTC),
-				nullIfEmpty(bd.Hedge.Venue),
-				nullIfEmpty(bd.Hedge.Instrument),
-				nullIfZeroInt(bd.Hedge.TransferMinutes),
-				o.ID,
-			)
-		}
+		records = append(records, lifecycle.Record{
+			ID:            o.ID,
+			Price:         o.Price,
+			RefPrice:      o.RefPrice,
+			PriceDiffPct:  o.PriceDiffPct,
+			NetPremiumPct: o.NetPremiumPct,
+			CostBreakdown: o.CostBreakdown,
+		})
 	}
-
-	if err := tx.Commit(); err != nil {
-		fmt.Printf("[Lifecycle] commit error: %v\n", err)
+	if err := lifecycleRepo.PersistSnapshot(context.Background(), records); err != nil {
+		fmt.Printf("[Lifecycle] persist error: %v\n", err)
 	}
-}
-
-func nullIfEmpty(s string) any {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	return s
-}
-
-func nullIfZeroInt(v int) any {
-	if v == 0 {
-		return nil
-	}
-	return v
 }
 
 // handleInternalLiveOffers receives the live offer list from the snapshot tool,
@@ -622,12 +354,12 @@ func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	cexes := make([]cexInfo, 0, len(supportedCEXes))
 	for _, name := range supportedCEXes {
-		profile := cexProfileFor(name)
+		profile := tradecost.ProfileFor(name)
 		methods := make([]string, 0, len(profile.Methods))
 		hasLN := false
 		for _, m := range profile.Methods {
 			methods = append(methods, string(m))
-			if m == MethodLightning {
+			if m == tradecost.MethodLightning {
 				hasLN = true
 			}
 		}

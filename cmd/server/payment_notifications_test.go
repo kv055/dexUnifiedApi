@@ -7,22 +7,24 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"dexunifiedapi/internal/paymentnotifications"
 )
 
 func TestHandleInternalPaymentNotificationsAcceptsValidPayload(t *testing.T) {
-	oldHub := paymentHub
+	oldService := paymentNotifications
 	oldSecret := paymentNotificationSecret
-	paymentHub = &paymentNotificationHub{limit: 10}
+	paymentNotifications = paymentnotifications.NewService(10)
 	paymentNotificationSecret = "secret"
 	defer func() {
-		paymentHub = oldHub
+		paymentNotifications = oldService
 		paymentNotificationSecret = oldSecret
 	}()
 
-	payload := paymentNotification{
+	payload := paymentnotifications.Notification{
 		Amount:        12.5,
 		Currency:      "eur",
-		Type:          paymentNotificationIncoming,
+		Type:          paymentnotifications.Incoming,
 		TransactionID: "tx-1",
 		DEX:           "Bisq",
 		Connector:     "paypal",
@@ -44,7 +46,7 @@ func TestHandleInternalPaymentNotificationsAcceptsValidPayload(t *testing.T) {
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d", rr.Code)
 	}
-	if got := len(paymentHub.list(10)); got != 1 {
+	if got := len(paymentNotifications.List(10)); got != 1 {
 		t.Fatalf("expected 1 stored notification, got %d", got)
 	}
 }
@@ -68,26 +70,21 @@ func TestHandleInternalPaymentNotificationsRejectsInvalidPayload(t *testing.T) {
 }
 
 func TestHandlePaymentNotificationsReturnsRecentEntries(t *testing.T) {
-	oldHub := paymentHub
-	paymentHub = &paymentNotificationHub{
-		limit: 10,
-		recent: []storedPaymentNotification{
-			{
-				ID:         "n-1",
-				ReceivedAt: time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC),
-				Event: paymentNotification{
-					Amount:        5,
-					Currency:      "EUR",
-					Type:          paymentNotificationOutgoing,
-					TransactionID: "tx-2",
-					Connector:     "wise",
-					Timestamp:     time.Date(2026, 4, 18, 11, 59, 0, 0, time.UTC),
-				},
-			},
-		},
+	oldService := paymentNotifications
+	paymentNotifications = paymentnotifications.NewService(10)
+	_, err := paymentNotifications.Add(paymentnotifications.Notification{
+		Amount:        5,
+		Currency:      "EUR",
+		Type:          paymentnotifications.Outgoing,
+		TransactionID: "tx-2",
+		Connector:     "wise",
+		Timestamp:     time.Date(2026, 4, 18, 11, 59, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("seed notification: %v", err)
 	}
 	defer func() {
-		paymentHub = oldHub
+		paymentNotifications = oldService
 	}()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/payment_notifications?limit=1", nil)
