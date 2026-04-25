@@ -1,14 +1,14 @@
 package main
 
 import (
+	"commons/prices"
+	"commons/tradecost"
 	"context"
 	"dexunifiedapi/db"
 	"dexunifiedapi/internal/accounthealth"
 	"dexunifiedapi/internal/config"
 	"dexunifiedapi/internal/lifecycle"
 	"dexunifiedapi/internal/paymentnotifications"
-	"dexunifiedapi/internal/prices"
-	"dexunifiedapi/internal/tradecost"
 	"encoding/json"
 	"fmt"
 	"net/http"

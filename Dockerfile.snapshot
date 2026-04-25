@@ -1,12 +1,14 @@
 # Stage 1: Build Go binary
 FROM golang:1.25-alpine AS builder
 
-WORKDIR /build
-COPY go.mod go.sum ./
+WORKDIR /build/dexUnifiedApi
+COPY commons/ ../commons/
+COPY dexUnifiedApi/go.mod dexUnifiedApi/go.sum ./
 RUN go mod download
-COPY bisq_grpc/go/ ./bisq_grpc/go/
-COPY cmd/snapshot/ ./cmd/snapshot/
-COPY internal/ ./internal/
+COPY dexUnifiedApi/bisq_grpc/go/ ./bisq_grpc/go/
+COPY dexUnifiedApi/cmd/snapshot/ ./cmd/snapshot/
+COPY dexUnifiedApi/internal/ ./internal/
+COPY dexUnifiedApi/db/ ./db/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o snapshot ./cmd/snapshot
 
 # Stage 2: Minimal runtime
@@ -16,7 +18,7 @@ RUN apk add --no-cache curl
 
 WORKDIR /app
 
-COPY --from=builder /build/snapshot ./
+COPY --from=builder /build/dexUnifiedApi/snapshot ./
 
 RUN adduser -D appuser && chown -R appuser:appuser /app
 

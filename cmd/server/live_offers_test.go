@@ -2,9 +2,9 @@ package main
 
 import (
 	"bytes"
+	"commons/tradecost"
 	"database/sql"
 	"dexunifiedapi/db"
-	"dexunifiedapi/internal/tradecost"
 	"encoding/json"
 	"math"
 	"net/http"
