@@ -1,0 +1,36 @@
+site_name: dexUnifiedApi
+docs_dir: docs
+
+nav:
+  - Overview: README.md
+  - cmd:
+      - pgbackup:
+          - Overview: cmd/pgbackup/README.md
+          - main.go: cmd/pgbackup/main.md
+      - server:
+          - Overview: cmd/server/README.md
+          - live.go: cmd/server/live.md
+          - main.go: cmd/server/main.md
+          - payment_notifications.go: cmd/server/payment_notifications.md
+      - snapshot:
+          - Overview: cmd/snapshot/README.md
+          - closed_offer_analysis.go: cmd/snapshot/closed_offer_analysis.md
+          - main.go: cmd/snapshot/main.md
+  - db:
+      - Overview: db/README.md
+      - bootstrap.go: db/bootstrap.md
+      - postgres.go: db/postgres.md
+      - schema.go: db/schema.md
+  - internal:
+      - accounthealth:
+          - Overview: internal/accounthealth/README.md
+          - account_health.go: internal/accounthealth/account_health.md
+      - config:
+          - Overview: internal/config/README.md
+          - env.go: internal/config/env.md
+      - lifecycle:
+          - Overview: internal/lifecycle/README.md
+          - lifecycle.go: internal/lifecycle/lifecycle.md
+      - paymentnotifications:
+          - Overview: internal/paymentnotifications/README.md
+          - payment_notifications.go: internal/paymentnotifications/payment_notifications.md
