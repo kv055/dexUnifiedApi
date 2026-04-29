@@ -9,37 +9,56 @@ import (
 	"github.com/google/uuid"
 )
 
+// Type identifies a type.
 type Type string
 
 const (
+	// Incoming is the incoming value.
 	Incoming Type = "incoming"
+	// Outgoing is the outgoing value.
 	Outgoing Type = "outgoing"
 )
 
+// Notification represents a notification.
 type Notification struct {
-	Amount          float64        `json:"amount"`
-	Currency        string         `json:"currency"`
-	Type            Type           `json:"type"`
-	TransactionID   string         `json:"transaction_id"`
-	DEX             string         `json:"dex,omitempty"`
-	Connector       string         `json:"connector"`
-	TransferMessage string         `json:"transfer_message,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
-	Timestamp       time.Time      `json:"timestamp"`
+	// Amount is the amount value for the notification.
+	Amount float64 `json:"amount"`
+	// Currency names the asset or network for the notification.
+	Currency string `json:"currency"`
+	// Type is the type value for the notification.
+	Type Type `json:"type"`
+	// TransactionID is the transaction id value for the notification.
+	TransactionID string `json:"transaction_id"`
+	// DEX is the dex value for the notification.
+	DEX string `json:"dex,omitempty"`
+	// Connector is the connector value for the notification.
+	Connector string `json:"connector"`
+	// TransferMessage carries a human-readable message for the notification.
+	TransferMessage string `json:"transfer_message,omitempty"`
+	// Metadata preserves additional source data for the notification.
+	Metadata map[string]any `json:"metadata,omitempty"`
+	// Timestamp records the relevant time for the notification.
+	Timestamp time.Time `json:"timestamp"`
 }
 
+// StoredNotification represents a stored notification.
 type StoredNotification struct {
-	ID         string       `json:"id"`
-	ReceivedAt time.Time    `json:"received_at"`
-	Event      Notification `json:"event"`
+	// ID identifies the stored notification.
+	ID string `json:"id"`
+	// ReceivedAt records the relevant time for the stored notification.
+	ReceivedAt time.Time `json:"received_at"`
+	// Event is the event value for the stored notification.
+	Event Notification `json:"event"`
 }
 
+// Service represents a service.
 type Service struct {
 	mu     sync.RWMutex
 	recent []StoredNotification
 	limit  int
 }
 
+// NewService creates a service.
 func NewService(limit int) *Service {
 	if limit <= 0 {
 		limit = 250
@@ -47,6 +66,7 @@ func NewService(limit int) *Service {
 	return &Service{limit: limit}
 }
 
+// Add validates and stores a payment notification in the recent-event buffer.
 func (s *Service) Add(event Notification) (StoredNotification, error) {
 	if err := Validate(&event); err != nil {
 		return StoredNotification{}, err
@@ -67,6 +87,7 @@ func (s *Service) Add(event Notification) (StoredNotification, error) {
 	return stored, nil
 }
 
+// List returns recent records, capped by the requested limit.
 func (s *Service) List(limit int) []StoredNotification {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -79,6 +100,7 @@ func (s *Service) List(limit int) []StoredNotification {
 	return out
 }
 
+// Validate validates the provided value.
 func Validate(event *Notification) error {
 	if event.Amount <= 0 {
 		return fmt.Errorf("amount must be greater than zero")

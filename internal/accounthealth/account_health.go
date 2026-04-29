@@ -18,20 +18,25 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
+// BisqAccountProvider is the bisq account provider value.
 const BisqAccountProvider = "Bisq"
 
+// Recorder defines the behavior required by this package.
 type Recorder interface {
 	UpdateAccountHealth(ctx context.Context, provider string, healthy bool) error
 }
 
+// DBRecorder represents a dbrecorder.
 type DBRecorder struct {
 	db *dbutil.DB
 }
 
+// NewDBRecorder creates a dbrecorder.
 func NewDBRecorder(db *dbutil.DB) DBRecorder {
 	return DBRecorder{db: db}
 }
 
+// UpdateAccountHealth records the latest health state for a provider.
 func (s DBRecorder) UpdateAccountHealth(ctx context.Context, provider string, healthy bool) error {
 	result, err := s.db.DB.ExecContext(ctx, `
 		UPDATE accounts
@@ -53,24 +58,29 @@ func (s DBRecorder) UpdateAccountHealth(ctx context.Context, provider string, he
 	return nil
 }
 
+// Checker defines the behavior required by this package.
 type Checker interface {
 	Check(ctx context.Context) error
 }
 
+// BisqPaymentAccountChecker defines the behavior required by this package.
 type BisqPaymentAccountChecker interface {
 	PaymentAccountCount(ctx context.Context) (int, error)
 }
 
+// BisqGRPCAccountChecker represents a bisq grpcaccount checker.
 type BisqGRPCAccountChecker struct {
 	host     string
 	password string
 	timeout  time.Duration
 }
 
+// NewBisqGRPCAccountChecker creates a bisq grpcaccount checker.
 func NewBisqGRPCAccountChecker(host string, password string, timeout time.Duration) BisqGRPCAccountChecker {
 	return BisqGRPCAccountChecker{host: host, password: password, timeout: timeout}
 }
 
+// PaymentAccountCount returns the number of Bisq payment accounts visible through gRPC.
 func (c BisqGRPCAccountChecker) PaymentAccountCount(ctx context.Context) (int, error) {
 	timeout := c.timeout
 	if timeout <= 0 {
@@ -105,14 +115,17 @@ type bisqAccountCreds struct {
 	password string
 }
 
+// GetRequestMetadata retrieves a request metadata.
 func (c bisqAccountCreds) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
 	return map[string]string{"password": c.password}, nil
 }
 
+// RequireTransportSecurity reports whether the credentials require transport security.
 func (c bisqAccountCreds) RequireTransportSecurity() bool {
 	return false
 }
 
+// CheckBisqAccountHealth checks a bisq account health.
 func CheckBisqAccountHealth(ctx context.Context, checker BisqPaymentAccountChecker) error {
 	count, err := checker.PaymentAccountCount(ctx)
 	if err != nil {
@@ -124,6 +137,7 @@ func CheckBisqAccountHealth(ctx context.Context, checker BisqPaymentAccountCheck
 	return nil
 }
 
+// RunAccountHealthCheck runs an account health check.
 func RunAccountHealthCheck(
 	ctx context.Context,
 	recorder Recorder,
@@ -142,6 +156,7 @@ func RunAccountHealthCheck(
 	log.Printf("[AccountHealth] %s healthy", provider)
 }
 
+// RunPeriodicAccountHealthCheck runs a periodic account health check.
 func RunPeriodicAccountHealthCheck(
 	ctx context.Context,
 	interval time.Duration,
@@ -165,6 +180,7 @@ func RunPeriodicAccountHealthCheck(
 	}
 }
 
+// ParseInterval parses an interval.
 func ParseInterval(raw string) time.Duration {
 	if raw == "" {
 		return time.Minute
@@ -176,6 +192,7 @@ func ParseInterval(raw string) time.Duration {
 	return interval
 }
 
+// Runner represents a runner.
 type Runner struct {
 	recorder Recorder
 	checker  Checker
@@ -183,6 +200,7 @@ type Runner struct {
 	interval time.Duration
 }
 
+// NewRunner creates a runner.
 func NewRunner(recorder Recorder, checker Checker, interval time.Duration) *Runner {
 	return &Runner{
 		recorder: recorder,
@@ -192,12 +210,15 @@ func NewRunner(recorder Recorder, checker Checker, interval time.Duration) *Runn
 	}
 }
 
+// Start starts the configured worker.
 func (r *Runner) Start(ctx context.Context) {
 	RunPeriodicAccountHealthCheck(ctx, r.interval, r.recorder, r.provider, r.checker.Check)
 }
 
+// CheckFunc identifies a check func.
 type CheckFunc func(context.Context) error
 
+// Check checks value.
 func (f CheckFunc) Check(ctx context.Context) error {
 	return f(ctx)
 }

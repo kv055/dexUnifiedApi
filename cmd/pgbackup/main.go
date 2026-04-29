@@ -14,25 +14,44 @@ import (
 	"time"
 )
 
+// Config represents a config.
 type Config struct {
-	Enabled        bool
-	PgDumpPath     string
-	PgRestorePath  string
-	RclonePath     string
-	Host           string
-	Port           int
-	Database       string
-	User           string
-	Password       string
-	BackupDir      string
-	FilePrefix     string
-	RetentionDays  int
-	Upload         bool
+	// Enabled is the enabled value for the config.
+	Enabled bool
+	// PgDumpPath is the pg dump path value for the config.
+	PgDumpPath string
+	// PgRestorePath is the pg restore path value for the config.
+	PgRestorePath string
+	// RclonePath is the rclone path value for the config.
+	RclonePath string
+	// Host is the host value for the config.
+	Host string
+	// Port is the port value for the config.
+	Port int
+	// Database is the database value for the config.
+	Database string
+	// User is the user value for the config.
+	User string
+	// Password is the password value for the config.
+	Password string
+	// BackupDir is the backup dir value for the config.
+	BackupDir string
+	// FilePrefix is the file prefix value for the config.
+	FilePrefix string
+	// RetentionDays is the retention days value for the config.
+	RetentionDays int
+	// Upload is the upload value for the config.
+	Upload bool
+	// UploadRequired is the upload required value for the config.
 	UploadRequired bool
-	RcloneRemote   string
+	// RcloneRemote is the rclone remote value for the config.
+	RcloneRemote string
+	// CommandTimeout records the relevant time for the config.
 	CommandTimeout time.Duration
-	RetentionNow   time.Time
-	TimestampNow   time.Time
+	// RetentionNow is the retention now value for the config.
+	RetentionNow time.Time
+	// TimestampNow records the relevant time for the config.
+	TimestampNow time.Time
 }
 
 func main() {

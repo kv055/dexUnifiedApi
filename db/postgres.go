@@ -7,14 +7,17 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// DB represents a db.
 type DB struct {
 	*sql.DB
 }
 
+// Tx represents a tx.
 type Tx struct {
 	*sql.Tx
 }
 
+// Open opens the requested resource.
 func Open(databaseURL string) (*DB, error) {
 	raw, err := sql.Open("pgx", databaseURL)
 	if err != nil {
@@ -23,22 +26,27 @@ func Open(databaseURL string) (*DB, error) {
 	return &DB{DB: raw}, nil
 }
 
+// Exec executes a SQL statement after rebinding placeholders for PostgreSQL.
 func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
 	return db.DB.Exec(rebind(query), args...)
 }
 
+// Query runs a SQL query after rebinding placeholders for PostgreSQL.
 func (db *DB) Query(query string, args ...any) (*sql.Rows, error) {
 	return db.DB.Query(rebind(query), args...)
 }
 
+// QueryRow runs a single-row SQL query after rebinding placeholders for PostgreSQL.
 func (db *DB) QueryRow(query string, args ...any) *sql.Row {
 	return db.DB.QueryRow(rebind(query), args...)
 }
 
+// Prepare prepares a SQL statement after rebinding placeholders for PostgreSQL.
 func (db *DB) Prepare(query string) (*sql.Stmt, error) {
 	return db.DB.Prepare(rebind(query))
 }
 
+// Begin starts a transaction wrapped with placeholder-rebinding helpers.
 func (db *DB) Begin() (*Tx, error) {
 	tx, err := db.DB.Begin()
 	if err != nil {
@@ -47,18 +55,22 @@ func (db *DB) Begin() (*Tx, error) {
 	return &Tx{Tx: tx}, nil
 }
 
+// Exec executes a SQL statement after rebinding placeholders for PostgreSQL.
 func (tx *Tx) Exec(query string, args ...any) (sql.Result, error) {
 	return tx.Tx.Exec(rebind(query), args...)
 }
 
+// Query runs a SQL query after rebinding placeholders for PostgreSQL.
 func (tx *Tx) Query(query string, args ...any) (*sql.Rows, error) {
 	return tx.Tx.Query(rebind(query), args...)
 }
 
+// QueryRow runs a single-row SQL query after rebinding placeholders for PostgreSQL.
 func (tx *Tx) QueryRow(query string, args ...any) *sql.Row {
 	return tx.Tx.QueryRow(rebind(query), args...)
 }
 
+// Prepare prepares a SQL statement after rebinding placeholders for PostgreSQL.
 func (tx *Tx) Prepare(query string) (*sql.Stmt, error) {
 	return tx.Tx.Prepare(rebind(query))
 }

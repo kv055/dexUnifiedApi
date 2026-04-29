@@ -12,14 +12,21 @@ const (
 	roleFiatController = "dex_fiat_controller"
 )
 
+// RoleBootstrapConfig represents a role bootstrap config.
 type RoleBootstrapConfig struct {
-	DatabaseName           string
-	UnifiedAPIPassword     string
-	MonitorPassword        string
-	MMControllerPassword   string
+	// DatabaseName is the database name value for the role bootstrap config.
+	DatabaseName string
+	// UnifiedAPIPassword is the unified apipassword value for the role bootstrap config.
+	UnifiedAPIPassword string
+	// MonitorPassword is the monitor password value for the role bootstrap config.
+	MonitorPassword string
+	// MMControllerPassword is the mmcontroller password value for the role bootstrap config.
+	MMControllerPassword string
+	// FiatControllerPassword is a fiat-denominated fiat controller password value.
 	FiatControllerPassword string
 }
 
+// EnsureAppRoles ensures the required state exists.
 func EnsureAppRoles(admin *DB, cfg RoleBootstrapConfig) error {
 	if strings.TrimSpace(cfg.DatabaseName) == "" {
 		return fmt.Errorf("bootstrap database name is required")

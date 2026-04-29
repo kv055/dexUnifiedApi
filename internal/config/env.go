@@ -53,6 +53,7 @@ func LoadRequiredDotEnv(path string) error {
 	return nil
 }
 
+// EnvOrDefault returns an environment value or the supplied default.
 func EnvOrDefault(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
@@ -60,6 +61,7 @@ func EnvOrDefault(key, fallback string) string {
 	return fallback
 }
 
+// RequireEnv returns an environment value or exits when it is missing.
 func RequireEnv(key string) string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
@@ -68,6 +70,7 @@ func RequireEnv(key string) string {
 	return value
 }
 
+// RequireEnvSet loads a group of required environment variables.
 func RequireEnvSet(keys ...string) {
 	var missing []string
 	for _, key := range keys {
@@ -82,6 +85,7 @@ func RequireEnvSet(keys ...string) {
 	panic(fmt.Sprintf("missing secrets: %s", strings.Join(missing, ", ")))
 }
 
+// PostgresURLFromEnv builds the application Postgres URL from environment variables.
 func PostgresURLFromEnv() string {
 	host := EnvOrDefault("POSTGRES_HOST", "localhost")
 	port := EnvOrDefault("POSTGRES_PORT", "5432")
@@ -93,6 +97,7 @@ func PostgresURLFromEnv() string {
 	return PostgresURL(host, port, database, user, password)
 }
 
+// PostgresAdminURLFromEnv builds the admin Postgres URL from environment variables.
 func PostgresAdminURLFromEnv() string {
 	host := EnvOrDefault("POSTGRES_HOST", "localhost")
 	port := EnvOrDefault("POSTGRES_PORT", "5432")
@@ -103,6 +108,7 @@ func PostgresAdminURLFromEnv() string {
 	return PostgresURL(host, port, database, user, password)
 }
 
+// PostgresURL formats a Postgres connection URL.
 func PostgresURL(host, port, database, user, password string) string {
 	return (&url.URL{
 		Scheme: "postgres",

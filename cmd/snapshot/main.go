@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	dbutil "dexunifiedapi/db"
 	"dexunifiedapi/internal/config"
-	"dexunifiedapi/db"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,9 +75,12 @@ func runningUnderGoTest() bool {
 // bisqCreds injects the Bisq API password header on every gRPC call.
 type bisqCreds struct{ password string }
 
+// GetRequestMetadata retrieves a request metadata.
 func (c bisqCreds) GetRequestMetadata(_ context.Context, _ ...string) (map[string]string, error) {
 	return map[string]string{"password": c.password}, nil
 }
+
+// RequireTransportSecurity reports whether the credentials require transport security.
 func (c bisqCreds) RequireTransportSecurity() bool { return false }
 
 // --- Offer type ---

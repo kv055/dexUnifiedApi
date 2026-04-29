@@ -21,26 +21,43 @@ var upgrader = websocket.Upgrader{
 
 // LiveOffer holds a single live offer pushed by the snapshot tool.
 type LiveOffer struct {
-	ID            int64    `json:"id"`
-	Exchange      string   `json:"exchange"`
-	FiatCurrency  string   `json:"fiat_currency"`
-	Direction     string   `json:"direction"`
-	Price         float64  `json:"price"`
-	BTCMin        *float64 `json:"btc_min"`
-	BTCMax        *float64 `json:"btc_max"`
-	FiatMin       *int64   `json:"fiat_min"`
-	FiatMax       *int64   `json:"fiat_max"`
-	PaymentMethod *string  `json:"payment_method"`
-	OfferID       *string  `json:"offer_id"`
-	FirstSeen     string   `json:"first_seen"`
-	LastSeen      string   `json:"last_seen"`
-	PriceType     *string  `json:"price_type"`
+	// ID identifies the live offer.
+	ID int64 `json:"id"`
+	// Exchange is the exchange value for the live offer.
+	Exchange string `json:"exchange"`
+	// FiatCurrency is a fiat-denominated fiat currency value.
+	FiatCurrency string `json:"fiat_currency"`
+	// Direction is the direction value for the live offer.
+	Direction string `json:"direction"`
+	// Price is the price value used by the live offer.
+	Price float64 `json:"price"`
+	// BTCMin is a BTC-denominated btcmin value.
+	BTCMin *float64 `json:"btc_min"`
+	// BTCMax is a BTC-denominated btcmax value.
+	BTCMax *float64 `json:"btc_max"`
+	// FiatMin is a fiat-denominated fiat min value.
+	FiatMin *int64 `json:"fiat_min"`
+	// FiatMax is a fiat-denominated fiat max value.
+	FiatMax *int64 `json:"fiat_max"`
+	// PaymentMethod is the payment method value for the live offer.
+	PaymentMethod *string `json:"payment_method"`
+	// OfferID is the offer id value for the live offer.
+	OfferID *string `json:"offer_id"`
+	// FirstSeen is the first seen value for the live offer.
+	FirstSeen string `json:"first_seen"`
+	// LastSeen is the last seen value for the live offer.
+	LastSeen string `json:"last_seen"`
+	// PriceType is the price value used by the live offer.
+	PriceType *string `json:"price_type"`
 }
 
 // LifecyclePoint is a single price observation from the order_lifecycle table.
 type LifecyclePoint struct {
-	Time          string   `json:"time"`
-	Price         float64  `json:"price"`
+	// Time records the relevant time for the lifecycle point.
+	Time string `json:"time"`
+	// Price is the price value used by the lifecycle point.
+	Price float64 `json:"price"`
+	// NetPremiumPct is a percentage value.
 	NetPremiumPct *float64 `json:"net_premium_pct,omitempty"`
 }
 

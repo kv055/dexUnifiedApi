@@ -11,6 +11,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
+// EnsureUnifiedSchema ensures the required state exists.
 func EnsureUnifiedSchema(db *DB) error {
 	if _, err := db.DB.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (

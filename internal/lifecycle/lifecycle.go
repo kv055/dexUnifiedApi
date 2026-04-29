@@ -10,29 +10,43 @@ import (
 	dbutil "dexunifiedapi/db"
 )
 
+// Point represents a point.
 type Point struct {
-	Time          string   `json:"time"`
-	Price         float64  `json:"price"`
+	// Time records the relevant time for the point.
+	Time string `json:"time"`
+	// Price is the price value used by the point.
+	Price float64 `json:"price"`
+	// NetPremiumPct is a percentage value.
 	NetPremiumPct *float64 `json:"net_premium_pct,omitempty"`
 }
 
+// Record represents a record.
 type Record struct {
-	ID            int64
-	Price         float64
-	RefPrice      float64
-	PriceDiffPct  float64
+	// ID identifies the record.
+	ID int64
+	// Price is the price value used by the record.
+	Price float64
+	// RefPrice is the price value used by the record.
+	RefPrice float64
+	// PriceDiffPct is a percentage value.
+	PriceDiffPct float64
+	// NetPremiumPct is a percentage value.
 	NetPremiumPct float64
+	// CostBreakdown is the cost breakdown value for the record.
 	CostBreakdown tradecost.CostBreakdown
 }
 
+// Repository represents a repository.
 type Repository struct {
 	db *dbutil.DB
 }
 
+// NewRepository creates a repository.
 func NewRepository(db *dbutil.DB) Repository {
 	return Repository{db: db}
 }
 
+// LoadByOfferIDs loads a by offer ids.
 func (r Repository) LoadByOfferIDs(ctx context.Context, ids []int64) (map[int64][]Point, error) {
 	result := make(map[int64][]Point, len(ids))
 	if r.db == nil || len(ids) == 0 {
@@ -75,6 +89,7 @@ func (r Repository) LoadByOfferIDs(ctx context.Context, ids []int64) (map[int64]
 	return result, nil
 }
 
+// PersistSnapshot writes lifecycle samples and derived route costs.
 func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error {
 	if len(offers) == 0 || r.db == nil {
 		return nil
