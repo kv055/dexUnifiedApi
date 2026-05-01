@@ -1,5 +1,7 @@
 # Stage 1: Build Go binary
 FROM golang:1.25-alpine AS builder
+ARG GOPROXY=https://goproxy.io,https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 
 WORKDIR /build/dexUnifiedApi
 COPY commons/ ../commons/
