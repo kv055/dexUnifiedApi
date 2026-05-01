@@ -122,6 +122,18 @@ type livePayload struct {
 
 func priceTypeFixed() *string    { s := "fixed"; return &s }
 func priceTypeFloating() *string { s := "floating"; return &s }
+func priceTypeUnknown() *string  { s := "unknown"; return &s }
+
+func normalizeHodlHodlPriceType(priceSource string) *string {
+	switch priceSource {
+	case "fixed_value":
+		return priceTypeFixed()
+	case "exchange_rate":
+		return priceTypeFloating()
+	default:
+		return priceTypeUnknown()
+	}
+}
 
 // --- HTTP clients ---
 
@@ -342,14 +354,6 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 			method = "NATIONAL_BANK"
 		}
 
-		var pt *string
-		switch o.PriceSource {
-		case "fixed_value":
-			pt = priceTypeFixed()
-		case "exchange_rate":
-			pt = priceTypeFloating()
-		}
-
 		btcMin := round8(float64(fiatMin) / price)
 		btcMax := round8(float64(fiatMax) / price)
 		offers = append(offers, offer{
@@ -361,7 +365,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 			FiatMin:       &fiatMin,
 			FiatMax:       &fiatMax,
 			PaymentMethod: method,
-			PriceType:     pt,
+			PriceType:     normalizeHodlHodlPriceType(o.PriceSource),
 		})
 	}
 
