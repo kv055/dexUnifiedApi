@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS offers (
     avg_trade_cost_pct DOUBLE PRECISION,
     avg_trade_cost_btc DOUBLE PRECISION CHECK (avg_trade_cost_btc IS NULL OR avg_trade_cost_btc >= 0),
     avg_hedge_fee_sum_btc DOUBLE PRECISION CHECK (avg_hedge_fee_sum_btc IS NULL OR avg_hedge_fee_sum_btc >= 0),
+    abort_cost_btc DOUBLE PRECISION CHECK (abort_cost_btc IS NULL OR abort_cost_btc >= 0),
+    abort_cost_pct DOUBLE PRECISION CHECK (abort_cost_pct IS NULL OR abort_cost_pct >= 0),
     cex_taker_fee_btc DOUBLE PRECISION CHECK (cex_taker_fee_btc IS NULL OR cex_taker_fee_btc >= 0),
     cex_withdraw_fee_btc DOUBLE PRECISION CHECK (cex_withdraw_fee_btc IS NULL OR cex_withdraw_fee_btc >= 0),
     network_fee_btc DOUBLE PRECISION CHECK (network_fee_btc IS NULL OR network_fee_btc >= 0),

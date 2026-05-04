@@ -75,17 +75,20 @@ func TestPersistSnapshotStoresStaticCostsOnOfferOnly(t *testing.T) {
 		t.Fatalf("lifecycle rows = %d, want 1", lifecycleRows)
 	}
 
-	var taker, withdrawal, network, dexFee float64
+	var taker, withdrawal, network, dexFee, abortBTC, abortPct float64
 	if err := db.QueryRow(`
-		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc, dex_fee_btc
+		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc,
+		       dex_fee_btc, abort_cost_btc, abort_cost_pct
 		FROM offers WHERE id = ?
-	`, offerID).Scan(&taker, &withdrawal, &network, &dexFee); err != nil {
+	`, offerID).Scan(&taker, &withdrawal, &network, &dexFee, &abortBTC, &abortPct); err != nil {
 		t.Fatalf("select offer costs: %v", err)
 	}
 	assertFloat(t, taker, 0.00025)
 	assertFloat(t, withdrawal, 0.00015)
 	assertFloat(t, network, 0.0001)
 	assertFloat(t, dexFee, 0.0005)
+	assertFloat(t, abortBTC, 0.00075)
+	assertFloat(t, abortPct, 0.75)
 }
 
 func TestPersistSnapshotLeavesAskWithdrawalFeeNull(t *testing.T) {
@@ -124,6 +127,13 @@ func TestPersistSnapshotLeavesAskWithdrawalFeeNull(t *testing.T) {
 	if withdrawal.Valid {
 		t.Fatalf("ask withdrawal fee = %v, want NULL", withdrawal.Float64)
 	}
+
+	var abortBTC, abortPct float64
+	if err := db.QueryRow(`SELECT abort_cost_btc, abort_cost_pct FROM offers WHERE id = ?`, offerID).Scan(&abortBTC, &abortPct); err != nil {
+		t.Fatalf("select abort cost: %v", err)
+	}
+	assertFloat(t, abortBTC, 0.0002)
+	assertFloat(t, abortPct, 0.2)
 }
 
 func TestPersistSnapshotReturnsInsertErrorAndRollsBack(t *testing.T) {

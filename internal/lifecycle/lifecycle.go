@@ -125,7 +125,9 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 			cex_taker_fee_btc = ?,
 			cex_withdraw_fee_btc = ?,
 			network_fee_btc = ?,
-			dex_fee_btc = ?
+			dex_fee_btc = ?,
+			abort_cost_btc = ?,
+			abort_cost_pct = ?
 		WHERE id = ?
 	`)
 	if err != nil {
@@ -156,6 +158,7 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 			return fmt.Errorf("insert lifecycle for offer %d: %w", o.ID, err)
 		}
 		if bd.RouteCEX != "" {
+			abort := tradecost.AbortCostFromBreakdown(bd)
 			if _, err := updStmt.ExecContext(ctx,
 				bd.RouteCEX,
 				bd.RouteMethod,
@@ -170,6 +173,8 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 				cexWithdrawFee,
 				tradecost.Round8(bd.NetworkFeeBTC),
 				tradecost.Round8(bd.DexFeeBTC),
+				tradecost.Round8(abort.Total.BTC),
+				tradecost.Round4(abort.Total.Pct),
 				o.ID,
 			); err != nil {
 				return fmt.Errorf("update lifecycle route costs for offer %d: %w", o.ID, err)
