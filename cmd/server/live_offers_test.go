@@ -221,7 +221,11 @@ CREATE TABLE offers (
 	hedge_fee_sum_btc REAL,
 	hedge_venue TEXT,
 	hedge_instrument TEXT,
-	hedge_transfer_minutes INTEGER
+	hedge_transfer_minutes INTEGER,
+	cex_taker_fee_btc REAL,
+	cex_withdraw_fee_btc REAL,
+	network_fee_btc REAL,
+	dex_fee_btc REAL
 );
 
 CREATE TABLE order_lifecycle (
@@ -233,10 +237,6 @@ CREATE TABLE order_lifecycle (
 	premium_pct REAL NOT NULL,
 	trade_cost_pct REAL,
 	trade_cost_btc REAL,
-	cex_taker_fee_btc REAL,
-	cex_withdraw_fee_btc REAL,
-	network_fee_btc REAL,
-	dex_fee_btc REAL,
 	net_premium_pct REAL,
 	net_premium_btc REAL,
 	btc_amount REAL
@@ -308,4 +308,15 @@ func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
 	if lifecycleRows != 1 {
 		t.Fatalf("lifecycle rows = %d, want 1", lifecycleRows)
 	}
+	var takerFee, withdrawalFee, networkFee, dexFee float64
+	if err := testSQLDB.QueryRow(`
+		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc, dex_fee_btc
+		FROM offers WHERE id = 1
+	`).Scan(&takerFee, &withdrawalFee, &networkFee, &dexFee); err != nil {
+		t.Fatalf("select offer fees: %v", err)
+	}
+	assertFloat(t, takerFee, 0.00025)
+	assertFloat(t, withdrawalFee, 0.00015)
+	assertFloat(t, networkFee, 0.0001)
+	assertFloat(t, dexFee, 0.0001)
 }

@@ -8,23 +8,14 @@ import (
 	"strings"
 )
 
-//go:embed migrations/*.sql
-var migrationFiles embed.FS
+//go:embed schema/*.sql
+var schemaFiles embed.FS
 
 // EnsureUnifiedSchema ensures the required state exists.
 func EnsureUnifiedSchema(db *DB) error {
-	if _, err := db.DB.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)
-	`); err != nil {
-		return fmt.Errorf("create schema_migrations table: %w", err)
-	}
-
-	entries, err := migrationFiles.ReadDir("migrations")
+	entries, err := schemaFiles.ReadDir("schema")
 	if err != nil {
-		return fmt.Errorf("read migration directory: %w", err)
+		return fmt.Errorf("read schema directory: %w", err)
 	}
 
 	var filenames []string
@@ -37,40 +28,22 @@ func EnsureUnifiedSchema(db *DB) error {
 	sort.Strings(filenames)
 
 	for _, filename := range filenames {
-		var applied bool
-		if err := db.DB.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)`,
-			filename,
-		).Scan(&applied); err != nil {
-			return fmt.Errorf("check migration %s: %w", filename, err)
-		}
-		if applied {
-			continue
-		}
-
-		sqlBytes, err := migrationFiles.ReadFile(path.Join("migrations", filename))
+		sqlBytes, err := schemaFiles.ReadFile(path.Join("schema", filename))
 		if err != nil {
-			return fmt.Errorf("read migration %s: %w", filename, err)
+			return fmt.Errorf("read schema file %s: %w", filename, err)
 		}
 
 		tx, err := db.DB.Begin()
 		if err != nil {
-			return fmt.Errorf("begin migration %s: %w", filename, err)
+			return fmt.Errorf("begin schema file %s: %w", filename, err)
 		}
 
 		if _, err := tx.Exec(string(sqlBytes)); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("apply migration %s: %w", filename, err)
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO schema_migrations (version) VALUES ($1)`,
-			filename,
-		); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record migration %s: %w", filename, err)
+			return fmt.Errorf("apply schema file %s: %w", filename, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", filename, err)
+			return fmt.Errorf("commit schema file %s: %w", filename, err)
 		}
 	}
 

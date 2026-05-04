@@ -11,7 +11,24 @@ JAVA_BIN=/opt/java/openjdk/bin/java
 BACKUP_TIMEOUT_SEC="${BISQ_SEED_BACKUP_TIMEOUT_SEC:-900}"
 BACKUP_RETRY_DELAY_SEC="${BISQ_SEED_BACKUP_RETRY_DELAY_SEC:-30}"
 BACKUP_HELPER_TIMEOUT_SEC="${BISQ_SEED_BACKUP_HELPER_TIMEOUT_SEC:-30}"
-ACCOUNT_PROVIDER="${BISQ_ACCOUNT_PROVIDER:-Bisq}"
+case "$(printf '%s' "${BISQ_ACCOUNT_PROVIDER:-Bisq}" | tr '[:upper:]' '[:lower:]')" in
+  bisq) ACCOUNT_PROVIDER="Bisq" ;;
+  robosats) ACCOUNT_PROVIDER="Robosats" ;;
+  hodlhodl) ACCOUNT_PROVIDER="HodlHodl" ;;
+  kraken) ACCOUNT_PROVIDER="Kraken" ;;
+  coinbase) ACCOUNT_PROVIDER="Coinbase" ;;
+  bitstamp) ACCOUNT_PROVIDER="Bitstamp" ;;
+  binance) ACCOUNT_PROVIDER="Binance" ;;
+  bybit) ACCOUNT_PROVIDER="ByBit" ;;
+  kucoin) ACCOUNT_PROVIDER="KuCoin" ;;
+  huobi) ACCOUNT_PROVIDER="Huobi" ;;
+  lnd | "lnd wallet" | lnd_wallet) ACCOUNT_PROVIDER="LND wallet" ;;
+  wise) ACCOUNT_PROVIDER="WISE" ;;
+  paypal) ACCOUNT_PROVIDER="PayPal" ;;
+  revolut) ACCOUNT_PROVIDER="Revolut" ;;
+  n26) ACCOUNT_PROVIDER="N26" ;;
+  *) ACCOUNT_PROVIDER="${BISQ_ACCOUNT_PROVIDER:-Bisq}" ;;
+esac
 BACKUP_DATABASE_URL="${BISQ_BACKUP_DATABASE_URL:-${BISQ_SEED_BACKUP_DATABASE_URL:-}}"
 
 mkdir -p "$APP_DIR"

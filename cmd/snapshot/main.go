@@ -720,7 +720,7 @@ func main() {
 	fmt.Printf("\n=== Snapshot complete — %d offers from %v ===\n", total, names)
 }
 
-// fetchAndStoreKrakenOHLC fetches 1-min Kraken OHLC candles and upserts them into kraken_ohlc.
+// fetchAndStoreKrakenOHLC fetches 1-min Kraken OHLC candles and upserts them into ohlc.
 func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
 	resp, err := clearnetClient().Get("https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval=1")
 	if err != nil {
@@ -766,7 +766,7 @@ func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
 			json.Unmarshal(c[3], &low)
 			json.Unmarshal(c[4], &cls)
 			t := time.Unix(int64(ts), 0).UTC().Format("2006-01-02 15:04:05")
-			tx.Exec(`INSERT INTO kraken_ohlc (time, open, high, low, close) VALUES (?, ?, ?, ?, ?)
+			tx.Exec(`INSERT INTO ohlc (time, open, high, low, close) VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT(time) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close`,
 				t,
 				parseFloatStr(open), parseFloatStr(high), parseFloatStr(low), parseFloatStr(cls),
@@ -814,18 +814,18 @@ func settleClosedOffers(sdb *dbutil.DB) {
 	for _, o := range batch {
 		var avgClose float64
 		sdb.QueryRow(`
-			SELECT AVG(close) FROM kraken_ohlc
+			SELECT AVG(close) FROM ohlc
 			WHERE time >= ? AND time <= ?
 		`, o.firstSeen, o.lastSeen).Scan(&avgClose)
 
 		// No candles in range — offer's lifetime may predate our cached OHLC window.
 		// Fetch historical data from Kraken using the offer's first_seen as the
-		// since parameter, upsert into kraken_ohlc, then retry.
+		// since parameter, upsert into ohlc, then retry.
 		if avgClose == 0 {
 			if firstSeenUnix := parseDBTimeUnix(o.firstSeen); firstSeenUnix > 0 {
 				fetchAndStoreKrakenOHLCSince(sdb, firstSeenUnix)
 				sdb.QueryRow(`
-					SELECT AVG(close) FROM kraken_ohlc
+					SELECT AVG(close) FROM ohlc
 					WHERE time >= ? AND time <= ?
 				`, o.firstSeen, o.lastSeen).Scan(&avgClose)
 			}
@@ -834,7 +834,7 @@ func settleClosedOffers(sdb *dbutil.DB) {
 		// Last resort: nearest single candle to last_seen
 		if avgClose == 0 {
 			sdb.QueryRow(`
-				SELECT close FROM kraken_ohlc
+				SELECT close FROM ohlc
 				ORDER BY ABS(EXTRACT(EPOCH FROM (time - ?::timestamptz)))
 				LIMIT 1
 			`, o.lastSeen).Scan(&avgClose)
@@ -873,7 +873,7 @@ func pushLiveOffersToServer(offers []livePayload, serverURL string) {
 }
 
 // fetchAndStoreKrakenOHLCSince fetches 1-min candles starting from sinceUnix
-// and upserts them into kraken_ohlc. Used to backfill history for offers whose
+// and upserts them into ohlc. Used to backfill history for offers whose
 // lifetime predates the standard OHLC cache window (~7.5 days).
 func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64) {
 	url := fmt.Sprintf("https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval=1&since=%d", sinceUnix)
@@ -921,7 +921,7 @@ func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64) {
 			json.Unmarshal(c[3], &low)
 			json.Unmarshal(c[4], &cls)
 			t := time.Unix(int64(ts), 0).UTC().Format("2006-01-02 15:04:05")
-			tx.Exec(`INSERT INTO kraken_ohlc (time, open, high, low, close) VALUES (?, ?, ?, ?, ?)
+			tx.Exec(`INSERT INTO ohlc (time, open, high, low, close) VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT(time) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close`,
 				t,
 				parseFloatStr(open), parseFloatStr(high), parseFloatStr(low), parseFloatStr(cls),

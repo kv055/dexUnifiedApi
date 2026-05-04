@@ -52,10 +52,6 @@ CREATE TABLE order_lifecycle (
 	premium_pct REAL NOT NULL,
 	trade_cost_pct REAL,
 	trade_cost_btc REAL,
-	cex_taker_fee_btc REAL,
-	cex_withdraw_fee_btc REAL,
-	network_fee_btc REAL,
-	dex_fee_btc REAL,
 	net_premium_pct REAL,
 	net_premium_btc REAL,
 	btc_amount REAL
@@ -113,10 +109,9 @@ func insertLifecycleRow(t *testing.T, db *sql.DB, offerID int64, premiumPct, tra
 	if _, err := db.Exec(`
 		INSERT INTO order_lifecycle (
 			offer_db_id, price, ref_price, premium_pct,
-			trade_cost_pct, trade_cost_btc, cex_taker_fee_btc, cex_withdraw_fee_btc,
-			network_fee_btc, dex_fee_btc, net_premium_pct, net_premium_btc, btc_amount
+			trade_cost_pct, trade_cost_btc, net_premium_pct, net_premium_btc, btc_amount
 		)
-		VALUES (?, 105, 100, ?, ?, 0.0002, 0.00003, 0.00004, 0.00005, 0.00006, ?, ?, ?)
+		VALUES (?, 105, 100, ?, ?, 0.0002, ?, ?, ?)
 	`, offerID, premiumPct, tradeCostPct, netPremiumPct, netPremiumBTC, btcAmount); err != nil {
 		t.Fatalf("insert lifecycle: %v", err)
 	}

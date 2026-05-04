@@ -3,10 +3,11 @@ FROM golang:1.25-alpine AS builder
 ARG GOPROXY=https://goproxy.io,https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 
-WORKDIR /build
-COPY go.mod go.sum ./
+WORKDIR /build/dexUnifiedApi
+COPY commons/ ../commons/
+COPY dexUnifiedApi/go.mod dexUnifiedApi/go.sum ./
 RUN go mod download
-COPY cmd/pgbackup/ ./cmd/pgbackup/
+COPY dexUnifiedApi/cmd/pgbackup/ ./cmd/pgbackup/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o pgbackup ./cmd/pgbackup
 
 # Stage 2: Backup runtime with PostgreSQL client tools and rclone
@@ -16,7 +17,7 @@ RUN apk add --no-cache ca-certificates postgresql-client rclone
 
 WORKDIR /app
 
-COPY --from=builder /build/pgbackup ./
+COPY --from=builder /build/dexUnifiedApi/pgbackup ./
 
 RUN adduser -D appuser && mkdir -p /backups && chown -R appuser:appuser /app /backups
 

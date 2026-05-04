@@ -1,7 +1,7 @@
 # `db/schema.go`
 
 Source package: `dbutil`  
-Source lines: `79`
+Source lines: `52`
 
 ## Package Purpose
 
@@ -9,23 +9,23 @@ This file contributes to the `dbutil` package.
 
 ## File Role
 
-This file implements 1 function or method entry point(s), declares 1 package value(s).
+This file embeds and applies the split Postgres schema files in sorted order.
 
 ## Runtime Behavior
 
-- Reads from or writes to persistent storage.
+- Reads `db/schema/*.sql` from the embedded filesystem and executes each file in its own transaction.
 
 ## Functions and Methods
 
 ### `EnsureUnifiedSchema`
 
-EnsureUnifiedSchema ensures the required state exists.
+EnsureUnifiedSchema applies the table-local schema files for a fresh or already-initialized Postgres database.
 
 Signature: `func EnsureUnifiedSchema(db *DB) error`
 
 ## Constants and Variables
 
-- `migrationFiles`: No inline declaration comment is present.
+- `schemaFiles`: Embedded SQL schema files.
 
 ## Key Dependencies
 
@@ -34,4 +34,3 @@ Signature: `func EnsureUnifiedSchema(db *DB) error`
 - `path`
 - `sort`
 - `strings`
-

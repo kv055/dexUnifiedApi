@@ -12,7 +12,7 @@ On startup the server:
 2. Connects to Postgres as the admin role.
 3. Ensures application roles exist for the unified API, monitor, MM controller, and fiat controller.
 4. Opens the unified API database connection.
-5. Applies the unified schema and migrations.
+5. Applies the unified schema files.
 6. Starts CEX price feeds and trade-cost estimators.
 7. Starts periodic Bisq account-health checks.
 8. Serves public and internal HTTP endpoints on `LISTEN_ADDR`.
@@ -26,7 +26,7 @@ dexUnifiedApi/
 +-- cmd/server/          # Public/internal HTTP API
 +-- cmd/snapshot/        # Offer snapshot worker
 +-- cmd/pgbackup/        # Postgres backup sidecar binary
-+-- db/                  # Schema bootstrap and migrations
++-- db/                  # Schema bootstrap and split schema files
 +-- internal/            # Config, lifecycle, account health, payment notifications
 +-- bisq_grpc/           # Bisq gRPC protobuf files
 +-- bisqseed/            # Bisq account seed extraction/startup helpers
@@ -176,4 +176,4 @@ For realistic local testing, use the root Compose stack so Postgres roles, Bisq,
 - Schema ownership lives here. Other services should treat the shared tables as an integration contract.
 - The live-offer hub intentionally keeps current offers in memory and receives fresh state from the snapshot worker.
 - The API starts price feeds for supported CEXes so premium calculations can react to price changes.
-- Account and secret storage migrations are part of this module because multiple services consume the same tables.
+- Account and secret storage schema files are part of this module because multiple services consume the same tables.

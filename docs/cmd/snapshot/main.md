@@ -183,7 +183,7 @@ Signature: `func main()`
 
 ### `fetchAndStoreKrakenOHLC`
 
-fetchAndStoreKrakenOHLC fetches 1-min Kraken OHLC candles and upserts them into kraken_ohlc.
+fetchAndStoreKrakenOHLC fetches 1-min Kraken OHLC candles and upserts them into `ohlc`.
 
 Signature: `func fetchAndStoreKrakenOHLC(sdb *dbutil.DB)`
 
@@ -205,7 +205,7 @@ Signature: `func pushLiveOffersToServer(offers []livePayload, serverURL string)`
 ### `fetchAndStoreKrakenOHLCSince`
 
 fetchAndStoreKrakenOHLCSince fetches 1-min candles starting from sinceUnix
-and upserts them into kraken_ohlc. Used to backfill history for offers whose
+and upserts them into `ohlc`. Used to backfill history for offers whose
 lifetime predates the standard OHLC cache window (~7.5 days).
 
 Signature: `func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64)`
@@ -270,4 +270,3 @@ Signature: `func nilIfEmpty(s string) any`
 - `dexunifiedapi/bisq_grpc/go`
 - `google.golang.org/grpc`
 - `google.golang.org/grpc/credentials/insecure`
-
