@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +103,13 @@ type fetchResult struct {
 	BTCPrice float64
 	Offers   []offer
 }
+
+type exchFetcher struct {
+	name string
+	fn   func(string, int) *fetchResult
+}
+
+type exchangeSnapshotData map[string]map[string]bool
 
 type livePayload struct {
 	ID            int64    `json:"id"`
@@ -300,6 +308,7 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 		})
 	}
 
+	fmt.Printf("[Bisq] Found %d %s offers\n", len(offers), direction)
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
 }
 
@@ -308,7 +317,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 	resp, err := clearnetClient().Get(reqURL)
 	if err != nil {
 		fmt.Printf("[HodlHodl] Error: %v\n", err)
-		return &fetchResult{}
+		return nil
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -330,7 +339,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 	}
 	if err := json.Unmarshal(body, &data); err != nil {
 		fmt.Printf("[HodlHodl] Parse error: %v\n", err)
-		return &fetchResult{}
+		return nil
 	}
 
 	var offers []offer
@@ -465,7 +474,7 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 	}
 
 	fmt.Println("[Robosats] All onion addresses failed")
-	return &fetchResult{}
+	return nil
 }
 
 // --- Database ---
@@ -567,7 +576,32 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 	return liveOffers
 }
 
-func writeSnapshotLog(sdb *dbutil.DB, exchangeData map[string]map[string]bool) {
+func recordFetchResult(exchangeData exchangeSnapshotData, exchange string, result *fetchResult) bool {
+	if result == nil {
+		return false
+	}
+	if exchangeData[exchange] == nil {
+		exchangeData[exchange] = make(map[string]bool)
+	}
+	for _, o := range result.Offers {
+		if o.OfferID != "" {
+			exchangeData[exchange][o.OfferID] = true
+		}
+	}
+	return true
+}
+
+func offlineExchangeNames(fetchers []exchFetcher, exchangeData exchangeSnapshotData) []string {
+	names := make([]string, 0)
+	for _, f := range fetchers {
+		if _, ok := exchangeData[f.name]; !ok {
+			names = append(names, f.name)
+		}
+	}
+	return names
+}
+
+func buildSnapshotLogPayload(exchangeData exchangeSnapshotData) ([]byte, int, error) {
 	exchanges := make(map[string]any)
 	total := 0
 	for ex, ids := range exchangeData {
@@ -575,13 +609,23 @@ func writeSnapshotLog(sdb *dbutil.DB, exchangeData map[string]map[string]bool) {
 		for id := range ids {
 			idList = append(idList, id)
 		}
+		sort.Strings(idList)
 		exchanges[ex] = map[string]any{
 			"count": len(ids),
 			"ids":   idList,
 		}
 		total += len(ids)
 	}
-	jsonBytes, _ := json.Marshal(exchanges)
+	jsonBytes, err := json.Marshal(exchanges)
+	return jsonBytes, total, err
+}
+
+func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData) {
+	jsonBytes, total, err := buildSnapshotLogPayload(exchangeData)
+	if err != nil {
+		fmt.Printf("[SnapshotLog] encode error: %v\n", err)
+		return
+	}
 	sdb.Exec("INSERT INTO snapshot_log (exchanges, offers_count) VALUES (?::jsonb, ?)", string(jsonBytes), total)
 }
 
@@ -641,38 +685,27 @@ func main() {
 	// Record start time; used after the run to mark which offers were seen
 	snapshotStart := time.Now().UTC()
 
-	type exchFetcher struct {
-		name string
-		fn   func(string, int) *fetchResult
-	}
 	fetchers := []exchFetcher{
 		{"bisq", fetchBisq},
 		{"hodlhodl", fetchHodlHodl},
 		{"robosats", fetchRobosats},
 	}
 
-	exchangeData := make(map[string]map[string]bool)
+	exchangeData := make(exchangeSnapshotData)
 	liveOffers := make([]livePayload, 0)
 
 	for _, direction := range []string{"sell", "buy"} {
 		fmt.Printf("\n--- Fetching %s offers ---\n", direction)
 		for _, f := range fetchers {
 			result := f.fn(direction, refPrice)
-			if result != nil && len(result.Offers) > 0 {
-				price := result.BTCPrice
-				if price == 0 {
-					price = float64(refPrice)
-				}
-				liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, "EUR", direction, price, result.Offers)...)
-				if exchangeData[f.name] == nil {
-					exchangeData[f.name] = make(map[string]bool)
-				}
-				for _, o := range result.Offers {
-					if o.OfferID != "" {
-						exchangeData[f.name][o.OfferID] = true
-					}
-				}
+			if !recordFetchResult(exchangeData, f.name, result) || len(result.Offers) == 0 {
+				continue
 			}
+			price := result.BTCPrice
+			if price == 0 {
+				price = float64(refPrice)
+			}
+			liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, "EUR", direction, price, result.Offers)...)
 		}
 	}
 
@@ -685,15 +718,13 @@ func main() {
 		snapshotStart, snapshotStart)
 
 	// Explicitly close offers from any exchange that failed entirely this run
-	for _, f := range fetchers {
-		if _, ok := exchangeData[f.name]; !ok {
-			res, _ := sdb.Exec(`UPDATE offers SET
+	for _, name := range offlineExchangeNames(fetchers, exchangeData) {
+		res, _ := sdb.Exec(`UPDATE offers SET
 				is_live = FALSE,
 				duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
-				WHERE exchange = ?`, f.name)
-			if n, _ := res.RowsAffected(); n > 0 {
-				fmt.Printf("[%s] Exchange offline — marked %d offers as closed\n", f.name, n)
-			}
+				WHERE exchange = ?`, name)
+		if n, _ := res.RowsAffected(); n > 0 {
+			fmt.Printf("[%s] Exchange offline — marked %d offers as closed\n", name, n)
 		}
 	}
 
