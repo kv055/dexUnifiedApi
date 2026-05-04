@@ -1,6 +1,7 @@
 package dbutil
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 
@@ -31,9 +32,19 @@ func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
 	return db.DB.Exec(rebind(query), args...)
 }
 
+// ExecContext executes a SQL statement after rebinding placeholders for PostgreSQL.
+func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return db.DB.ExecContext(ctx, rebind(query), args...)
+}
+
 // Query runs a SQL query after rebinding placeholders for PostgreSQL.
 func (db *DB) Query(query string, args ...any) (*sql.Rows, error) {
 	return db.DB.Query(rebind(query), args...)
+}
+
+// QueryContext runs a SQL query after rebinding placeholders for PostgreSQL.
+func (db *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return db.DB.QueryContext(ctx, rebind(query), args...)
 }
 
 // QueryRow runs a single-row SQL query after rebinding placeholders for PostgreSQL.
@@ -41,9 +52,19 @@ func (db *DB) QueryRow(query string, args ...any) *sql.Row {
 	return db.DB.QueryRow(rebind(query), args...)
 }
 
+// QueryRowContext runs a single-row SQL query after rebinding placeholders for PostgreSQL.
+func (db *DB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return db.DB.QueryRowContext(ctx, rebind(query), args...)
+}
+
 // Prepare prepares a SQL statement after rebinding placeholders for PostgreSQL.
 func (db *DB) Prepare(query string) (*sql.Stmt, error) {
 	return db.DB.Prepare(rebind(query))
+}
+
+// PrepareContext prepares a SQL statement after rebinding placeholders for PostgreSQL.
+func (db *DB) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	return db.DB.PrepareContext(ctx, rebind(query))
 }
 
 // Begin starts a transaction wrapped with placeholder-rebinding helpers.
@@ -55,9 +76,23 @@ func (db *DB) Begin() (*Tx, error) {
 	return &Tx{Tx: tx}, nil
 }
 
+// BeginTx starts a transaction wrapped with placeholder-rebinding helpers.
+func (db *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
+	tx, err := db.DB.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Tx{Tx: tx}, nil
+}
+
 // Exec executes a SQL statement after rebinding placeholders for PostgreSQL.
 func (tx *Tx) Exec(query string, args ...any) (sql.Result, error) {
 	return tx.Tx.Exec(rebind(query), args...)
+}
+
+// ExecContext executes a SQL statement after rebinding placeholders for PostgreSQL.
+func (tx *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return tx.Tx.ExecContext(ctx, rebind(query), args...)
 }
 
 // Query runs a SQL query after rebinding placeholders for PostgreSQL.
@@ -65,14 +100,29 @@ func (tx *Tx) Query(query string, args ...any) (*sql.Rows, error) {
 	return tx.Tx.Query(rebind(query), args...)
 }
 
+// QueryContext runs a SQL query after rebinding placeholders for PostgreSQL.
+func (tx *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return tx.Tx.QueryContext(ctx, rebind(query), args...)
+}
+
 // QueryRow runs a single-row SQL query after rebinding placeholders for PostgreSQL.
 func (tx *Tx) QueryRow(query string, args ...any) *sql.Row {
 	return tx.Tx.QueryRow(rebind(query), args...)
 }
 
+// QueryRowContext runs a single-row SQL query after rebinding placeholders for PostgreSQL.
+func (tx *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return tx.Tx.QueryRowContext(ctx, rebind(query), args...)
+}
+
 // Prepare prepares a SQL statement after rebinding placeholders for PostgreSQL.
 func (tx *Tx) Prepare(query string) (*sql.Stmt, error) {
 	return tx.Tx.Prepare(rebind(query))
+}
+
+// PrepareContext prepares a SQL statement after rebinding placeholders for PostgreSQL.
+func (tx *Tx) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	return tx.Tx.PrepareContext(ctx, rebind(query))
 }
 
 func rebind(query string) string {

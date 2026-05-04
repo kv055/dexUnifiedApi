@@ -142,7 +142,7 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 		if bd.TradeDirection != "ask" {
 			cexWithdrawFee = tradecost.Round8(bd.WithdrawalFeeBTC)
 		}
-		_, _ = insStmt.ExecContext(ctx,
+		if _, err := insStmt.ExecContext(ctx,
 			o.ID,
 			tradecost.Round4(o.Price),
 			tradecost.Round4(o.RefPrice),
@@ -152,9 +152,11 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 			tradecost.Round4(o.NetPremiumPct),
 			tradecost.Round8(bd.EstimatedProfitBTC),
 			tradecost.Round8(bd.BTCAmount),
-		)
+		); err != nil {
+			return fmt.Errorf("insert lifecycle for offer %d: %w", o.ID, err)
+		}
 		if bd.RouteCEX != "" {
-			_, _ = updStmt.ExecContext(ctx,
+			if _, err := updStmt.ExecContext(ctx,
 				bd.RouteCEX,
 				bd.RouteMethod,
 				tradecost.Round8(bd.Hedge.OpenFeeBTC),
@@ -169,7 +171,9 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 				tradecost.Round8(bd.NetworkFeeBTC),
 				tradecost.Round8(bd.DexFeeBTC),
 				o.ID,
-			)
+			); err != nil {
+				return fmt.Errorf("update lifecycle route costs for offer %d: %w", o.ID, err)
+			}
 		}
 	}
 

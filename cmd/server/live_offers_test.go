@@ -3,15 +3,12 @@ package main
 import (
 	"bytes"
 	"commons/tradecost"
-	"database/sql"
-	"dexunifiedapi/db"
+	"dexunifiedapi/internal/testdb"
 	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	_ "modernc.org/sqlite"
 )
 
 func assertFloat(t *testing.T, got, want float64) {
@@ -210,39 +207,6 @@ func TestHandleLiveOfferLifecycleRESTReturnsLifecyclePoints(t *testing.T) {
 	assertFloat(t, *points[0].NetPremiumPct, 1.23)
 }
 
-const internalLiveOffersSQLiteSchema = `
-CREATE TABLE offers (
-	id INTEGER PRIMARY KEY,
-	best_route_cex TEXT,
-	best_route_method TEXT,
-	hedge_open_fee_btc REAL,
-	hedge_close_fee_btc REAL,
-	hedge_funding_fee_btc REAL,
-	hedge_fee_sum_btc REAL,
-	hedge_venue TEXT,
-	hedge_instrument TEXT,
-	hedge_transfer_minutes INTEGER,
-	cex_taker_fee_btc REAL,
-	cex_withdraw_fee_btc REAL,
-	network_fee_btc REAL,
-	dex_fee_btc REAL
-);
-
-CREATE TABLE order_lifecycle (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	offer_db_id INTEGER NOT NULL,
-	snapshot_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	price REAL NOT NULL,
-	ref_price REAL NOT NULL,
-	premium_pct REAL NOT NULL,
-	trade_cost_pct REAL,
-	trade_cost_btc REAL,
-	net_premium_pct REAL,
-	net_premium_btc REAL,
-	btc_amount REAL
-);
-`
-
 func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
 	oldDB := db
 	oldHub := hub
@@ -257,20 +221,14 @@ func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
 		tradeCostEstimators = oldEstimators
 	})
 
-	testSQLDB, err := sql.Open("sqlite", t.TempDir()+"/live-offers.db")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() {
-		testSQLDB.Close()
-	})
-	if _, err := testSQLDB.Exec(internalLiveOffersSQLiteSchema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	if _, err := testSQLDB.Exec(`INSERT INTO offers (id) VALUES (1)`); err != nil {
+	testDB := testdb.Open(t)
+	if _, err := testDB.Exec(`
+		INSERT INTO offers (id, exchange, fiat_currency, direction, price)
+		VALUES (1, 'bisq', 'EUR', 'buy', 102.5)
+	`); err != nil {
 		t.Fatalf("insert offer: %v", err)
 	}
-	db = &dbutil.DB{DB: testSQLDB}
+	db = testDB
 
 	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
 	cexPrices = map[string]float64{"kraken": 100}
@@ -302,17 +260,17 @@ func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 	var lifecycleRows int
-	if err := testSQLDB.QueryRow(`SELECT COUNT(*) FROM order_lifecycle WHERE offer_db_id = 1`).Scan(&lifecycleRows); err != nil {
+	if err := testDB.QueryRow(`SELECT COUNT(*) FROM order_lifecycle WHERE offer_db_id = ?`, 1).Scan(&lifecycleRows); err != nil {
 		t.Fatalf("count lifecycle rows: %v", err)
 	}
 	if lifecycleRows != 1 {
 		t.Fatalf("lifecycle rows = %d, want 1", lifecycleRows)
 	}
 	var takerFee, withdrawalFee, networkFee, dexFee float64
-	if err := testSQLDB.QueryRow(`
+	if err := testDB.QueryRow(`
 		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc, dex_fee_btc
-		FROM offers WHERE id = 1
-	`).Scan(&takerFee, &withdrawalFee, &networkFee, &dexFee); err != nil {
+		FROM offers WHERE id = ?
+	`, 1).Scan(&takerFee, &withdrawalFee, &networkFee, &dexFee); err != nil {
 		t.Fatalf("select offer fees: %v", err)
 	}
 	assertFloat(t, takerFee, 0.00025)

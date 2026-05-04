@@ -2,76 +2,15 @@ package main
 
 import (
 	"database/sql"
+	"dexunifiedapi/db"
+	"dexunifiedapi/internal/testdb"
 	"math"
 	"testing"
-
-	_ "modernc.org/sqlite"
 )
 
-const closedOfferAnalysisTestSchema = `
-CREATE TABLE offers (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	exchange TEXT NOT NULL DEFAULT 'bisq',
-	direction TEXT NOT NULL DEFAULT 'buy',
-	price REAL NOT NULL DEFAULT 100,
-	btc_min REAL,
-	btc_max REAL,
-	first_seen TEXT DEFAULT CURRENT_TIMESTAMP,
-	last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
-	is_live BOOLEAN NOT NULL DEFAULT 0,
-	historical_analysis_status TEXT,
-	avg_ref_price REAL,
-	avg_premium_pct REAL,
-	avg_trade_cost_pct REAL,
-	avg_trade_cost_btc REAL,
-	avg_hedge_fee_sum_btc REAL,
-	cex_taker_fee_btc REAL,
-	cex_withdraw_fee_btc REAL,
-	network_fee_btc REAL,
-	hedge_open_fee_btc REAL,
-	hedge_close_fee_btc REAL,
-	hedge_funding_fee_btc REAL,
-	hedge_fee_sum_btc REAL,
-	hedge_venue TEXT,
-	hedge_instrument TEXT,
-	hedge_transfer_minutes INTEGER,
-	dex_fee_btc REAL,
-	avg_net_premium_pct REAL,
-	avg_estimated_profit_btc REAL,
-	avg_estimated_profit_fiat REAL,
-	avg_btc_amount REAL,
-	best_route_cex TEXT,
-	best_route_method TEXT
-);
-
-CREATE TABLE order_lifecycle (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	offer_db_id INTEGER NOT NULL,
-	price REAL NOT NULL,
-	ref_price REAL NOT NULL,
-	premium_pct REAL NOT NULL,
-	trade_cost_pct REAL,
-	trade_cost_btc REAL,
-	net_premium_pct REAL,
-	net_premium_btc REAL,
-	btc_amount REAL
-);
-`
-
-func openClosedOfferAnalysisDB(t *testing.T) *sql.DB {
+func openClosedOfferAnalysisDB(t *testing.T) *dbutil.DB {
 	t.Helper()
-
-	db, err := sql.Open("sqlite", t.TempDir()+"/closed-offer-analysis.db")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() {
-		db.Close()
-	})
-	if _, err := db.Exec(closedOfferAnalysisTestSchema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	return db
+	return testdb.Open(t)
 }
 
 func assertAnalysisFloat(t *testing.T, got, want float64) {
@@ -81,29 +20,27 @@ func assertAnalysisFloat(t *testing.T, got, want float64) {
 	}
 }
 
-func insertClosedOffer(t *testing.T, db *sql.DB, status any) int64 {
+func insertClosedOffer(t *testing.T, db *dbutil.DB, status any) int64 {
 	t.Helper()
 
-	res, err := db.Exec(`
+	var id int64
+	if err := db.QueryRow(`
 		INSERT INTO offers (
+			exchange, fiat_currency, direction, price,
 			historical_analysis_status, avg_estimated_profit_btc,
 			hedge_open_fee_btc, hedge_close_fee_btc, hedge_funding_fee_btc, hedge_fee_sum_btc,
 			hedge_venue, hedge_instrument, hedge_transfer_minutes,
 			best_route_cex, best_route_method
 		)
-		VALUES (?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'onchain')
-	`, status)
-	if err != nil {
+		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'onchain')
+		RETURNING id
+	`, status).Scan(&id); err != nil {
 		t.Fatalf("insert offer: %v", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		t.Fatalf("last insert id: %v", err)
 	}
 	return id
 }
 
-func insertLifecycleRow(t *testing.T, db *sql.DB, offerID int64, premiumPct, tradeCostPct, netPremiumPct, netPremiumBTC, btcAmount float64) {
+func insertLifecycleRow(t *testing.T, db *dbutil.DB, offerID int64, premiumPct, tradeCostPct, netPremiumPct, netPremiumBTC, btcAmount float64) {
 	t.Helper()
 
 	if _, err := db.Exec(`
@@ -117,7 +54,7 @@ func insertLifecycleRow(t *testing.T, db *sql.DB, offerID int64, premiumPct, tra
 	}
 }
 
-func offerAnalysisStatus(t *testing.T, db *sql.DB, offerID int64) string {
+func offerAnalysisStatus(t *testing.T, db *dbutil.DB, offerID int64) string {
 	t.Helper()
 
 	var status sql.NullString
