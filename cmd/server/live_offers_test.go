@@ -98,6 +98,12 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	assertFloat(t, offer.Analysis.FullVolume.Costs.Withdrawal.BTC, 0.00015)
 	assertFloat(t, offer.Analysis.FullVolume.Costs.Network.Pct, 0.1)
 	assertFloat(t, offer.Analysis.FullVolume.Costs.Total.BTC, 0.0006)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.CexBuyTaker.BTC, 0.00025)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.CexSellTaker.BTC, 0.00025)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Withdrawal.BTC, 0.00015)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Network.BTC, 0.0001)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.BTC, 0.00075)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.Pct, 0.75)
 }
 
 func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
@@ -164,6 +170,8 @@ func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	assertFloat(t, offer.Analysis.CappedVolume.Profit.BTC, 0.000825)
 	assertFloat(t, offer.Analysis.CappedVolume.Profit.Fiat, 0.08)
 	assertFloat(t, offer.Analysis.CappedVolume.Costs.Network.Pct, 0.2)
+	assertFloat(t, offer.Analysis.CappedVolume.AbortCost.Total.BTC, 0.0005)
+	assertFloat(t, offer.Analysis.CappedVolume.AbortCost.Total.Pct, 1)
 }
 
 func TestHandleLiveOfferLifecycleRESTReturnsLifecyclePoints(t *testing.T) {
