@@ -65,8 +65,8 @@ RUN useradd -m -s /bin/sh appuser && \
 
 EXPOSE 9998 9999
 
-HEALTHCHECK --interval=30s --timeout=15s --start-period=300s --retries=3 \
-    CMD java -jar /opt/bisq/bisq-cli-${BISQ_VERSION}/cli.jar --port 9998 --password= getversion > /dev/null 2>&1 || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
+    CMD /usr/bin/timeout 3s /bin/bash -lc '</dev/tcp/127.0.0.1/9998'
 
 WORKDIR /opt/bisq/bisq-daemon-${BISQ_VERSION}
 ENTRYPOINT ["/usr/local/bin/bisq-startup.sh"]

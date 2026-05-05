@@ -36,6 +36,18 @@ func NewDBRecorder(db *dbutil.DB) DBRecorder {
 	return DBRecorder{db: db}
 }
 
+// EnsureAccount creates a provider account row if it does not already exist.
+func (s DBRecorder) EnsureAccount(ctx context.Context, provider string) error {
+	if _, err := s.db.DB.ExecContext(ctx, `
+		INSERT INTO accounts (provider)
+		VALUES ($1)
+		ON CONFLICT (provider) DO NOTHING
+	`, provider); err != nil {
+		return fmt.Errorf("ensure account %s: %w", provider, err)
+	}
+	return nil
+}
+
 // UpdateAccountHealth records the latest health state for a provider.
 func (s DBRecorder) UpdateAccountHealth(ctx context.Context, provider string, healthy bool) error {
 	result, err := s.db.DB.ExecContext(ctx, `

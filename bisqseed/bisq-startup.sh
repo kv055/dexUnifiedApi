@@ -35,6 +35,27 @@ mkdir -p "$APP_DIR"
 chown -R appuser:appuser "$APP_DIR" 2>/dev/null || \
   echo "[startup] Could not chown every Bisq data file; continuing in case some files are mounted read-only" >&2
 
+ensure_account_row_in_database() {
+  if [ -z "$BACKUP_DATABASE_URL" ]; then
+    return 0
+  fi
+
+  if ! psql \
+    -v BISQ_ACCOUNT_PROVIDER_SQL="$ACCOUNT_PROVIDER" \
+    "$BACKUP_DATABASE_URL" <<'SQL'
+\set ON_ERROR_STOP on
+INSERT INTO accounts (provider, email, password)
+VALUES (:'BISQ_ACCOUNT_PROVIDER_SQL', NULL, NULL)
+ON CONFLICT (provider) DO NOTHING;
+SQL
+  then
+    echo "[startup] Failed to ensure Bisq account row for provider '$ACCOUNT_PROVIDER'" >&2
+    exit 1
+  fi
+
+  echo "[startup] Bisq account row ensured for provider '$ACCOUNT_PROVIDER'"
+}
+
 install_account_file() {
   source_file="$1"
   source_description="$2"
@@ -124,6 +145,7 @@ restore_account_file_before_startup() {
   restore_account_file_from_database
 }
 
+ensure_account_row_in_database
 restore_account_file_before_startup
 
 if [ -d "$DB_DIR" ]; then

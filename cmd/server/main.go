@@ -223,6 +223,7 @@ func main() {
 	mux.HandleFunc("GET /api/payment_notifications", handlePaymentNotifications)
 	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)
 	mux.HandleFunc("GET /api/trade_cost_config", handleTradeCostConfig)
+	mux.HandleFunc("POST /api/accounts/health_check", handleAccountHealthCheck)
 	mux.HandleFunc("GET /health", handleHealth)
 
 	// Internal: snapshot tool pushes live offer data after each run
@@ -378,6 +379,57 @@ func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"cexes":     cexes,
 		"fee_tiers": tiers,
+	})
+}
+
+type accountHealthResponse struct {
+	Provider  string `json:"provider"`
+	Status    string `json:"status"`
+	Healthy   bool   `json:"healthy"`
+	Message   string `json:"message"`
+	CheckedAt string `json:"checked_at"`
+}
+
+func handleAccountHealthCheck(w http.ResponseWriter, r *http.Request) {
+	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
+	if provider == "" {
+		http.Error(w, "provider query parameter is required", http.StatusBadRequest)
+		return
+	}
+	if !strings.EqualFold(provider, accounthealth.BisqAccountProvider) {
+		http.Error(w, "unsupported provider "+provider+"; supported providers: Bisq", http.StatusBadRequest)
+		return
+	}
+
+	recorder := accounthealth.NewDBRecorder(db)
+	if err := recorder.EnsureAccount(r.Context(), accounthealth.BisqAccountProvider); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	err := accounthealth.CheckBisqAccountHealth(
+		r.Context(),
+		accounthealth.NewBisqGRPCAccountChecker(bisqGRPCHost, bisqAPIPassword, 0),
+	)
+	healthy := err == nil
+	if updateErr := recorder.UpdateAccountHealth(r.Context(), accounthealth.BisqAccountProvider, healthy); updateErr != nil {
+		writeError(w, updateErr)
+		return
+	}
+
+	status := "healthy"
+	message := "Bisq payment accounts are reachable."
+	if err != nil {
+		status = "unhealthy"
+		message = err.Error()
+	}
+
+	writeJSON(w, accountHealthResponse{
+		Provider:  accounthealth.BisqAccountProvider,
+		Status:    status,
+		Healthy:   healthy,
+		Message:   message,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
