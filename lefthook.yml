@@ -1,0 +1,4 @@
+post-commit:
+  scripts:
+    "encrypt-env.sh":
+      runner: bash
