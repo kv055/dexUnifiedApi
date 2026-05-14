@@ -12,7 +12,8 @@ if [[ ! -f ".env" ]]; then
   exit 0
 fi
 
-HASH_FILE=".git/env.hash"
+GIT_DIR=$(git rev-parse --git-dir)
+HASH_FILE="$GIT_DIR/env.hash"
 CURRENT_HASH=$(sha256sum .env | awk '{print $1}')
 
 if [[ -f "$HASH_FILE" ]]; then
