@@ -408,27 +408,29 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 	var allOffers []peachOffer
 	for page := 0; ; page++ {
 		reqURL := fmt.Sprintf("https://api.peachbitcoin.com/v1/offer/search?page=%d&size=100&sortBy=lowestPremium", page)
-		body, err := json.Marshal(map[string]any{
-			"type":           peachType,
-			"meansOfPayment": map[string][]string{"EUR": {}},
-		})
+		body, err := json.Marshal(map[string]any{"type": peachType})
 		if err != nil {
 			fmt.Printf("[PeachBitcoin] marshal error: %v\n", err)
-			return nil
+			break
 		}
 
 		resp, err := clearnetClient().Post(reqURL, "application/json", strings.NewReader(string(body)))
 		if err != nil {
 			fmt.Printf("[PeachBitcoin] Error: %v\n", err)
-			return nil
+			break
 		}
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
+		if resp.StatusCode != 200 {
+			fmt.Printf("[PeachBitcoin] HTTP %d: %s\n", resp.StatusCode, string(respBody))
+			break
+		}
+
 		var pr peachResponse
 		if err := json.Unmarshal(respBody, &pr); err != nil {
-			fmt.Printf("[PeachBitcoin] Parse error: %v\n", err)
-			return nil
+			fmt.Printf("[PeachBitcoin] Parse error: %v — body: %s\n", err, string(respBody))
+			break
 		}
 		allOffers = append(allOffers, pr.Offers...)
 		if pr.Remaining <= 0 {
