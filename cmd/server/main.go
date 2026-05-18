@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/metrics"
 	"commons/prices"
 	"commons/tradecost"
 	"context"
@@ -230,7 +231,10 @@ func main() {
 	mux.HandleFunc("POST /internal/live_offers", handleInternalLiveOffers)
 	mux.HandleFunc("POST /internal/payment_notifications", handleInternalPaymentNotifications)
 
-	handler := corsMiddleware(mux)
+	metricsReg := metrics.NewServiceRegistry("unified-api")
+	mux.Handle("GET /metrics", metricsReg.Handler())
+
+	handler := corsMiddleware(metricsReg.Middleware(mux))
 
 	fmt.Printf("Starting dexUnifiedApi server on %s\n", listenAddr)
 	if err := http.ListenAndServe(listenAddr, handler); err != nil {
