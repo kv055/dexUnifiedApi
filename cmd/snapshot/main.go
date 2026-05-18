@@ -382,6 +382,91 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
 }
 
+func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
+	if btcPrice == 0 {
+		fmt.Println("[PeachBitcoin] Could not get reference price")
+		return nil
+	}
+
+	peachType := "ask" // sell offers (maker sells BTC)
+	if direction == "buy" {
+		peachType = "bid" // buy offers (maker buys BTC)
+	}
+
+	type peachOffer struct {
+		ID             string             `json:"id"`
+		Amount         int64              `json:"amount"`
+		MeansOfPayment map[string][]string `json:"meansOfPayment"`
+		Prices         map[string]float64 `json:"prices"`
+	}
+	type peachResponse struct {
+		Offers    []peachOffer `json:"offers"`
+		Total     int          `json:"total"`
+		Remaining int          `json:"remaining"`
+	}
+
+	var allOffers []peachOffer
+	for page := 0; ; page++ {
+		reqURL := fmt.Sprintf("https://api.peachbitcoin.com/v1/offer/search?page=%d&size=100&sortBy=lowestPremium", page)
+		body, err := json.Marshal(map[string]any{
+			"type":           peachType,
+			"meansOfPayment": map[string][]string{"EUR": {}},
+		})
+		if err != nil {
+			fmt.Printf("[PeachBitcoin] marshal error: %v\n", err)
+			return nil
+		}
+
+		resp, err := clearnetClient().Post(reqURL, "application/json", strings.NewReader(string(body)))
+		if err != nil {
+			fmt.Printf("[PeachBitcoin] Error: %v\n", err)
+			return nil
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var pr peachResponse
+		if err := json.Unmarshal(respBody, &pr); err != nil {
+			fmt.Printf("[PeachBitcoin] Parse error: %v\n", err)
+			return nil
+		}
+		allOffers = append(allOffers, pr.Offers...)
+		if pr.Remaining <= 0 {
+			break
+		}
+	}
+
+	var offers []offer
+	for _, o := range allOffers {
+		eurPrice, ok := o.Prices["EUR"]
+		if !ok || eurPrice == 0 {
+			continue
+		}
+		btcAmount := round8(float64(o.Amount) / 1e8)
+		fiatAmt := int(btcAmount * eurPrice)
+
+		var method string
+		if methods, ok := o.MeansOfPayment["EUR"]; ok && len(methods) > 0 {
+			method = methods[0]
+		}
+
+		offers = append(offers, offer{
+			OfferID:       o.ID,
+			FiatCurrency:  "EUR",
+			Price:         eurPrice,
+			BTCMin:        &btcAmount,
+			BTCMax:        &btcAmount,
+			FiatMin:       &fiatAmt,
+			FiatMax:       &fiatAmt,
+			PaymentMethod: method,
+			PriceType:     priceTypeFixed(),
+		})
+	}
+
+	fmt.Printf("[PeachBitcoin] Found %d %s offers\n", len(offers), direction)
+	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+}
+
 func fetchRobosats(direction string, btcPrice int) *fetchResult {
 	offerType := 1 // sell
 	if direction == "buy" {
@@ -689,6 +774,7 @@ func main() {
 		{"bisq", fetchBisq},
 		{"hodlhodl", fetchHodlHodl},
 		{"robosats", fetchRobosats},
+		{"peachbitcoin", fetchPeachBitcoin},
 	}
 
 	exchangeData := make(exchangeSnapshotData)
