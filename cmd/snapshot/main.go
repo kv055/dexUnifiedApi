@@ -382,6 +382,54 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
 }
 
+// normalizePeachMethod converts a Peach Bitcoin payment-method identifier
+// (e.g. "sepa", "instantSepa", "nationalTransferDE", "mbWay") into a
+// human-readable form aligned with the keyword rules used by
+// dexMonitor/internal/paymentmethods/groups.go.
+func normalizePeachMethod(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	// Collapse nationalTransferXX (trailing 2-letter country code) into a
+	// single "nationalTransfer" so every per-country variant lands on one row.
+	const ntPrefix = "nationalTransfer"
+	if strings.HasPrefix(raw, ntPrefix) && len(raw) == len(ntPrefix)+2 {
+		suffix := raw[len(ntPrefix):]
+		if suffix[0] >= 'A' && suffix[0] <= 'Z' && suffix[1] >= 'A' && suffix[1] <= 'Z' {
+			raw = ntPrefix
+		}
+	}
+	// Split camelCase: insert a space before each upper that follows a lower.
+	var b strings.Builder
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if i > 0 && c >= 'A' && c <= 'Z' {
+			prev := raw[i-1]
+			if prev >= 'a' && prev <= 'z' {
+				b.WriteByte(' ')
+			}
+		}
+		b.WriteByte(c)
+	}
+	// Title-case each word: first char upper, rest lower.
+	parts := strings.Fields(b.String())
+	for i, p := range parts {
+		parts[i] = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
+	}
+	out := strings.Join(parts, " ")
+	switch out {
+	case "Sepa":
+		return "SEPA"
+	case "Instant Sepa":
+		return "Instant SEPA"
+	case "Mb Way":
+		return "MB Way"
+	case "Paypal":
+		return "PayPal"
+	}
+	return out
+}
+
 func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[PeachBitcoin] Could not get reference price")
@@ -449,7 +497,7 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 
 		var method string
 		if methods, ok := o.MeansOfPayment["EUR"]; ok && len(methods) > 0 {
-			method = methods[0]
+			method = normalizePeachMethod(methods[0])
 		}
 
 		offers = append(offers, offer{

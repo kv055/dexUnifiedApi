@@ -48,6 +48,39 @@ func TestNormalizeHodlHodlPriceType(t *testing.T) {
 	}
 }
 
+func TestNormalizePeachMethod(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"sepa", "SEPA"},
+		{"instantSepa", "Instant SEPA"},
+		{"nationalTransferDE", "National Transfer"},
+		{"nationalTransferFR", "National Transfer"},
+		{"revolut", "Revolut"},
+		{"wise", "Wise"},
+		{"paypal", "PayPal"},
+		{"n26", "N26"},
+		{"mbWay", "MB Way"},
+		{"bizum", "Bizum"},
+		{"twint", "Twint"},
+		{"vipps", "Vipps"},
+		{"lydia", "Lydia"},
+		{"applePay", "Apple Pay"},
+		{"googlePay", "Google Pay"},
+		{"cashTrade", "Cash Trade"},
+		{"", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			if got := normalizePeachMethod(tc.raw); got != tc.want {
+				t.Fatalf("normalizePeachMethod(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNonHodlHodlPriceTypeHelpersStayProviderSpecific(t *testing.T) {
 	fixed := priceTypeFixed()
 	if fixed == nil || *fixed != "fixed" {
