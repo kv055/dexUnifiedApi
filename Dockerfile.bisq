@@ -1,30 +1,41 @@
-FROM debian:bookworm-slim AS bisq-downloader
+FROM eclipse-temurin:21-jdk-jammy AS bisq-builder
 
-ARG BISQ_VERSION=1.9.22
+ARG BISQ_VERSION=1.10.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    unzip \
-    wget \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /opt/bisq && \
-    wget -q "https://github.com/bisq-network/bisq/releases/download/v${BISQ_VERSION}/bisq-daemon-${BISQ_VERSION}.zip" -O /tmp/bisq-daemon.zip && \
-    wget -q "https://github.com/bisq-network/bisq/releases/download/v${BISQ_VERSION}/bisq-cli-${BISQ_VERSION}.zip" -O /tmp/bisq-cli.zip && \
-    unzip -q /tmp/bisq-daemon.zip -d /opt/bisq/ && \
-    unzip -q /tmp/bisq-cli.zip -d /opt/bisq/ && \
-    chmod -R o+rX /opt/bisq/ && \
-    rm /tmp/bisq-daemon.zip /tmp/bisq-cli.zip
+RUN git clone --depth 1 --branch "v${BISQ_VERSION}" --recurse-submodules --shallow-submodules \
+    https://github.com/bisq-network/bisq.git /src/bisq
 
-FROM eclipse-temurin:11-jre-jammy AS java-runtime
+WORKDIR /src/bisq
 
-FROM eclipse-temurin:11-jdk-jammy AS bisq-seed-helper-build
+RUN ./gradlew --no-daemon :daemon:installDist -x test
 
-ARG BISQ_VERSION=1.9.22
+RUN if [ -d daemon/build/install/daemon/lib ]; then \
+      src=daemon/build/install/daemon/lib; \
+    elif [ -d daemon/build/app/lib ]; then \
+      src=daemon/build/app/lib; \
+    else \
+      echo "ERROR: no daemon lib directory found"; exit 1; \
+    fi && \
+    mkdir -p "/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib" && \
+    cp "$src/daemon.jar" "/opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar" && \
+    find "$src" -maxdepth 1 -name '*.jar' ! -name 'daemon.jar' \
+       -exec cp {} "/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib/" \; && \
+    chmod -R o+rX /opt/bisq/
+
+FROM eclipse-temurin:21-jre-jammy AS java-runtime
+
+FROM eclipse-temurin:21-jdk-jammy AS bisq-seed-helper-build
+
+ARG BISQ_VERSION=1.10.0
 
 COPY bisqseed/ExtractBisqSeed.java /src/ExtractBisqSeed.java
-COPY --from=bisq-downloader /opt/bisq /opt/bisq
+COPY --from=bisq-builder /opt/bisq /opt/bisq
 
 RUN mkdir -p /build && \
     javac \
@@ -34,7 +45,7 @@ RUN mkdir -p /build && \
 
 FROM debian:bookworm-slim
 
-ARG BISQ_VERSION=1.9.22
+ARG BISQ_VERSION=1.10.0
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BISQ_VERSION=${BISQ_VERSION}
 ENV MALLOC_ARENA_MAX=4
@@ -54,7 +65,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=java-runtime /opt/java/openjdk /opt/java/openjdk
-COPY --from=bisq-downloader /opt/bisq /opt/bisq
+COPY --from=bisq-builder /opt/bisq /opt/bisq
 COPY --from=bisq-seed-helper-build /build /opt/bisq/bisq-seed-helper
 COPY bisqseed/bisq-startup.sh /usr/local/bin/bisq-startup.sh
 
