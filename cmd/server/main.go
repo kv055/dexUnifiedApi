@@ -28,6 +28,8 @@ var (
 	paymentNotificationSecret string
 	bisqGRPCHost              string
 	bisqAPIPassword           string
+	bisq2RESTHost             string
+	bisq2APIPassword          string
 	accountHealthInterval     time.Duration
 	db                        *dbutil.DB
 	priceManager              *prices.Manager
@@ -132,6 +134,8 @@ func init() {
 		bisqGRPCHost = "localhost:9998"
 	}
 	bisqAPIPassword = os.Getenv("BISQ_API_PASSWORD")
+	bisq2RESTHost = strings.TrimSpace(os.Getenv("BISQ2_REST_HOST"))
+	bisq2APIPassword = os.Getenv("BISQ2_API_PASSWORD")
 	accountHealthInterval = accounthealth.ParseInterval(os.Getenv("ACCOUNT_HEALTH_INTERVAL"))
 
 }
@@ -201,14 +205,47 @@ func main() {
 		hub.broadcastForCex(cex)
 	})
 
+	recorder := accounthealth.NewDBRecorder(db)
+
 	go accounthealth.RunPeriodicAccountHealthCheck(
 		ctx,
 		accountHealthInterval,
-		accounthealth.NewDBRecorder(db),
+		recorder,
 		accounthealth.BisqAccountProvider,
 		func(ctx context.Context) error {
 			return accounthealth.CheckBisqAccountHealth(ctx, accounthealth.NewBisqGRPCAccountChecker(bisqGRPCHost, bisqAPIPassword, 0))
 		},
+	)
+
+	go accounthealth.RunPeriodicAccountHealthCheck(
+		ctx,
+		accountHealthInterval,
+		recorder,
+		"Bisq2",
+		accounthealth.CheckFunc(func(ctx context.Context) error {
+			if bisq2RESTHost == "" {
+				return fmt.Errorf("bisq2 not configured (BISQ2_REST_HOST is unset)")
+			}
+			checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(checkCtx, http.MethodGet,
+				"http://"+bisq2RESTHost+"/api/v1/settings/version", nil)
+			if err != nil {
+				return fmt.Errorf("bisq2 health: build request: %w", err)
+			}
+			if bisq2APIPassword != "" {
+				req.Header.Set("Authorization", "Bearer "+bisq2APIPassword)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("bisq2 health: %w", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("bisq2 health: unexpected status %d", resp.StatusCode)
+			}
+			return nil
+		}),
 	)
 
 	// Seed hub from DB in the background

@@ -1,0 +1,65 @@
+FROM eclipse-temurin:21-jdk-jammy AS bisq2-builder
+
+ARG BISQ2_VERSION=2.1.11
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch "v${BISQ2_VERSION}" --recurse-submodules --shallow-submodules \
+    https://github.com/bisq-network/bisq2.git /src/bisq2
+
+WORKDIR /src/bisq2
+
+RUN ./gradlew --no-daemon :apps:api-app:installDist -x test
+
+RUN install_dir=apps/api-app/build/install/api-app && \
+    if [ ! -d "$install_dir/lib" ]; then \
+      echo "ERROR: installDist output not found at $install_dir"; exit 1; \
+    fi && \
+    mkdir -p "/opt/bisq2/lib" && \
+    cp "$install_dir"/lib/*.jar "/opt/bisq2/lib/" && \
+    chmod -R o+rX /opt/bisq2/
+
+FROM eclipse-temurin:21-jre-jammy AS java-runtime
+
+FROM debian:bookworm-slim
+
+ARG BISQ2_VERSION=2.1.11
+ENV DEBIAN_FRONTEND=noninteractive
+ENV BISQ2_VERSION=${BISQ2_VERSION}
+ENV MALLOC_ARENA_MAX=4
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libcups2 \
+    libfontconfig1 \
+    libfreetype6 \
+    libgcc-s1 \
+    postgresql-client \
+    procps \
+    libstdc++6 \
+    tor \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=java-runtime /opt/java/openjdk /opt/java/openjdk
+COPY --from=bisq2-builder /opt/bisq2 /opt/bisq2
+COPY bisqseed/bisq2-startup.sh /usr/local/bin/bisq2-startup.sh
+
+RUN useradd -m -s /bin/sh appuser && \
+    mkdir -p /home/appuser/.local/share/Bisq2 && \
+    chown -R appuser:appuser /home/appuser/.local && \
+    chmod 0755 /usr/local/bin/bisq2-startup.sh
+
+# REST API port
+EXPOSE 8090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
+    CMD /usr/bin/timeout 3s /bin/bash -lc '</dev/tcp/127.0.0.1/8090'
+
+ENTRYPOINT ["/usr/local/bin/bisq2-startup.sh"]

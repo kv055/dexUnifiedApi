@@ -28,6 +28,8 @@ var (
 	databaseURL      string
 	bisqGRPCHost     string
 	bisqAPIPassword  string
+	bisq2RESTHost    string
+	bisq2APIPassword string
 	priceProvider    string
 	torProxy         string
 	robosatsOnions   = []string{
@@ -59,6 +61,8 @@ func init() {
 		bisqGRPCHost = "localhost:9998"
 	}
 	bisqAPIPassword = os.Getenv("BISQ_API_PASSWORD")
+	bisq2RESTHost = os.Getenv("BISQ2_REST_HOST")
+	bisq2APIPassword = os.Getenv("BISQ2_API_PASSWORD")
 	priceProvider = os.Getenv("PRICE_PROVIDER")
 	if priceProvider == "" {
 		priceProvider = "bisq_tor"
@@ -162,29 +166,42 @@ func clearnetClient() *http.Client {
 
 // --- Reference price providers ---
 
-func priceBisqTor(fiat string) (int, error) {
-	resp, err := torClient().Get("http://ro7nv73awqs3ga2qtqeqawrjpbxwarsazznszvr6whv7tes5ehffopid.onion/getAllMarketPrices")
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+// bisqPriceNodes are the known Bisq price node onion addresses, tried in order.
+var bisqPriceNodes = []string{
+	"http://runbtcpn7gmbj5rgqeyfyvepqokrijem6rbw7o5wgqbguimuoxrmcdyd.onion",
+	"http://ro7nv73awqs3ga2qtqeqawrjpbxwarsazznszvr6whv7tes5ehffopid.onion",
+}
 
-	var result struct {
-		Data []struct {
-			CurrencyCode string  `json:"currencyCode"`
-			Price        float64 `json:"price"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return 0, err
-	}
-	for _, c := range result.Data {
-		if strings.EqualFold(c.CurrencyCode, fiat) {
-			return int(c.Price), nil
+func priceBisqTor(fiat string) (int, error) {
+	var lastErr error
+	for _, node := range bisqPriceNodes {
+		resp, err := torClient().Get(node + "/getAllMarketPrices")
+		if err != nil {
+			lastErr = err
+			fmt.Printf("[RefPrice] bisq_tor: %s failed: %v\n", node, err)
+			continue
 		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var result struct {
+			Data []struct {
+				CurrencyCode string  `json:"currencyCode"`
+				Price        float64 `json:"price"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			lastErr = err
+			continue
+		}
+		for _, c := range result.Data {
+			if strings.EqualFold(c.CurrencyCode, fiat) {
+				return int(c.Price), nil
+			}
+		}
+		lastErr = fmt.Errorf("currency %s not found", fiat)
 	}
-	return 0, fmt.Errorf("currency %s not found", fiat)
+	return 0, lastErr
 }
 
 func priceKraken(fiat string) (int, error) {
@@ -234,23 +251,45 @@ func priceCoinGecko(fiat string) (int, error) {
 }
 
 func fetchReferencePrice(fiat string) int {
-	providers := map[string]func(string) (int, error){
-		"bisq_tor":  priceBisqTor,
-		"kraken":    priceKraken,
-		"coingecko": priceCoinGecko,
+	allProviders := []struct {
+		name string
+		fn   func(string) (int, error)
+	}{
+		{"bisq_tor", priceBisqTor},
+		{"kraken", priceKraken},
+		{"coingecko", priceCoinGecko},
 	}
-	fn, ok := providers[priceProvider]
-	if !ok {
-		fmt.Printf("[RefPrice] Unknown provider '%s', available: %v\n", priceProvider, []string{"bisq_tor", "kraken", "coingecko"})
-		return 0
+
+	// Build the ordered list: configured provider first, then the rest as fallbacks.
+	var ordered []struct {
+		name string
+		fn   func(string) (int, error)
 	}
-	price, err := fn(fiat)
-	if err != nil {
-		fmt.Printf("[RefPrice] Error from %s: %v\n", priceProvider, err)
-		return 0
+	for _, p := range allProviders {
+		if p.name == priceProvider {
+			ordered = append([]struct {
+				name string
+				fn   func(string) (int, error)
+			}{p}, ordered...)
+		} else {
+			ordered = append(ordered, p)
+		}
 	}
-	fmt.Printf("[RefPrice] %s: %d %s\n", priceProvider, price, strings.ToUpper(fiat))
-	return price
+	if len(ordered) == 0 || ordered[0].name != priceProvider {
+		fmt.Printf("[RefPrice] Unknown provider '%s', falling back to all\n", priceProvider)
+		ordered = allProviders
+	}
+
+	for _, p := range ordered {
+		price, err := p.fn(fiat)
+		if err != nil {
+			fmt.Printf("[RefPrice] Error from %s: %v\n", p.name, err)
+			continue
+		}
+		fmt.Printf("[RefPrice] %s: %d %s\n", p.name, price, strings.ToUpper(fiat))
+		return price
+	}
+	return 0
 }
 
 // --- Exchange fetchers ---
@@ -309,6 +348,127 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 	}
 
 	fmt.Printf("[Bisq] Found %d %s offers\n", len(offers), direction)
+	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+}
+
+func fetchBisq2(direction string, btcPrice int) *fetchResult {
+	if btcPrice == 0 {
+		fmt.Println("[Bisq2] Could not get reference price")
+		return nil
+	}
+	if bisq2RESTHost == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	reqURL := fmt.Sprintf("http://%s/api/v1/offerbook/markets/BTC-EUR/offers", bisq2RESTHost)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		fmt.Printf("[Bisq2] Build request error: %v\n", err)
+		return nil
+	}
+	if bisq2APIPassword != "" {
+		req.Header.Set("Authorization", "Bearer "+bisq2APIPassword)
+	}
+
+	resp, err := clearnetClient().Do(req)
+	if err != nil {
+		fmt.Printf("[Bisq2] Error fetching offers: %v\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[Bisq2] Unexpected status %d\n", resp.StatusCode)
+		return nil
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var raw []struct {
+		ID        string `json:"id"`
+		Direction string `json:"direction"`
+		AmountSpec struct {
+			Type      string `json:"@type"`
+			Amount    int64  `json:"amount"`
+			MinAmount int64  `json:"minAmount"`
+			MaxAmount int64  `json:"maxAmount"`
+		} `json:"amountSpec"`
+		PriceSpec struct {
+			Type       string  `json:"@type"`
+			Price      int64   `json:"price"`      // FixedPriceSpec: price * 10000
+			Percentage float64 `json:"percentage"` // FloatPriceSpec: offset from market (e.g. 0.05 = 5%)
+		} `json:"priceSpec"`
+		QuoteSidePaymentMethodSpecs []struct {
+			PaymentMethodName string `json:"paymentMethodName"`
+		} `json:"quoteSidePaymentMethodSpecs"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		fmt.Printf("[Bisq2] Parse error: %v\n", err)
+		return nil
+	}
+
+	wantDir := strings.ToUpper(direction)
+	var offers []offer
+	for _, o := range raw {
+		if strings.ToUpper(o.Direction) != wantDir {
+			continue
+		}
+
+		var btcMin, btcMax float64
+		switch o.AmountSpec.Type {
+		case "FixedAmountSpec":
+			btcMin = float64(o.AmountSpec.Amount) / 1e8
+			btcMax = btcMin
+		case "RangeAmountSpec":
+			btcMin = float64(o.AmountSpec.MinAmount) / 1e8
+			btcMax = float64(o.AmountSpec.MaxAmount) / 1e8
+		default:
+			continue
+		}
+
+		// Bisq 2 stores fixed prices as integer * 10000 (4 decimal places).
+		// Floating prices are a fractional offset from the spot price.
+		var price float64
+		var pt *string
+		switch o.PriceSpec.Type {
+		case "FixedPriceSpec":
+			price = float64(o.PriceSpec.Price) / 10000.0
+			pt = priceTypeFixed()
+		case "FloatPriceSpec":
+			price = float64(btcPrice) * (1 + o.PriceSpec.Percentage)
+			pt = priceTypeFloating()
+		case "MarketPriceSpec":
+			price = float64(btcPrice)
+			pt = priceTypeFloating()
+		default:
+			continue
+		}
+
+		fiatMin := int(btcMin * price)
+		fiatMax := int(btcMax * price)
+
+		var paymentMethod string
+		if len(o.QuoteSidePaymentMethodSpecs) > 0 {
+			paymentMethod = o.QuoteSidePaymentMethodSpecs[0].PaymentMethodName
+		}
+
+		offers = append(offers, offer{
+			OfferID:       o.ID,
+			FiatCurrency:  "EUR",
+			Price:         price,
+			BTCMin:        &btcMin,
+			BTCMax:        &btcMax,
+			FiatMin:       &fiatMin,
+			FiatMax:       &fiatMax,
+			PaymentMethod: paymentMethod,
+			PriceType:     pt,
+		})
+	}
+
+	fmt.Printf("[Bisq2] Found %d %s offers\n", len(offers), direction)
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
 }
 
@@ -442,10 +602,10 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 	}
 
 	type peachOffer struct {
-		ID             string             `json:"id"`
-		Amount         int64              `json:"amount"`
+		ID             string              `json:"id"`
+		Amount         json.RawMessage     `json:"amount"` // int64 (sell) or [min,max] int64 array (buy)
 		MeansOfPayment map[string][]string `json:"meansOfPayment"`
-		Prices         map[string]float64 `json:"prices"`
+		Prices         map[string]float64  `json:"prices"`
 	}
 	type peachResponse struct {
 		Offers    []peachOffer `json:"offers"`
@@ -488,12 +648,36 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 
 	var offers []offer
 	for _, o := range allOffers {
+		// Sell offers have an explicit EUR price; buy offers don't — use market price.
 		eurPrice, ok := o.Prices["EUR"]
 		if !ok || eurPrice == 0 {
+			eurPrice = float64(btcPrice)
+		}
+		if eurPrice == 0 {
 			continue
 		}
-		btcAmount := round8(float64(o.Amount) / 1e8)
-		fiatAmt := int(btcAmount * eurPrice)
+
+		// amount is either a plain int64 (sell offers) or [min, max] int64 array (buy offers).
+		var btcMin, btcMax float64
+		var arr []int64
+		if err := json.Unmarshal(o.Amount, &arr); err == nil && len(arr) >= 1 {
+			btcMin = round8(float64(arr[0]) / 1e8)
+			if len(arr) >= 2 {
+				btcMax = round8(float64(arr[1]) / 1e8)
+			} else {
+				btcMax = btcMin
+			}
+		} else {
+			var single int64
+			if err := json.Unmarshal(o.Amount, &single); err != nil {
+				continue
+			}
+			btcMin = round8(float64(single) / 1e8)
+			btcMax = btcMin
+		}
+
+		fiatMin := int(btcMin * eurPrice)
+		fiatMax := int(btcMax * eurPrice)
 
 		var method string
 		if methods, ok := o.MeansOfPayment["EUR"]; ok && len(methods) > 0 {
@@ -504,10 +688,10 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 			OfferID:       o.ID,
 			FiatCurrency:  "EUR",
 			Price:         eurPrice,
-			BTCMin:        &btcAmount,
-			BTCMax:        &btcAmount,
-			FiatMin:       &fiatAmt,
-			FiatMax:       &fiatAmt,
+			BTCMin:        &btcMin,
+			BTCMax:        &btcMax,
+			FiatMin:       &fiatMin,
+			FiatMax:       &fiatMax,
 			PaymentMethod: method,
 			PriceType:     priceTypeFixed(),
 		})
@@ -822,6 +1006,7 @@ func main() {
 
 	fetchers := []exchFetcher{
 		{"bisq", fetchBisq},
+		{"bisq2", fetchBisq2},
 		{"hodlhodl", fetchHodlHodl},
 		{"robosats", fetchRobosats},
 		{"peachbitcoin", fetchPeachBitcoin},
