@@ -8,6 +8,7 @@
 *.so
 *.dylib
 /server
+/snapshot
 
 # Test binary, built with `go test -c`
 *.test
