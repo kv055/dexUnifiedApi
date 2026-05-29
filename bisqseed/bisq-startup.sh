@@ -171,12 +171,13 @@ if [ -d "$DB_DIR" ]; then
 fi
 
 su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
-  -Xmx2g \
+  -Xmx2400m \
   -XX:MaxMetaspaceSize=256m \
   -XX:ReservedCodeCacheSize=128m \
   -XX:MaxDirectMemorySize=128m \
   -XX:+UseG1GC \
-  -jar /opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar \
+  -cp '/opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar:/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib/*:/usr/share/java/javafx-base.jar:/usr/share/java/javafx-graphics.jar' \
+  bisq.daemon.app.BisqDaemonMain \
   --apiPort=9998 \
   --apiPassword= \
   --appDataDir=/home/appuser/.local/share/Bisq \

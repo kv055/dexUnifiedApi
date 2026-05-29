@@ -58,6 +58,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1 \
     libfreetype6 \
     libgcc-s1 \
+    libopenjfx-java \
+    libopenjfx-jni \
     postgresql-client \
     procps \
     libstdc++6 \

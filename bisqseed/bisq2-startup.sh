@@ -35,13 +35,13 @@ ensure_account_row_in_database
 
 # Launch Bisq 2 API daemon.
 #
-# Key flags:
-#   --data-dir              where Bisq2 stores its state (wallets, P2P data, etc.)
-#   --api.restEnabled=true  enable the REST API (disabled by default)
-#   --api.bind.host         bind the REST server to all interfaces so unified-api can reach it
-#   --api.bind.port         REST port (default 8090)
-#   --api.security.authorizationRequired=false
-#                           skip the device-pairing auth flow; safe inside a private Docker network
+# REST API is configured under application.api.server.* in api_app.conf
+# (bundled inside api-app.jar). Overrides are passed as typesafe-config system
+# properties (-D...) so they apply regardless of how the daemon maps CLI args.
+# In v2.1.11 the shorter --api.bind.host=... CLI form was silently ignored and
+# the bundled default of host="127.0.0.1" won, leaving the REST server bound to
+# loopback only — unreachable from other containers despite api.bind.host=0.0.0.0
+# being passed.
 #
 # If Bisq 2 is configured to use its own embedded Tor for the P2P layer (the default),
 # it will try to start a Tor daemon inside the container. To route through the shared
@@ -56,13 +56,13 @@ su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -XX:ReservedCodeCacheSize=128m \
   -XX:MaxDirectMemorySize=128m \
   -XX:+UseG1GC \
+  -Dapplication.api.server.restEnabled=true \
+  -Dapplication.api.server.bind.host=0.0.0.0 \
+  -Dapplication.api.server.bind.port=8090 \
+  -Dapplication.api.server.security.authorizationRequired=false \
   -cp '/opt/bisq2/lib/*' \
   bisq.api_app.ApiApp \
-  --data-dir='$APP_DIR' \
-  --api.restEnabled=true \
-  --api.bind.host=0.0.0.0 \
-  --api.bind.port=8090 \
-  --api.security.authorizationRequired=false" &
+  --data-dir='$APP_DIR'" &
 
 BISQ2_PID=$!
 

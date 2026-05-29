@@ -363,7 +363,7 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	reqURL := fmt.Sprintf("http://%s/api/v1/offerbook/markets/BTC-EUR/offers", bisq2RESTHost)
+	reqURL := fmt.Sprintf("http://%s/api/v1/offerbook/markets/EUR/offers", bisq2RESTHost)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		fmt.Printf("[Bisq2] Build request error: %v\n", err)
@@ -387,23 +387,31 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 
 	body, _ := io.ReadAll(resp.Body)
 
+	// Offer fields live under bisqEasyOffer in the offerbook listing response.
+	// All quote-side amounts are integer fiat units in 4-decimal precision
+	// (e.g. 1000000 == 100.0000 EUR). Fixed prices use priceQuote.value with
+	// the same 4-decimal precision.
 	var raw []struct {
-		ID        string `json:"id"`
-		Direction string `json:"direction"`
-		AmountSpec struct {
-			Type      string `json:"@type"`
-			Amount    int64  `json:"amount"`
-			MinAmount int64  `json:"minAmount"`
-			MaxAmount int64  `json:"maxAmount"`
-		} `json:"amountSpec"`
-		PriceSpec struct {
-			Type       string  `json:"@type"`
-			Price      int64   `json:"price"`      // FixedPriceSpec: price * 10000
-			Percentage float64 `json:"percentage"` // FloatPriceSpec: offset from market (e.g. 0.05 = 5%)
-		} `json:"priceSpec"`
-		QuoteSidePaymentMethodSpecs []struct {
-			PaymentMethodName string `json:"paymentMethodName"`
-		} `json:"quoteSidePaymentMethodSpecs"`
+		BisqEasyOffer struct {
+			ID        string `json:"id"`
+			Direction string `json:"direction"`
+			AmountSpec struct {
+				Type      string `json:"type"`
+				Amount    int64  `json:"amount"`
+				MinAmount int64  `json:"minAmount"`
+				MaxAmount int64  `json:"maxAmount"`
+			} `json:"amountSpec"`
+			PriceSpec struct {
+				Type       string  `json:"type"`
+				Percentage float64 `json:"percentage"`
+				PriceQuote struct {
+					Value int64 `json:"value"`
+				} `json:"priceQuote"`
+			} `json:"priceSpec"`
+			QuoteSidePaymentMethodSpecs []struct {
+				PaymentMethod string `json:"paymentMethod"`
+			} `json:"quoteSidePaymentMethodSpecs"`
+		} `json:"bisqEasyOffer"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		fmt.Printf("[Bisq2] Parse error: %v\n", err)
@@ -412,30 +420,29 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 
 	wantDir := strings.ToUpper(direction)
 	var offers []offer
-	for _, o := range raw {
+	for _, item := range raw {
+		o := item.BisqEasyOffer
 		if strings.ToUpper(o.Direction) != wantDir {
 			continue
 		}
 
-		var btcMin, btcMax float64
+		var fiatMinUnits, fiatMaxUnits int64
 		switch o.AmountSpec.Type {
-		case "FixedAmountSpec":
-			btcMin = float64(o.AmountSpec.Amount) / 1e8
-			btcMax = btcMin
-		case "RangeAmountSpec":
-			btcMin = float64(o.AmountSpec.MinAmount) / 1e8
-			btcMax = float64(o.AmountSpec.MaxAmount) / 1e8
+		case "QuoteSideFixedAmountSpec":
+			fiatMinUnits = o.AmountSpec.Amount
+			fiatMaxUnits = o.AmountSpec.Amount
+		case "QuoteSideRangeAmountSpec":
+			fiatMinUnits = o.AmountSpec.MinAmount
+			fiatMaxUnits = o.AmountSpec.MaxAmount
 		default:
 			continue
 		}
 
-		// Bisq 2 stores fixed prices as integer * 10000 (4 decimal places).
-		// Floating prices are a fractional offset from the spot price.
 		var price float64
 		var pt *string
 		switch o.PriceSpec.Type {
-		case "FixedPriceSpec":
-			price = float64(o.PriceSpec.Price) / 10000.0
+		case "FixPriceSpec":
+			price = float64(o.PriceSpec.PriceQuote.Value) / 10000.0
 			pt = priceTypeFixed()
 		case "FloatPriceSpec":
 			price = float64(btcPrice) * (1 + o.PriceSpec.Percentage)
@@ -447,12 +454,18 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 			continue
 		}
 
-		fiatMin := int(btcMin * price)
-		fiatMax := int(btcMax * price)
+		if price == 0 {
+			continue
+		}
+
+		fiatMin := int(fiatMinUnits / 10000)
+		fiatMax := int(fiatMaxUnits / 10000)
+		btcMin := float64(fiatMin) / price
+		btcMax := float64(fiatMax) / price
 
 		var paymentMethod string
 		if len(o.QuoteSidePaymentMethodSpecs) > 0 {
-			paymentMethod = o.QuoteSidePaymentMethodSpecs[0].PaymentMethodName
+			paymentMethod = o.QuoteSidePaymentMethodSpecs[0].PaymentMethod
 		}
 
 		offers = append(offers, offer{
