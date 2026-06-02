@@ -394,8 +394,8 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 	// the same 4-decimal precision.
 	var raw []struct {
 		BisqEasyOffer struct {
-			ID        string `json:"id"`
-			Direction string `json:"direction"`
+			ID         string `json:"id"`
+			Direction  string `json:"direction"`
 			AmountSpec struct {
 				Type      string `json:"type"`
 				Amount    int64  `json:"amount"`
@@ -825,11 +825,17 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 	}
 	defer tx.Rollback()
 
-	tx.Exec("INSERT INTO snapshots (exchange, fiat_currency, direction, btc_price) VALUES (?, ?, ?, ?)",
-		exchange, fiat, direction, btcPrice)
+	if _, err := tx.Exec("INSERT INTO snapshots (exchange, fiat_currency, direction, btc_price) VALUES (?, ?, ?, ?)",
+		exchange, fiat, direction, btcPrice); err != nil {
+		// A failed first write poisons the whole transaction in Postgres, so the
+		// offer upserts below would all fail too. Bail loudly rather than silently
+		// pushing id=0 offers to the hub (the bug that hid bisq2/peach for so long).
+		fmt.Printf("[%s] snapshot insert failed (%s): %v\n", exchange, direction, err)
+		return nil
+	}
 
 	liveOffers := make([]livePayload, 0, len(offers))
-	updated, inserted := 0, 0
+	updated, inserted, failed := 0, 0, 0
 	for _, o := range offers {
 		var existingID int64
 		var found bool
@@ -872,8 +878,9 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 			live.OfferID = &offerID
 		}
 
+		var upsertErr error
 		if found {
-			_ = tx.QueryRow(`UPDATE offers SET
+			upsertErr = tx.QueryRow(`UPDATE offers SET
 				last_seen = CURRENT_TIMESTAMP,
 				price_type = ?,
 				price = ?,
@@ -887,9 +894,8 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID), existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
-			updated++
 		} else {
-			_ = tx.QueryRow(`INSERT INTO offers
+			upsertErr = tx.QueryRow(`INSERT INTO offers
 				(exchange, fiat_currency, direction, btc_min, btc_max,
 				 fiat_min, fiat_max, payment_method, offer_id, price_type, price)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -899,13 +905,33 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 				exchange, fiat, direction, o.BTCMin, o.BTCMax,
 				o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
+		}
+		if upsertErr != nil {
+			// Skip rather than push an id=0 offer to the hub. Once one upsert fails
+			// the transaction is poisoned, so the rest will fail too.
+			failed++
+			if failed == 1 {
+				fmt.Printf("[%s] offer upsert failed (%s): %v\n", exchange, direction, upsertErr)
+			}
+			continue
+		}
+		if found {
+			updated++
+		} else {
 			inserted++
 		}
 		liveOffers = append(liveOffers, live)
 	}
 
-	tx.Commit()
-	fmt.Printf("[%s] %d new, %d updated (%s)\n", exchange, inserted, updated, direction)
+	if err := tx.Commit(); err != nil {
+		fmt.Printf("[%s] snapshot commit failed (%s): %v\n", exchange, direction, err)
+		return nil
+	}
+	if failed > 0 {
+		fmt.Printf("[%s] %d new, %d updated, %d failed (%s)\n", exchange, inserted, updated, failed, direction)
+	} else {
+		fmt.Printf("[%s] %d new, %d updated (%s)\n", exchange, inserted, updated, direction)
+	}
 	return liveOffers
 }
 
