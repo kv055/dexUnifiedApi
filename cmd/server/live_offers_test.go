@@ -215,6 +215,39 @@ func TestHandleLiveOfferLifecycleRESTReturnsLifecyclePoints(t *testing.T) {
 	assertFloat(t, *points[0].NetPremiumPct, 1.23)
 }
 
+func TestInternalLiveOffersRequiresSecret(t *testing.T) {
+	old := internalAPISecret
+	internalAPISecret = "topsecret"
+	t.Cleanup(func() { internalAPISecret = old })
+
+	// Missing header → 401, before any body decode or DB access.
+	req := httptest.NewRequest(http.MethodPost, "/internal/live_offers", bytes.NewReader([]byte(`[]`)))
+	rec := httptest.NewRecorder()
+	handleInternalLiveOffers(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing secret: status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	// Wrong header → 401.
+	req = httptest.NewRequest(http.MethodPost, "/internal/live_offers", bytes.NewReader([]byte(`[]`)))
+	req.Header.Set("X-Internal-Secret", "wrong")
+	rec = httptest.NewRecorder()
+	handleInternalLiveOffers(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong secret: status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	// Correct header passes the gate; invalid JSON then yields 400 (not 401),
+	// proving the secret check let the request through without needing the DB.
+	req = httptest.NewRequest(http.MethodPost, "/internal/live_offers", bytes.NewReader([]byte(`not-json`)))
+	req.Header.Set("X-Internal-Secret", "topsecret")
+	rec = httptest.NewRecorder()
+	handleInternalLiveOffers(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("correct secret + bad body: status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
 	oldDB := db
 	oldHub := hub

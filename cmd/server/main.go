@@ -26,6 +26,7 @@ var (
 	snapshotIntervalMin       int
 	listenAddr                string
 	paymentNotificationSecret string
+	internalAPISecret         string
 	bisqGRPCHost              string
 	bisqAPIPassword           string
 	bisq2RESTHost             string
@@ -98,6 +99,7 @@ func init() {
 		if runningUnderGoTest() {
 			listenAddr = ":5010"
 			paymentNotificationSecret = strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATIONS_SHARED_SECRET"))
+			internalAPISecret = strings.TrimSpace(os.Getenv("INTERNAL_API_SECRET"))
 			bisqGRPCHost = "localhost:9998"
 			accountHealthInterval = time.Minute
 			return
@@ -129,6 +131,7 @@ func init() {
 		listenAddr = ":5010"
 	}
 	paymentNotificationSecret = strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATIONS_SHARED_SECRET"))
+	internalAPISecret = strings.TrimSpace(os.Getenv("INTERNAL_API_SECRET"))
 	bisqGRPCHost = strings.TrimSpace(os.Getenv("BISQ_GRPC_HOST"))
 	if bisqGRPCHost == "" {
 		bisqGRPCHost = "localhost:9998"
@@ -370,6 +373,11 @@ func writeLifecycleEntries(offers []liveOutOffer) {
 // handleInternalLiveOffers receives the live offer list from the snapshot tool,
 // updates the hub, and persists lifecycle to the DB.
 func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
+	if internalAPISecret != "" && r.Header.Get("X-Internal-Secret") != internalAPISecret {
+		http.Error(w, "unauthorized internal secret", http.StatusUnauthorized)
+		return
+	}
+
 	var offers []LiveOffer
 	if err := json.NewDecoder(r.Body).Decode(&offers); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

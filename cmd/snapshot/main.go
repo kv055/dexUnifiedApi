@@ -1228,7 +1228,19 @@ func pushLiveOffersToServer(offers []livePayload, serverURL string) {
 		return
 	}
 
-	resp, err := http.Post(serverURL+"/internal/live_offers", "application/json", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/internal/live_offers", strings.NewReader(string(body)))
+	if err != nil {
+		fmt.Printf("[LivePush] request build failed (non-fatal): %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// Authenticate the internal ingest call when a shared secret is configured;
+	// the server enforces it via X-Internal-Secret. Empty secret = open (dev).
+	if secret := strings.TrimSpace(os.Getenv("INTERNAL_API_SECRET")); secret != "" {
+		req.Header.Set("X-Internal-Secret", secret)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Printf("[LivePush] POST failed (non-fatal): %v\n", err)
 		return
