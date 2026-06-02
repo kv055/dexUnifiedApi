@@ -415,6 +415,7 @@ func (h *LiveHub) setOffers(offers []LiveOffer) {
 	h.offersMu.Lock()
 	h.offers = offers
 	h.offersMu.Unlock()
+	appMetrics.setOffersInHub(len(offers))
 	h.broadcastAll()
 }
 
@@ -432,6 +433,7 @@ func (h *LiveHub) subscribe(sub liveSubscription) chan []byte {
 	h.subsMu.Lock()
 	h.subscribers[ch] = sub
 	h.subsMu.Unlock()
+	appMetrics.incWSClient()
 	return ch
 }
 
@@ -440,6 +442,7 @@ func (h *LiveHub) unsubscribe(ch chan []byte) {
 	h.subsMu.Lock()
 	delete(h.subscribers, ch)
 	h.subsMu.Unlock()
+	appMetrics.decWSClient()
 	close(ch)
 }
 
@@ -467,6 +470,7 @@ func (h *LiveHub) broadcastForConfig(sub liveSubscription) {
 	if data == nil {
 		return
 	}
+	appMetrics.observeBroadcast()
 	h.subsMu.Lock()
 	for ch, s := range h.subscribers {
 		if s == sub {

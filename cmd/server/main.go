@@ -8,6 +8,7 @@ import (
 	"dexunifiedapi/db"
 	"dexunifiedapi/internal/accounthealth"
 	"dexunifiedapi/internal/config"
+	"dexunifiedapi/internal/dbmetrics"
 	"dexunifiedapi/internal/lifecycle"
 	"dexunifiedapi/internal/paymentnotifications"
 	"encoding/json"
@@ -208,6 +209,13 @@ func main() {
 		hub.broadcastForCex(cex)
 	})
 
+	// Metrics registry — created early so price feeds, the live hub, account
+	// health checks and the DB-backed business collector all report from start.
+	metricsReg := metrics.NewServiceRegistry("unified-api")
+	appMetrics = newServerMetrics(metricsReg.Registry)
+	metricsReg.Registry.MustRegister(dbmetrics.NewCollector(db))
+	priceManager.SetMetrics(prices.NewMetrics(metricsReg.Registry))
+
 	recorder := accounthealth.NewDBRecorder(db)
 
 	go accounthealth.RunPeriodicAccountHealthCheck(
@@ -215,9 +223,9 @@ func main() {
 		accountHealthInterval,
 		recorder,
 		accounthealth.BisqAccountProvider,
-		func(ctx context.Context) error {
+		appMetrics.instrumentCheck(accounthealth.BisqAccountProvider, func(ctx context.Context) error {
 			return accounthealth.CheckBisqAccountHealth(ctx, accounthealth.NewBisqGRPCAccountChecker(bisqGRPCHost, bisqAPIPassword, 0))
-		},
+		}),
 	)
 
 	go accounthealth.RunPeriodicAccountHealthCheck(
@@ -225,7 +233,7 @@ func main() {
 		accountHealthInterval,
 		recorder,
 		"Bisq2",
-		accounthealth.CheckFunc(func(ctx context.Context) error {
+		appMetrics.instrumentCheck("Bisq2", accounthealth.CheckFunc(func(ctx context.Context) error {
 			if bisq2RESTHost == "" {
 				return fmt.Errorf("bisq2 not configured (BISQ2_REST_HOST is unset)")
 			}
@@ -248,7 +256,7 @@ func main() {
 				return fmt.Errorf("bisq2 health: unexpected status %d", resp.StatusCode)
 			}
 			return nil
-		}),
+		})),
 	)
 
 	// Seed hub from DB in the background
@@ -271,7 +279,6 @@ func main() {
 	mux.HandleFunc("POST /internal/live_offers", handleInternalLiveOffers)
 	mux.HandleFunc("POST /internal/payment_notifications", handleInternalPaymentNotifications)
 
-	metricsReg := metrics.NewServiceRegistry("unified-api")
 	mux.Handle("GET /metrics", metricsReg.Handler())
 
 	handler := corsMiddleware(metricsReg.Middleware(mux))
@@ -387,6 +394,7 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	for i, o := range offers {
 		ids[i] = o.ID
 	}
+	appMetrics.observePush()
 	hub.setLifecycle(fetchOfferLifecycle(ids))
 	hub.setOffers(offers)
 	price := getCexPrice(defaultCEX)
