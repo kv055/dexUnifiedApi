@@ -6,7 +6,7 @@ DB_DIR="$APP_DIR/btc_mainnet/db"
 WALLET_FILE="$APP_DIR/btc_mainnet/wallet/bisq_BTC.wallet"
 ACCOUNT_FILE="$DB_DIR/UserPayload"
 MOUNTED_ACCOUNT_FILE="${BISQ_ACCOUNT_FILE_PATH:-}"
-HELPER_CP="/opt/bisq/bisq-seed-helper:/opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar:/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib/*"
+HELPER_CP="/opt/bisq/bisq-seed-helper:/opt/bisq/bisq-daemon/daemon.jar:/opt/bisq/bisq-daemon/lib/*"
 JAVA_BIN=/opt/java/openjdk/bin/java
 BACKUP_TIMEOUT_SEC="${BISQ_SEED_BACKUP_TIMEOUT_SEC:-900}"
 BACKUP_RETRY_DELAY_SEC="${BISQ_SEED_BACKUP_RETRY_DELAY_SEC:-30}"
@@ -176,7 +176,7 @@ su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -XX:ReservedCodeCacheSize=128m \
   -XX:MaxDirectMemorySize=128m \
   -XX:+UseG1GC \
-  -cp '/opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar:/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib/*:/usr/share/java/javafx-base.jar:/usr/share/java/javafx-graphics.jar' \
+  -cp '/opt/bisq/bisq-daemon/daemon.jar:/opt/bisq/bisq-daemon/lib/*:/usr/share/java/javafx-base.jar:/usr/share/java/javafx-graphics.jar' \
   bisq.daemon.app.BisqDaemonMain \
   --apiPort=9998 \
   --apiPassword= \

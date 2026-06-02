@@ -22,10 +22,10 @@ RUN if [ -d daemon/build/install/daemon/lib ]; then \
     else \
       echo "ERROR: no daemon lib directory found"; exit 1; \
     fi && \
-    mkdir -p "/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib" && \
-    cp "$src/daemon.jar" "/opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar" && \
+    mkdir -p "/opt/bisq/bisq-daemon/lib" && \
+    cp "$src/daemon.jar" "/opt/bisq/bisq-daemon/daemon.jar" && \
     find "$src" -maxdepth 1 -name '*.jar' ! -name 'daemon.jar' \
-       -exec cp {} "/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib/" \; && \
+       -exec cp {} "/opt/bisq/bisq-daemon/lib/" \; && \
     chmod -R o+rX /opt/bisq/
 
 FROM eclipse-temurin:21-jre-jammy AS java-runtime
@@ -39,7 +39,7 @@ COPY --from=bisq-builder /opt/bisq /opt/bisq
 
 RUN mkdir -p /build && \
     javac \
-      -cp "/opt/bisq/bisq-daemon-${BISQ_VERSION}/daemon.jar:/opt/bisq/bisq-daemon-${BISQ_VERSION}/lib/*" \
+      -cp "/opt/bisq/bisq-daemon/daemon.jar:/opt/bisq/bisq-daemon/lib/*" \
       -d /build \
       /src/ExtractBisqSeed.java
 
@@ -81,5 +81,5 @@ EXPOSE 9998 9999
 HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
     CMD /usr/bin/timeout 3s /bin/bash -lc '</dev/tcp/127.0.0.1/9998'
 
-WORKDIR /opt/bisq/bisq-daemon-${BISQ_VERSION}
+WORKDIR /opt/bisq/bisq-daemon
 ENTRYPOINT ["/usr/local/bin/bisq-startup.sh"]
