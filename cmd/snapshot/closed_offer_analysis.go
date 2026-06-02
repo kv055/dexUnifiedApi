@@ -103,7 +103,7 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 	// Single query: overall aggregates + profitable-only conditional aggregates.
 	// AVG(CASE WHEN net_premium_pct > 0 THEN col END) returns NULL when no row matches,
 	// which maps cleanly to sql.NullFloat64.
-	var totalCount, profitableCount int
+	var totalCount, profitableCount, rawPositiveCount int
 	var overallAvgPremium sql.NullFloat64 // all entries — used for delete threshold
 	var avgRefPrice sql.NullFloat64       // all entries — market reference
 	var avgBTCAmount sql.NullFloat64      // all entries — stored for non-premium entries too
@@ -126,7 +126,8 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 			AVG(CASE WHEN net_premium_pct > 0 THEN trade_cost_btc END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN net_premium_pct END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN net_premium_btc END),
-			AVG(CASE WHEN net_premium_pct > 0 THEN btc_amount     END)
+			AVG(CASE WHEN net_premium_pct > 0 THEN btc_amount     END),
+			COUNT(CASE WHEN premium_pct > 0 THEN 1 END)
 		FROM order_lifecycle
 		WHERE offer_db_id = ?
 	`, offer.id).Scan(
@@ -141,6 +142,7 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		&profAvgNetPremiumPct,
 		&profAvgNetPremiumBTC,
 		&profAvgBTCAmount,
+		&rawPositiveCount,
 	)
 	if err != nil {
 		fmt.Printf("[ClosedAnalysis] aggregate query error for offer %d: %v\n", offer.id, err)
@@ -151,8 +153,15 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		return "ignored_no_lifecycle", false
 	}
 
-	// Delete threshold uses the overall (unfiltered) average premium.
-	if overallAvgPremium.Valid && overallAvgPremium.Float64 < deleteBelowPremiumPct {
+	// Only ever-junk offers are deleted: never net-profitable (profitableCount),
+	// never even favorably priced (rawPositiveCount), AND deeply unprofitable on
+	// average. Any offer that was ever premium falls through to the analyzed /
+	// non_premium branches below so the cascade never erases a premium offer's
+	// price-path history. The raw-positive guard matters during a server outage,
+	// when baseline rows have NULL net_premium_pct (so profitableCount is 0) for
+	// offers that were genuinely premium.
+	if profitableCount == 0 && rawPositiveCount == 0 &&
+		overallAvgPremium.Valid && overallAvgPremium.Float64 < deleteBelowPremiumPct {
 		_, _ = sdb.Exec(`DELETE FROM offers WHERE id = ?`, offer.id)
 		return "deleted_non_premium", true
 	}

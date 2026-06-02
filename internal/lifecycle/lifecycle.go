@@ -4,11 +4,35 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 
 	"commons/tradecost"
 	dbutil "dexunifiedapi/db"
 )
+
+// PriceDiffPct returns the signed percentage difference of offerPrice versus
+// refPrice, rounded to two decimals. Positive means offerPrice is above ref.
+func PriceDiffPct(offerPrice, refPrice float64) float64 {
+	if refPrice <= 0 {
+		return 0
+	}
+	return math.Round((offerPrice/refPrice-1)*10000) / 100
+}
+
+// DirectionalPremiumPct returns the premium from the taker's perspective:
+// positive means the offer is profitable to take. For a "sell" offer (maker
+// sells BTC, we buy) profit grows as the price drops below ref, so the sign is
+// flipped; for any other direction the raw difference is used as-is. This is the
+// single source of truth for the premium sign, shared by the server and the
+// snapshot job.
+func DirectionalPremiumPct(direction string, offerPrice, refPrice float64) float64 {
+	raw := PriceDiffPct(offerPrice, refPrice)
+	if direction == "sell" {
+		return -raw
+	}
+	return raw
+}
 
 // Point represents a point.
 type Point struct {
@@ -89,7 +113,67 @@ func (r Repository) LoadByOfferIDs(ctx context.Context, ids []int64) (map[int64]
 	return result, nil
 }
 
-// PersistSnapshot writes lifecycle samples and derived route costs.
+// Baseline is a price-path sample written directly by the snapshot job. It
+// captures the columns that do not depend on the server's trade-cost engine, so
+// a live offer always gets a lifecycle point even when the server is down.
+type Baseline struct {
+	// OfferID is the offers.id this sample belongs to.
+	OfferID int64
+	// Price is the offer's price.
+	Price float64
+	// RefPrice is the reference (market) price used for the premium.
+	RefPrice float64
+	// PremiumPct is the directional premium (positive = profitable).
+	PremiumPct float64
+}
+
+// InsertBaseline writes one baseline lifecycle row per offer in a single
+// transaction. Cost columns are left NULL for the server to enrich. Rows with a
+// non-positive price or reference price are skipped (the schema requires both
+// to be > 0) so one bad offer never drops the whole batch.
+func (r Repository) InsertBaseline(ctx context.Context, baselines []Baseline) error {
+	if len(baselines) == 0 || r.db == nil {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO order_lifecycle (offer_db_id, price, ref_price, premium_pct)
+		VALUES (?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare baseline insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, b := range baselines {
+		if b.Price <= 0 || b.RefPrice <= 0 {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx,
+			b.OfferID,
+			tradecost.Round4(b.Price),
+			tradecost.Round4(b.RefPrice),
+			tradecost.Round4(b.PremiumPct),
+		); err != nil {
+			return fmt.Errorf("insert baseline lifecycle for offer %d: %w", b.OfferID, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// PersistSnapshot enriches the latest baseline lifecycle row for each offer with
+// the server-computed cost fields, and stores derived route costs on the offers
+// table. It never inserts lifecycle rows or touches price/ref_price/premium_pct:
+// the snapshot job owns the price path, so the premium series stays consistent
+// regardless of server health. net_premium is derived from the row's stored
+// premium_pct so the enriched row remains internally consistent. Offers without
+// a baseline row yet (or with a non-positive stored premium) are left untouched.
 func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error {
 	if len(offers) == 0 || r.db == nil {
 		return nil
@@ -100,16 +184,31 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 	}
 	defer tx.Rollback()
 
-	insStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO order_lifecycle
-			(offer_db_id, price, ref_price, premium_pct,
-			 trade_cost_pct, trade_cost_btc, net_premium_pct, net_premium_btc, btc_amount)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	latestStmt, err := tx.PrepareContext(ctx, `
+		SELECT id, premium_pct
+		  FROM order_lifecycle
+		 WHERE offer_db_id = ?
+		 ORDER BY snapshot_time DESC, id DESC
+		 LIMIT 1
 	`)
 	if err != nil {
-		return fmt.Errorf("prepare insert: %w", err)
+		return fmt.Errorf("prepare latest lifecycle: %w", err)
 	}
-	defer insStmt.Close()
+	defer latestStmt.Close()
+
+	enrichStmt, err := tx.PrepareContext(ctx, `
+		UPDATE order_lifecycle SET
+			trade_cost_pct  = ?,
+			trade_cost_btc  = ?,
+			net_premium_pct = ?,
+			net_premium_btc = ?,
+			btc_amount      = ?
+		WHERE id = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare enrich lifecycle: %w", err)
+	}
+	defer enrichStmt.Close()
 
 	updStmt, err := tx.PrepareContext(ctx, `
 		UPDATE offers SET
@@ -140,24 +239,39 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 			continue
 		}
 		bd := o.CostBreakdown
-		var cexWithdrawFee any
-		if bd.TradeDirection != "ask" {
-			cexWithdrawFee = tradecost.Round8(bd.WithdrawalFeeBTC)
+
+		// Enrich the latest baseline row the snapshot wrote for this offer. Cost
+		// data only exists for premium offers, so gate on the row's stored
+		// premium and derive net from it to keep the row self-consistent.
+		var rowID int64
+		var storedPremium float64
+		switch err := latestStmt.QueryRowContext(ctx, o.ID).Scan(&rowID, &storedPremium); err {
+		case nil:
+			if storedPremium > 0 && bd.RouteCEX != "" {
+				net := tradecost.Round4(storedPremium - bd.TotalCostPct)
+				netBTC := tradecost.Round8(bd.BTCAmount * net / 100)
+				if _, err := enrichStmt.ExecContext(ctx,
+					tradecost.Round4(bd.TotalCostPct),
+					tradecost.Round8(bd.TotalCostBTC),
+					net,
+					netBTC,
+					tradecost.Round8(bd.BTCAmount),
+					rowID,
+				); err != nil {
+					return fmt.Errorf("enrich lifecycle for offer %d: %w", o.ID, err)
+				}
+			}
+		case sql.ErrNoRows:
+			// No baseline row yet (e.g. brand-new offer this cycle) — nothing to enrich.
+		default:
+			return fmt.Errorf("load latest lifecycle for offer %d: %w", o.ID, err)
 		}
-		if _, err := insStmt.ExecContext(ctx,
-			o.ID,
-			tradecost.Round4(o.Price),
-			tradecost.Round4(o.RefPrice),
-			tradecost.Round4(o.PriceDiffPct),
-			tradecost.Round4(bd.TotalCostPct),
-			tradecost.Round8(bd.TotalCostBTC),
-			tradecost.Round4(o.NetPremiumPct),
-			tradecost.Round8(bd.EstimatedProfitBTC),
-			tradecost.Round8(bd.BTCAmount),
-		); err != nil {
-			return fmt.Errorf("insert lifecycle for offer %d: %w", o.ID, err)
-		}
+
 		if bd.RouteCEX != "" {
+			var cexWithdrawFee any
+			if bd.TradeDirection != "ask" {
+				cexWithdrawFee = tradecost.Round8(bd.WithdrawalFeeBTC)
+			}
 			abort := tradecost.AbortCostFromBreakdown(bd)
 			if _, err := updStmt.ExecContext(ctx,
 				bd.RouteCEX,

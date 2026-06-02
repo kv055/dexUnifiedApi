@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"commons/tradecost"
+	"dexunifiedapi/internal/lifecycle"
 
 	"github.com/gorilla/websocket"
 )
@@ -335,18 +336,11 @@ func ptrScenario(s liveOfferScenario) *liveOfferScenario {
 }
 
 func computePriceDiffPct(offerPrice, refPrice float64) float64 {
-	if refPrice <= 0 {
-		return 0
-	}
-	return math.Round((offerPrice/refPrice-1)*10000) / 100
+	return lifecycle.PriceDiffPct(offerPrice, refPrice)
 }
 
 func computeDirectionalPremiumPct(direction string, offerPrice, refPrice float64) float64 {
-	raw := computePriceDiffPct(offerPrice, refPrice)
-	if direction == "sell" {
-		return -raw
-	}
-	return raw
+	return lifecycle.DirectionalPremiumPct(direction, offerPrice, refPrice)
 }
 
 func selectBTCTradeSize(btcMax, btcMin *float64) float64 {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"commons/tradecost"
+	"database/sql"
 	"dexunifiedapi/internal/testdb"
 	"encoding/json"
 	"math"
@@ -248,7 +249,7 @@ func TestInternalLiveOffersRequiresSecret(t *testing.T) {
 	}
 }
 
-func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
+func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 	oldDB := db
 	oldHub := hub
 	oldPrices := cexPrices
@@ -268,6 +269,13 @@ func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
 		VALUES (1, 'bisq', 'EUR', 'buy', 102.5)
 	`); err != nil {
 		t.Fatalf("insert offer: %v", err)
+	}
+	// The snapshot job writes the baseline row; the push enriches it in place.
+	if _, err := testDB.Exec(`
+		INSERT INTO order_lifecycle (offer_db_id, price, ref_price, premium_pct)
+		VALUES (1, 102.5, 100, 2.5)
+	`); err != nil {
+		t.Fatalf("insert baseline lifecycle: %v", err)
 	}
 	db = testDB
 
@@ -300,12 +308,25 @@ func TestInternalLiveOffersWritesLifecycleBeforeReturning(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
+	// Enriched in place — still one row, with cost fields now filled and premium
+	// untouched (net derived from the stored premium).
 	var lifecycleRows int
 	if err := testDB.QueryRow(`SELECT COUNT(*) FROM order_lifecycle WHERE offer_db_id = ?`, 1).Scan(&lifecycleRows); err != nil {
 		t.Fatalf("count lifecycle rows: %v", err)
 	}
 	if lifecycleRows != 1 {
 		t.Fatalf("lifecycle rows = %d, want 1", lifecycleRows)
+	}
+	var premium float64
+	var tradeCostPct, netPremiumPct sql.NullFloat64
+	if err := testDB.QueryRow(`
+		SELECT premium_pct, trade_cost_pct, net_premium_pct FROM order_lifecycle WHERE offer_db_id = ?
+	`, 1).Scan(&premium, &tradeCostPct, &netPremiumPct); err != nil {
+		t.Fatalf("select enriched lifecycle: %v", err)
+	}
+	assertFloat(t, premium, 2.5)
+	if !tradeCostPct.Valid || !netPremiumPct.Valid {
+		t.Fatalf("baseline row not enriched: trade_cost=%v net=%v", tradeCostPct, netPremiumPct)
 	}
 	var takerFee, withdrawalFee, networkFee, dexFee float64
 	if err := testDB.QueryRow(`

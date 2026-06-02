@@ -151,3 +151,76 @@ func TestClosedOfferWithNonProfitableLifecycleBecomesNonPremium(t *testing.T) {
 		t.Fatalf("avg_estimated_profit_btc = %v, want NULL", avgProfitBTC.Float64)
 	}
 }
+
+func offerExists(t *testing.T, db *dbutil.DB, offerID int64) bool {
+	t.Helper()
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM offers WHERE id = ?)`, offerID).Scan(&exists); err != nil {
+		t.Fatalf("offer exists check: %v", err)
+	}
+	return exists
+}
+
+// Average premium below -3% but the offer was net-profitable at least once: it
+// must be kept (analyzed), never deleted — its history is valuable.
+func TestClosedOfferEverNetProfitableIsNotDeleted(t *testing.T) {
+	db := openClosedOfferAnalysisDB(t)
+	offerID := insertClosedOffer(t, db, nil)
+	insertLifecycleRow(t, db, offerID, 5, 2, 3, 0.003, 0.1)    // profitable snapshot
+	insertLifecycleRow(t, db, offerID, -12, 0, -12, -0.01, 0.1) // drags avg premium to -3.5%
+
+	status, removed := analyzeSingleClosedOffer(db, closedOfferRecord{id: offerID})
+
+	if removed {
+		t.Fatal("ever-net-profitable offer was deleted, want kept")
+	}
+	if status != "analyzed" {
+		t.Fatalf("status = %q, want analyzed", status)
+	}
+	if !offerExists(t, db, offerID) {
+		t.Fatal("offer row was removed, want kept")
+	}
+}
+
+// Average premium below -3% and never net-profitable, but favorably priced at
+// least once (raw premium > 0): still kept (non_premium), not deleted. Guards
+// the server-outage case where baseline rows have NULL net_premium_pct.
+func TestClosedOfferEverRawPositiveIsNotDeleted(t *testing.T) {
+	db := openClosedOfferAnalysisDB(t)
+	offerID := insertClosedOffer(t, db, nil)
+	insertLifecycleRow(t, db, offerID, 1, 2, -0.5, -0.0005, 0.1) // raw positive, net negative
+	insertLifecycleRow(t, db, offerID, -10, 0, -10, -0.01, 0.1)  // avg premium -4.5%
+
+	status, removed := analyzeSingleClosedOffer(db, closedOfferRecord{id: offerID})
+
+	if removed {
+		t.Fatal("ever-raw-positive offer was deleted, want kept")
+	}
+	if status != "non_premium" {
+		t.Fatalf("status = %q, want non_premium", status)
+	}
+	if !offerExists(t, db, offerID) {
+		t.Fatal("offer row was removed, want kept")
+	}
+}
+
+// Never premium (always unfavorable) and deeply unprofitable on average: this is
+// genuine junk and is deleted.
+func TestClosedOfferNeverPremiumIsDeleted(t *testing.T) {
+	db := openClosedOfferAnalysisDB(t)
+	offerID := insertClosedOffer(t, db, nil)
+	insertLifecycleRow(t, db, offerID, -4, 0, -4, -0.004, 0.1)
+	insertLifecycleRow(t, db, offerID, -5, 0, -5, -0.005, 0.1)
+
+	status, removed := analyzeSingleClosedOffer(db, closedOfferRecord{id: offerID})
+
+	if !removed {
+		t.Fatal("never-premium junk offer was kept, want deleted")
+	}
+	if status != "deleted_non_premium" {
+		t.Fatalf("status = %q, want deleted_non_premium", status)
+	}
+	if offerExists(t, db, offerID) {
+		t.Fatal("offer row still present, want deleted")
+	}
+}

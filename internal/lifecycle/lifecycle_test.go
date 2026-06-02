@@ -31,6 +31,16 @@ func insertOffer(t *testing.T, db *dbutil.DB) int64 {
 	return id
 }
 
+func insertBaselineRow(t *testing.T, db *dbutil.DB, offerID int64, price, refPrice, premiumPct float64) {
+	t.Helper()
+	if _, err := db.Exec(`
+		INSERT INTO order_lifecycle (offer_db_id, price, ref_price, premium_pct)
+		VALUES (?, ?, ?, ?)
+	`, offerID, price, refPrice, premiumPct); err != nil {
+		t.Fatalf("insert baseline: %v", err)
+	}
+}
+
 func assertFloat(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-12 {
@@ -38,9 +48,11 @@ func assertFloat(t *testing.T, got, want float64) {
 	}
 }
 
-func TestPersistSnapshotStoresStaticCostsOnOfferOnly(t *testing.T) {
+func TestPersistSnapshotEnrichesBaselineAndStoresStaticCostsOnOffer(t *testing.T) {
 	db := openTestDB(t)
 	offerID := insertOffer(t, db)
+	// Baseline written by the snapshot job: price/ref/premium only, costs NULL.
+	insertBaselineRow(t, db, offerID, 105, 100, 5)
 	repo := NewRepository(db)
 
 	err := repo.PersistSnapshot(context.Background(), []Record{{
@@ -67,6 +79,7 @@ func TestPersistSnapshotStoresStaticCostsOnOfferOnly(t *testing.T) {
 		t.Fatalf("PersistSnapshot: %v", err)
 	}
 
+	// Enriched in place — still exactly one row, not duplicated.
 	var lifecycleRows int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM order_lifecycle`).Scan(&lifecycleRows); err != nil {
 		t.Fatalf("count lifecycle: %v", err)
@@ -74,6 +87,25 @@ func TestPersistSnapshotStoresStaticCostsOnOfferOnly(t *testing.T) {
 	if lifecycleRows != 1 {
 		t.Fatalf("lifecycle rows = %d, want 1", lifecycleRows)
 	}
+
+	// Snapshot's price/ref/premium untouched; cost cols filled; net derived from
+	// the stored premium (5 - 1 = 4); net BTC = 0.1 * 4 / 100 = 0.004.
+	var price, refPrice, premium, tradeCostPct, tradeCostBTC, netPct, netBTC, btcAmount float64
+	if err := db.QueryRow(`
+		SELECT price, ref_price, premium_pct, trade_cost_pct, trade_cost_btc,
+		       net_premium_pct, net_premium_btc, btc_amount
+		FROM order_lifecycle WHERE offer_db_id = ?
+	`, offerID).Scan(&price, &refPrice, &premium, &tradeCostPct, &tradeCostBTC, &netPct, &netBTC, &btcAmount); err != nil {
+		t.Fatalf("select lifecycle: %v", err)
+	}
+	assertFloat(t, price, 105)
+	assertFloat(t, refPrice, 100)
+	assertFloat(t, premium, 5)
+	assertFloat(t, tradeCostPct, 1)
+	assertFloat(t, tradeCostBTC, 0.001)
+	assertFloat(t, netPct, 4)
+	assertFloat(t, netBTC, 0.004)
+	assertFloat(t, btcAmount, 0.1)
 
 	var taker, withdrawal, network, dexFee, abortBTC, abortPct float64
 	if err := db.QueryRow(`
@@ -136,38 +168,29 @@ func TestPersistSnapshotLeavesAskWithdrawalFeeNull(t *testing.T) {
 	assertFloat(t, abortPct, 0.2)
 }
 
-func TestPersistSnapshotReturnsInsertErrorAndRollsBack(t *testing.T) {
+func TestPersistSnapshotSkipsEnrichmentWithoutBaseline(t *testing.T) {
 	db := openTestDB(t)
 	offerID := insertOffer(t, db)
 	repo := NewRepository(db)
 
+	// No baseline row exists yet for this offer.
 	err := repo.PersistSnapshot(context.Background(), []Record{{
 		ID:            offerID,
-		Price:         0,
+		Price:         105,
 		RefPrice:      100,
 		PriceDiffPct:  5,
 		NetPremiumPct: 4,
 		CostBreakdown: tradecost.CostBreakdown{
-			BTCAmount:          0.1,
-			RouteCEX:           "kraken",
-			RouteMethod:        "onchain",
-			TradeDirection:     "bid",
-			CexTakerFeeBTC:     0.00025,
-			WithdrawalFeeBTC:   0.00015,
-			NetworkFeeBTC:      0.0001,
-			DexFeeBTC:          0.0005,
-			TotalCostPct:       1,
-			TotalCostBTC:       0.001,
-			EstimatedProfitBTC: 0.004,
+			BTCAmount: 0.1, RouteCEX: "kraken", RouteMethod: "onchain", TradeDirection: "bid",
+			CexTakerFeeBTC: 0.00025, NetworkFeeBTC: 0.0001, DexFeeBTC: 0.0005,
+			TotalCostPct: 1, TotalCostBTC: 0.001, EstimatedProfitBTC: 0.004,
 		},
 	}})
-	if err == nil {
-		t.Fatal("PersistSnapshot returned nil, want insert error")
-	}
-	if !strings.Contains(err.Error(), "insert lifecycle") {
-		t.Fatalf("error = %v, want insert lifecycle context", err)
+	if err != nil {
+		t.Fatalf("PersistSnapshot: %v", err)
 	}
 
+	// Enrichment is a no-op without a baseline — no lifecycle rows are created.
 	var lifecycleRows int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM order_lifecycle`).Scan(&lifecycleRows); err != nil {
 		t.Fatalf("count lifecycle: %v", err)
@@ -176,12 +199,52 @@ func TestPersistSnapshotReturnsInsertErrorAndRollsBack(t *testing.T) {
 		t.Fatalf("lifecycle rows = %d, want 0", lifecycleRows)
 	}
 
+	// The offers-table route costs are still updated independently.
 	var route sql.NullString
 	if err := db.QueryRow(`SELECT best_route_cex FROM offers WHERE id = ?`, offerID).Scan(&route); err != nil {
 		t.Fatalf("select route: %v", err)
 	}
-	if route.Valid {
-		t.Fatalf("best_route_cex = %q, want NULL", route.String)
+	if !route.Valid || route.String != "kraken" {
+		t.Fatalf("best_route_cex = %v, want kraken", route)
+	}
+}
+
+func TestInsertBaselineWritesRowsAndSkipsInvalid(t *testing.T) {
+	db := openTestDB(t)
+	goodID := insertOffer(t, db)
+	badID := insertOffer(t, db)
+	repo := NewRepository(db)
+
+	err := repo.InsertBaseline(context.Background(), []Baseline{
+		{OfferID: goodID, Price: 105, RefPrice: 100, PremiumPct: 5},
+		{OfferID: badID, Price: 0, RefPrice: 100, PremiumPct: 5}, // invalid price — skipped
+	})
+	if err != nil {
+		t.Fatalf("InsertBaseline: %v", err)
+	}
+
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM order_lifecycle`).Scan(&rows); err != nil {
+		t.Fatalf("count lifecycle: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("lifecycle rows = %d, want 1 (invalid skipped)", rows)
+	}
+
+	// The baseline row carries price/ref/premium and leaves cost columns NULL.
+	var price, refPrice, premium float64
+	var tradeCostPct, netPct, btcAmount sql.NullFloat64
+	if err := db.QueryRow(`
+		SELECT price, ref_price, premium_pct, trade_cost_pct, net_premium_pct, btc_amount
+		FROM order_lifecycle WHERE offer_db_id = ?
+	`, goodID).Scan(&price, &refPrice, &premium, &tradeCostPct, &netPct, &btcAmount); err != nil {
+		t.Fatalf("select baseline: %v", err)
+	}
+	assertFloat(t, price, 105)
+	assertFloat(t, refPrice, 100)
+	assertFloat(t, premium, 5)
+	if tradeCostPct.Valid || netPct.Valid || btcAmount.Valid {
+		t.Fatalf("cost columns should be NULL on a baseline row, got trade_cost=%v net=%v btc=%v", tradeCostPct, netPct, btcAmount)
 	}
 }
 
@@ -195,6 +258,7 @@ func TestPersistSnapshotReturnsUpdateErrorAndRollsBack(t *testing.T) {
 		t.Fatalf("add test constraint: %v", err)
 	}
 	offerID := insertOffer(t, db)
+	insertBaselineRow(t, db, offerID, 105, 100, 5)
 	repo := NewRepository(db)
 
 	err := repo.PersistSnapshot(context.Background(), []Record{{
@@ -224,11 +288,27 @@ func TestPersistSnapshotReturnsUpdateErrorAndRollsBack(t *testing.T) {
 		t.Fatalf("error = %v, want update lifecycle route costs context", err)
 	}
 
+	// The committed baseline row survives; the enrichment UPDATE was rolled back
+	// with the failed offers-route UPDATE, so its cost columns stay NULL.
 	var lifecycleRows int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM order_lifecycle`).Scan(&lifecycleRows); err != nil {
 		t.Fatalf("count lifecycle: %v", err)
 	}
-	if lifecycleRows != 0 {
-		t.Fatalf("lifecycle rows = %d, want rollback to 0", lifecycleRows)
+	if lifecycleRows != 1 {
+		t.Fatalf("lifecycle rows = %d, want 1 (baseline survives)", lifecycleRows)
+	}
+	var tradeCostPct sql.NullFloat64
+	if err := db.QueryRow(`SELECT trade_cost_pct FROM order_lifecycle WHERE offer_db_id = ?`, offerID).Scan(&tradeCostPct); err != nil {
+		t.Fatalf("select trade_cost_pct: %v", err)
+	}
+	if tradeCostPct.Valid {
+		t.Fatalf("trade_cost_pct = %v, want NULL (enrichment rolled back)", tradeCostPct.Float64)
+	}
+	var route sql.NullString
+	if err := db.QueryRow(`SELECT best_route_cex FROM offers WHERE id = ?`, offerID).Scan(&route); err != nil {
+		t.Fatalf("select route: %v", err)
+	}
+	if route.Valid {
+		t.Fatalf("best_route_cex = %q, want NULL (rolled back)", route.String)
 	}
 }

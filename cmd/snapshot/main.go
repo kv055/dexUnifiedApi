@@ -4,6 +4,7 @@ import (
 	"context"
 	dbutil "dexunifiedapi/db"
 	"dexunifiedapi/internal/config"
+	"dexunifiedapi/internal/lifecycle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1062,6 +1063,12 @@ func main() {
 		}
 	}
 
+	// Always write a baseline lifecycle row for every live offer directly to the
+	// DB, before the push. This guarantees a price-path point for each live offer
+	// even when the server is down/unreachable; the server enriches these rows
+	// with cost fields when it processes the push below.
+	writeBaselineLifecycle(sdb, liveOffers, refPrice)
+
 	// Push live offers directly to the server's in-memory hub.
 	serverURL := os.Getenv("SERVER_INTERNAL_URL")
 	if serverURL == "" {
@@ -1218,6 +1225,33 @@ func settleClosedOffers(sdb *dbutil.DB) {
 	}
 }
 
+// writeBaselineLifecycle inserts a baseline order_lifecycle row for every live
+// offer (price, ref_price, directional premium) straight to the DB, leaving the
+// cost columns NULL for the server to enrich on the subsequent push. This
+// decouples price-path capture from server availability: a live offer always
+// gets a lifecycle point even if the server is down, unreachable, or rejects the
+// push.
+func writeBaselineLifecycle(sdb *dbutil.DB, offers []livePayload, refPrice int) {
+	if len(offers) == 0 {
+		return
+	}
+	repo := lifecycle.NewRepository(sdb)
+	baselines := make([]lifecycle.Baseline, 0, len(offers))
+	for _, o := range offers {
+		baselines = append(baselines, lifecycle.Baseline{
+			OfferID:    o.ID,
+			Price:      o.Price,
+			RefPrice:   float64(refPrice),
+			PremiumPct: lifecycle.DirectionalPremiumPct(o.Direction, o.Price, float64(refPrice)),
+		})
+	}
+	if err := repo.InsertBaseline(context.Background(), baselines); err != nil {
+		fmt.Printf("[Lifecycle] baseline insert error: %v\n", err)
+		return
+	}
+	fmt.Printf("[Lifecycle] wrote %d baseline rows\n", len(baselines))
+}
+
 // pushLiveOffersToServer posts the freshly fetched live offers to the server's
 // /internal/live_offers endpoint so the hub can serve them from memory without
 // any DB reads.
@@ -1242,11 +1276,18 @@ func pushLiveOffersToServer(offers []livePayload, serverURL string) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Printf("[LivePush] POST failed (non-fatal): %v\n", err)
+		fmt.Printf("[LivePush] POST failed (non-fatal, baseline lifecycle already written): %v\n", err)
 		return
 	}
-	resp.Body.Close()
-	fmt.Printf("[LivePush] pushed %d live offers to server\n", len(offers))
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		fmt.Printf("[LivePush] server rejected push: 401 unauthorized — check INTERNAL_API_SECRET parity between snapshot and unified-api (lifecycle enrichment skipped this cycle)\n")
+	case resp.StatusCode >= 300:
+		fmt.Printf("[LivePush] server returned HTTP %d (non-fatal, lifecycle enrichment skipped this cycle)\n", resp.StatusCode)
+	default:
+		fmt.Printf("[LivePush] pushed %d live offers to server\n", len(offers))
+	}
 }
 
 // fetchAndStoreKrakenOHLCSince fetches 1-min candles starting from sinceUnix
