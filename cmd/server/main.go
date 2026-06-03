@@ -1,8 +1,10 @@
 package main
 
 import (
+	"commons/logging"
 	"commons/metrics"
 	"commons/prices"
+	"commons/tracing"
 	"commons/tradecost"
 	"context"
 	"dexunifiedapi/db"
@@ -13,13 +15,19 @@ import (
 	"dexunifiedapi/internal/paymentnotifications"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// serviceName is the OpenTelemetry/logging identity for this binary.
+const serviceName = "unified-api"
 
 var (
 	adminDatabaseURL          string
@@ -149,15 +157,22 @@ func runningUnderGoTest() bool {
 }
 
 func main() {
+	logging.Init(serviceName)
+	tpShutdown, err := tracing.Init(context.Background(), serviceName)
+	if err != nil {
+		slog.Warn("tracing init failed; continuing without traces", "err", err)
+	}
+	defer func() { _ = tpShutdown(context.Background()) }()
+
 	adminDB, err := dbutil.Open(adminDatabaseURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open admin database: %v\n", err)
+		slog.Error("failed to open admin database", "err", err)
 		os.Exit(1)
 	}
 	defer adminDB.Close()
 
 	if err := adminDB.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to ping admin database: %v\n", err)
+		slog.Error("failed to ping admin database", "err", err)
 		os.Exit(1)
 	}
 
@@ -168,13 +183,13 @@ func main() {
 		MMControllerPassword:   config.RequireEnv("POSTGRES_MM_CONTROLLER_PASSWORD"),
 		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "database admin setup error: %v\n", err)
+		slog.Error("database admin setup error", "err", err)
 		os.Exit(1)
 	}
 
 	db, err = dbutil.Open(databaseURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
+		slog.Error("failed to open database", "err", err)
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -183,20 +198,22 @@ func main() {
 	db.SetMaxIdleConns(2)
 
 	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to ping database: %v\n", err)
+		slog.Error("failed to ping database", "err", err)
 		os.Exit(1)
 	}
 
 	tradeCostEstimators = make(map[string]*tradecost.TradeCostEstimator, len(supportedCEXes))
 	for _, c := range supportedCEXes {
 		tradeCostEstimators[c] = tradecost.NewTradeCostEstimator(c)
-		fmt.Printf("[TradeCost] initialized %s (taker fallback %.2f%%, onchain withdrawal fallback %.8f BTC)\n",
-			c, tradecost.TakerFeeFallback(c)*100, tradecost.WithdrawalFallback(c, tradecost.MethodOnchain))
+		slog.Info("trade-cost estimator initialized",
+			"cex", c,
+			"taker_fallback_pct", tradecost.TakerFeeFallback(c)*100,
+			"onchain_withdrawal_fallback_btc", tradecost.WithdrawalFallback(c, tradecost.MethodOnchain))
 	}
 	tradeRouteOptimizer = tradecost.NewOptimizer(supportedCEXes, tradeCostEstimators)
 
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
-		fmt.Fprintf(os.Stderr, "schema init error: %v\n", err)
+		slog.Error("schema init error", "err", err)
 		os.Exit(1)
 	}
 
@@ -281,12 +298,33 @@ func main() {
 
 	mux.Handle("GET /metrics", metricsReg.Handler())
 
-	handler := corsMiddleware(metricsReg.Middleware(mux))
+	// Order matters: tracing.WrapHandler is outermost so it starts the server
+	// span and continues any inbound trace context; RouteNamer is innermost so
+	// it can read the matched route pattern and name the span accordingly.
+	handler := tracing.WrapHandler(
+		corsMiddleware(metricsReg.Middleware(tracing.RouteNamer(mux))),
+		serviceName,
+	)
 
-	fmt.Printf("Starting dexUnifiedApi server on %s\n", listenAddr)
-	if err := http.ListenAndServe(listenAddr, handler); err != nil {
-		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
-		os.Exit(1)
+	srv := &http.Server{Addr: listenAddr, Handler: handler}
+	go func() {
+		slog.Info("starting dexUnifiedApi server", "addr", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Block until SIGINT/SIGTERM (e.g. docker stop), then drain in-flight
+	// requests and let the deferred tracer shutdown flush buffered spans.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	slog.Info("shutting down")
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("graceful shutdown failed", "err", err)
 	}
 }
 

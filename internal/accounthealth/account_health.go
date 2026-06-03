@@ -10,6 +10,7 @@ import (
 
 	"dexunifiedapi/db"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -106,6 +107,7 @@ func (c BisqGRPCAccountChecker) PaymentAccountCount(ctx context.Context) (int, e
 		c.host,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithPerRPCCredentials(bisqAccountCreds{password: c.password}),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithBlock(),
 	)
 	if err != nil {

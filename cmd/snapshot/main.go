@@ -1,6 +1,8 @@
 package main
 
 import (
+	"commons/logging"
+	"commons/tracing"
 	"context"
 	dbutil "dexunifiedapi/db"
 	"dexunifiedapi/internal/config"
@@ -8,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -20,9 +23,21 @@ import (
 
 	bisqgrpc "dexunifiedapi/bisq_grpc/go"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// serviceName is the OpenTelemetry/logging identity for this binary.
+const serviceName = "unified-snapshot"
+
+// stage runs fn inside a child span of ctx so each phase of a snapshot run shows
+// up as its own timed span under snapshot.run.
+func stage(ctx context.Context, name string, fn func()) {
+	_, span := tracing.Tracer("snapshot").Start(ctx, name)
+	defer span.End()
+	fn()
+}
 
 var (
 	adminDatabaseURL string
@@ -154,15 +169,15 @@ func torClient() *http.Client {
 	proxyURL, _ := url.Parse(torProxy)
 	return &http.Client{
 		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
+		Transport: tracing.Transport(&http.Transport{
 			Proxy:       http.ProxyURL(proxyURL),
 			DialContext: (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
-		},
+		}),
 	}
 }
 
 func clearnetClient() *http.Client {
-	return &http.Client{Timeout: 15 * time.Second}
+	return &http.Client{Timeout: 15 * time.Second, Transport: tracing.Transport(nil)}
 }
 
 // --- Reference price providers ---
@@ -307,6 +322,7 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 	conn, err := grpc.NewClient(bisqGRPCHost,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithPerRPCCredentials(bisqCreds{password: bisqAPIPassword}),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		fmt.Printf("[Bisq] Connection error: %v\n", err)
@@ -991,24 +1007,36 @@ func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData) {
 // --- Main ---
 
 func main() {
-	fmt.Println("=== Starting orderbook snapshot ===")
+	logging.Init(serviceName)
+	tpShutdown, err := tracing.Init(context.Background(), serviceName)
+	if err != nil {
+		slog.Warn("tracing init failed; continuing without traces", "err", err)
+	}
+	// This binary runs one snapshot and exits, so flushing spans before exit is
+	// essential — without it the batch processor may never export this run.
+	defer func() { _ = tpShutdown(context.Background()) }()
+
+	ctx, span := tracing.Tracer("snapshot").Start(context.Background(), "snapshot.run")
+	defer span.End()
+
+	slog.InfoContext(ctx, "starting orderbook snapshot")
 
 	refPrice := fetchReferencePrice("eur")
 	if refPrice == 0 {
-		fmt.Println("Could not get reference price, aborting")
+		slog.ErrorContext(ctx, "could not get reference price, aborting")
 		os.Exit(1)
 	}
-	fmt.Printf("Reference price: %d EUR\n", refPrice)
+	slog.InfoContext(ctx, "reference price", "eur", refPrice)
 
 	adminDB, err := dbutil.Open(adminDatabaseURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open admin database: %v\n", err)
+		slog.ErrorContext(ctx, "failed to open admin database", "err", err)
 		os.Exit(1)
 	}
 	defer adminDB.Close()
 
 	if err := adminDB.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to ping admin database: %v\n", err)
+		slog.ErrorContext(ctx, "failed to ping admin database", "err", err)
 		os.Exit(1)
 	}
 	if err := dbutil.EnsureAppRoles(adminDB, dbutil.RoleBootstrapConfig{
@@ -1018,28 +1046,28 @@ func main() {
 		MMControllerPassword:   config.RequireEnv("POSTGRES_MM_CONTROLLER_PASSWORD"),
 		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "database admin setup error: %v\n", err)
+		slog.ErrorContext(ctx, "database admin setup error", "err", err)
 		os.Exit(1)
 	}
 
 	sdb, err := dbutil.Open(databaseURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
+		slog.ErrorContext(ctx, "failed to open database", "err", err)
 		os.Exit(1)
 	}
 	defer sdb.Close()
 
 	if err := sdb.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to ping database: %v\n", err)
+		slog.ErrorContext(ctx, "failed to ping database", "err", err)
 		os.Exit(1)
 	}
 	if err := dbutil.EnsureUnifiedSchema(sdb); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize schema: %v\n", err)
+		slog.ErrorContext(ctx, "failed to initialize schema", "err", err)
 		os.Exit(1)
 	}
 
 	// Fetch and store Kraken OHLC candles before settlement
-	fetchAndStoreKrakenOHLC(sdb)
+	stage(ctx, "snapshot.fetch_ohlc", func() { fetchAndStoreKrakenOHLC(sdb) })
 
 	// Record start time; used after the run to mark which offers were seen
 	snapshotStart := time.Now().UTC()
@@ -1055,20 +1083,22 @@ func main() {
 	exchangeData := make(exchangeSnapshotData)
 	liveOffers := make([]livePayload, 0)
 
-	for _, direction := range []string{"sell", "buy"} {
-		fmt.Printf("\n--- Fetching %s offers ---\n", direction)
-		for _, f := range fetchers {
-			result := f.fn(direction, refPrice)
-			if !recordFetchResult(exchangeData, f.name, result) || len(result.Offers) == 0 {
-				continue
+	stage(ctx, "snapshot.fetch_offers", func() {
+		for _, direction := range []string{"sell", "buy"} {
+			slog.InfoContext(ctx, "fetching offers", "direction", direction)
+			for _, f := range fetchers {
+				result := f.fn(direction, refPrice)
+				if !recordFetchResult(exchangeData, f.name, result) || len(result.Offers) == 0 {
+					continue
+				}
+				price := result.BTCPrice
+				if price == 0 {
+					price = float64(refPrice)
+				}
+				liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, "EUR", direction, price, result.Offers)...)
 			}
-			price := result.BTCPrice
-			if price == 0 {
-				price = float64(refPrice)
-			}
-			liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, "EUR", direction, price, result.Offers)...)
 		}
-	}
+	})
 
 	// Update is_live and duration in one pass:
 	// - live offers: is_live=true, duration=NULL
@@ -1085,7 +1115,7 @@ func main() {
 				duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
 				WHERE exchange = ?`, name)
 		if n, _ := res.RowsAffected(); n > 0 {
-			fmt.Printf("[%s] Exchange offline — marked %d offers as closed\n", name, n)
+			slog.WarnContext(ctx, "exchange offline — marked offers as closed", "exchange", name, "closed", n)
 		}
 	}
 
@@ -1093,20 +1123,21 @@ func main() {
 	// DB, before the push. This guarantees a price-path point for each live offer
 	// even when the server is down/unreachable; the server enriches these rows
 	// with cost fields when it processes the push below.
-	writeBaselineLifecycle(sdb, liveOffers, refPrice)
+	stage(ctx, "snapshot.write_baseline_lifecycle", func() { writeBaselineLifecycle(sdb, liveOffers, refPrice) })
 
-	// Push live offers directly to the server's in-memory hub.
+	// Push live offers directly to the server's in-memory hub. ctx carries the
+	// trace context so the POST continues this run's trace into unified-api.
 	serverURL := os.Getenv("SERVER_INTERNAL_URL")
 	if serverURL == "" {
 		serverURL = "http://localhost:5010"
 	}
-	pushLiveOffersToServer(liveOffers, serverURL)
+	pushLiveOffersToServer(ctx, liveOffers, serverURL)
 
 	// Settle closed offers: compute avg_ref_price from historical OHLC.
 	// Keep this after the live push so the server can persist the latest
 	// lifecycle snapshot before we decide whether a closed offer has history.
-	settleClosedOffers(sdb)
-	analyzeClosedOffers(sdb)
+	stage(ctx, "snapshot.settle_closed_offers", func() { settleClosedOffers(sdb) })
+	stage(ctx, "snapshot.analyze_closed_offers", func() { analyzeClosedOffers(sdb) })
 
 	writeSnapshotLog(sdb, exchangeData)
 	total := 0
@@ -1115,7 +1146,7 @@ func main() {
 		total += len(ids)
 		names = append(names, name)
 	}
-	fmt.Printf("\n=== Snapshot complete — %d offers from %v ===\n", total, names)
+	slog.InfoContext(ctx, "snapshot complete", "offers", total, "exchanges", names)
 }
 
 // fetchAndStoreKrakenOHLC fetches 1-min Kraken OHLC candles and upserts them into ohlc.
@@ -1281,16 +1312,18 @@ func writeBaselineLifecycle(sdb *dbutil.DB, offers []livePayload, refPrice int) 
 // pushLiveOffersToServer posts the freshly fetched live offers to the server's
 // /internal/live_offers endpoint so the hub can serve them from memory without
 // any DB reads.
-func pushLiveOffersToServer(offers []livePayload, serverURL string) {
+func pushLiveOffersToServer(ctx context.Context, offers []livePayload, serverURL string) {
 	body, err := json.Marshal(offers)
 	if err != nil {
-		fmt.Printf("[LivePush] marshal error: %v\n", err)
+		slog.ErrorContext(ctx, "live push: marshal error", "err", err)
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, serverURL+"/internal/live_offers", strings.NewReader(string(body)))
+	// NewRequestWithContext + the traced client propagate this run's trace into
+	// unified-api, so the snapshot run and the resulting ingest are one trace.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL+"/internal/live_offers", strings.NewReader(string(body)))
 	if err != nil {
-		fmt.Printf("[LivePush] request build failed (non-fatal): %v\n", err)
+		slog.ErrorContext(ctx, "live push: request build failed (non-fatal)", "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -1300,19 +1333,19 @@ func pushLiveOffersToServer(offers []livePayload, serverURL string) {
 		req.Header.Set("X-Internal-Secret", secret)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := tracing.Client(15 * time.Second).Do(req)
 	if err != nil {
-		fmt.Printf("[LivePush] POST failed (non-fatal, baseline lifecycle already written): %v\n", err)
+		slog.ErrorContext(ctx, "live push: POST failed (non-fatal, baseline lifecycle already written)", "err", err)
 		return
 	}
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		fmt.Printf("[LivePush] server rejected push: 401 unauthorized — check INTERNAL_API_SECRET parity between snapshot and unified-api (lifecycle enrichment skipped this cycle)\n")
+		slog.ErrorContext(ctx, "live push: server rejected push: 401 unauthorized — check INTERNAL_API_SECRET parity between snapshot and unified-api (lifecycle enrichment skipped this cycle)")
 	case resp.StatusCode >= 300:
-		fmt.Printf("[LivePush] server returned HTTP %d (non-fatal, lifecycle enrichment skipped this cycle)\n", resp.StatusCode)
+		slog.ErrorContext(ctx, "live push: server returned error status (lifecycle enrichment skipped this cycle)", "status", resp.StatusCode)
 	default:
-		fmt.Printf("[LivePush] pushed %d live offers to server\n", len(offers))
+		slog.InfoContext(ctx, "live push: pushed live offers to server", "count", len(offers))
 	}
 }
 
