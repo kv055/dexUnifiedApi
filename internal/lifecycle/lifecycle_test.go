@@ -248,6 +248,36 @@ func TestInsertBaselineWritesRowsAndSkipsInvalid(t *testing.T) {
 	}
 }
 
+func TestLoadByOfferIDsCapsPointsPerOffer(t *testing.T) {
+	db := openTestDB(t)
+	offerID := insertOffer(t, db)
+
+	// More history than the cap, each row a distinct minute and price so we can assert
+	// which window is returned. An unbounded load of all of these is what OOM'd prod.
+	const total = maxLifecyclePointsPerOffer + 5
+	for i := 1; i <= total; i++ {
+		if _, err := db.Exec(`
+			INSERT INTO order_lifecycle (offer_db_id, price, ref_price, premium_pct, snapshot_time)
+			VALUES (?, ?, 100, 0, now() - (? * interval '1 minute'))
+		`, offerID, float64(i), total-i); err != nil {
+			t.Fatalf("insert lifecycle row %d: %v", i, err)
+		}
+	}
+
+	got, err := NewRepository(db).LoadByOfferIDs(context.Background(), []int64{offerID})
+	if err != nil {
+		t.Fatalf("LoadByOfferIDs: %v", err)
+	}
+	pts := got[offerID]
+	if len(pts) != maxLifecyclePointsPerOffer {
+		t.Fatalf("points = %d, want %d (capped per offer)", len(pts), maxLifecyclePointsPerOffer)
+	}
+	// Returned oldest-first, keeping only the most recent window: prices are 1..total,
+	// the 5 oldest are dropped, so the first kept is 6 and the last is total.
+	assertFloat(t, pts[0].Price, 6)
+	assertFloat(t, pts[len(pts)-1].Price, float64(total))
+}
+
 func TestPersistSnapshotReturnsUpdateErrorAndRollsBack(t *testing.T) {
 	db := openTestDB(t)
 	if _, err := db.Exec(`

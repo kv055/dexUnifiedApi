@@ -222,3 +222,35 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 		t.Fatalf("persisted bisq offers = %d, want 1", count)
 	}
 }
+
+func TestSaveSnapshotDedupesFingerprintCollapsedOffers(t *testing.T) {
+	db := testdb.Open(t)
+	btcMin := 0.01
+	btcMax := 0.02
+	priceType := priceTypeFixed()
+
+	// peachbitcoin offers carry no stable offer_id, so identical offers share one
+	// fingerprint and collapse onto a single offers row. saveSnapshot must emit that
+	// offer once per cycle — otherwise it writes N duplicate baseline rows and pushes
+	// N duplicate hub entries (the bloat that OOM-killed unified-api).
+	dup := offer{
+		FiatCurrency:  "EUR",
+		Price:         51899,
+		BTCMin:        &btcMin,
+		BTCMax:        &btcMax,
+		PaymentMethod: "SEPA",
+		PriceType:     priceType,
+	}
+	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{dup, dup, dup})
+
+	if len(live) != 1 {
+		t.Fatalf("live offers len = %d, want 1 (fingerprint duplicates should collapse)", len(live))
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM offers WHERE exchange = ?`, "peachbitcoin").Scan(&count); err != nil {
+		t.Fatalf("count offers: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("persisted peachbitcoin offers = %d, want 1", count)
+	}
+}

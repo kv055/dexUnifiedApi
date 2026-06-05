@@ -194,8 +194,10 @@ func main() {
 	}
 	defer db.Close()
 
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
+	// Shared by HTTP handlers, the snapshot-push ingest, account-health checks and the
+	// dbmetrics poller. 4 was too small and caused contention; Postgres allows 100.
+	db.SetMaxOpenConns(12)
+	db.SetMaxIdleConns(4)
 
 	if err := db.Ping(); err != nil {
 		slog.Error("failed to ping database", "err", err)
@@ -306,7 +308,14 @@ func main() {
 		serviceName,
 	)
 
-	srv := &http.Server{Addr: listenAddr, Handler: handler}
+	// No WriteTimeout: the websocket handler hijacks the connection and manages its
+	// own deadlines; a server-wide WriteTimeout would sever long-lived WS streams.
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		slog.Info("starting dexUnifiedApi server", "addr", listenAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -365,7 +374,7 @@ func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
 }
 
 // fetchOfferLifecycle returns lifecycle (snapshot_time, price) points grouped by offer_db_id.
-func fetchOfferLifecycle(ids []int64) map[int64][]LifecyclePoint {
+func fetchOfferLifecycle(ctx context.Context, ids []int64) map[int64][]LifecyclePoint {
 	result := make(map[int64][]LifecyclePoint, len(ids))
 	if len(ids) == 0 {
 		return result
@@ -373,7 +382,7 @@ func fetchOfferLifecycle(ids []int64) map[int64][]LifecyclePoint {
 	if lifecycleRepo == (lifecycle.Repository{}) && db != nil {
 		lifecycleRepo = lifecycle.NewRepository(db)
 	}
-	points, err := lifecycleRepo.LoadByOfferIDs(context.Background(), ids)
+	points, err := lifecycleRepo.LoadByOfferIDs(ctx, ids)
 	if err != nil {
 		return result
 	}
@@ -392,7 +401,7 @@ func fetchOfferLifecycle(ids []int64) map[int64][]LifecyclePoint {
 // writeLifecycleEntries persists a computed snapshot of each live offer's
 // metrics into the local order_lifecycle table, and updates best_route_cex /
 // best_route_method on the offers table.
-func writeLifecycleEntries(offers []liveOutOffer) {
+func writeLifecycleEntries(ctx context.Context, offers []liveOutOffer) {
 	if len(offers) == 0 || db == nil {
 		return
 	}
@@ -410,7 +419,7 @@ func writeLifecycleEntries(offers []liveOutOffer) {
 			CostBreakdown: o.CostBreakdown,
 		})
 	}
-	if err := lifecycleRepo.PersistSnapshot(context.Background(), records); err != nil {
+	if err := lifecycleRepo.PersistSnapshot(ctx, records); err != nil {
 		fmt.Printf("[Lifecycle] persist error: %v\n", err)
 	}
 }
@@ -428,16 +437,19 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	ids := make([]int64, len(offers))
-	for i, o := range offers {
-		ids[i] = o.ID
-	}
+	// Bound the DB work to the request: the snapshot client's POST has a 15s deadline,
+	// so if it gives up we stop too instead of running on under context.Background().
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 	appMetrics.observePush()
-	hub.setLifecycle(fetchOfferLifecycle(ids))
+	// We deliberately do NOT preload every live offer's full lifecycle history into the
+	// hub here. That unbounded bulk load (all order_lifecycle rows for all live offers)
+	// is what OOM-killed this service; the per-offer lifecycle endpoint lazy-loads on
+	// demand instead.
 	hub.setOffers(offers)
 	price := getCexPrice(defaultCEX)
 	outOffers := hub.computeOutOffers(price, liveSubscription{cex: defaultCEX})
-	writeLifecycleEntries(outOffers)
+	writeLifecycleEntries(ctx, outOffers)
 	fmt.Printf("[LiveHub] updated with %d live offers from snapshot\n", len(offers))
 	w.WriteHeader(http.StatusNoContent)
 }

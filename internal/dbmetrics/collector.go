@@ -17,7 +17,7 @@ package dbmetrics
 import (
 	"context"
 	"fmt"
-	"os"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -27,8 +27,10 @@ import (
 )
 
 const (
-	cacheTTL     = 5 * time.Second
-	queryTimeout = 2 * time.Second
+	cacheTTL = 5 * time.Second
+	// queryTimeout bounds each aggregate query individually (applied per scan, not
+	// shared across the whole refresh), so one slow query can't starve the others.
+	queryTimeout = 8 * time.Second
 )
 
 // Collector implements prometheus.Collector against the unified-api database.
@@ -167,9 +169,7 @@ func (c *Collector) fetch() *snapshot {
 	if c.cached != nil && time.Since(c.cachedAt) < cacheTTL {
 		return c.cached
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
-	defer cancel()
-	data := c.query(ctx)
+	data := c.query(context.Background())
 	c.cached = data
 	c.cachedAt = time.Now()
 	return data
@@ -216,12 +216,20 @@ type snapshot struct {
 func (c *Collector) query(ctx context.Context) *snapshot {
 	s := &snapshot{}
 
-	c.scanOffers(ctx, s)
-	c.scanDirStats(ctx, s)
-	c.scanSnapshotLog(ctx, s)
-	c.scanOHLC(ctx, s)
-	c.scanLifecycleRows(ctx, s)
-	c.scanAccounts(ctx, s)
+	// Each scan gets its own deadline so a single slow query (e.g. dirstats over a
+	// large order_lifecycle) can't consume the budget and blank the other gauges.
+	for _, scan := range []func(context.Context, *snapshot){
+		c.scanOffers,
+		c.scanDirStats,
+		c.scanSnapshotLog,
+		c.scanOHLC,
+		c.scanLifecycleRows,
+		c.scanAccounts,
+	} {
+		sctx, cancel := context.WithTimeout(ctx, queryTimeout)
+		scan(sctx, s)
+		cancel()
+	}
 
 	return s
 }
@@ -380,6 +388,9 @@ func (s *nullFloatScanner) Scan(src any) error {
 	return nil
 }
 
+// logErr emits structured, level=ERROR logs so dbmetrics query failures surface in
+// the Grafana errors dashboard (the old fmt.Fprintf to stderr was unstructured and
+// invisible to the `{level="ERROR"}` Loki query).
 func logErr(what string, err error) {
-	fmt.Fprintf(os.Stderr, "[dbmetrics] %s query error: %v\n", what, err)
+	slog.Error("dbmetrics query failed", "query", what, "err", err)
 }

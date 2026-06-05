@@ -70,7 +70,14 @@ func NewRepository(db *dbutil.DB) Repository {
 	return Repository{db: db}
 }
 
-// LoadByOfferIDs loads a by offer ids.
+// maxLifecyclePointsPerOffer caps how many recent price-path points LoadByOfferIDs
+// returns per offer. The live chart only needs the recent path; an unbounded load of
+// every offer's full history (1.6M rows across all live offers in prod) is what
+// OOM-killed unified-api.
+const maxLifecyclePointsPerOffer = 200
+
+// LoadByOfferIDs loads the most recent lifecycle points (capped per offer) for the
+// given offer DB ids, returned oldest-first per offer.
 func (r Repository) LoadByOfferIDs(ctx context.Context, ids []int64) (map[int64][]Point, error) {
 	result := make(map[int64][]Point, len(ids))
 	if r.db == nil || len(ids) == 0 {
@@ -83,14 +90,19 @@ func (r Repository) LoadByOfferIDs(ctx context.Context, ids []int64) (map[int64]
 		args[i] = id
 	}
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(
-		`SELECT offer_db_id,
-		        to_char(snapshot_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
-		        price,
-		        net_premium_pct
-		   FROM order_lifecycle
-		  WHERE offer_db_id IN (%s)
-		  ORDER BY offer_db_id, snapshot_time`,
-		placeholders,
+		`SELECT offer_db_id, t, price, net_premium_pct
+		   FROM (
+		     SELECT offer_db_id,
+		            to_char(snapshot_time AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS t,
+		            price,
+		            net_premium_pct,
+		            ROW_NUMBER() OVER (PARTITION BY offer_db_id ORDER BY snapshot_time DESC) AS rn
+		       FROM order_lifecycle
+		      WHERE offer_db_id IN (%s)
+		   ) recent
+		  WHERE rn <= %d
+		  ORDER BY offer_db_id, t`,
+		placeholders, maxLifecyclePointsPerOffer,
 	), args...)
 	if err != nil {
 		return result, err

@@ -623,7 +623,7 @@ func handleLiveOfferLifecycleREST(w http.ResponseWriter, r *http.Request) {
 	}
 	hub.offersMu.RUnlock()
 
-	lifecycle := fetchOfferLifecycle([]int64{id})
+	lifecycle := fetchOfferLifecycle(r.Context(), []int64{id})
 	pts := lifecycle[id]
 	if pts == nil {
 		pts = []LifecyclePoint{}

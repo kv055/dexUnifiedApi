@@ -851,6 +851,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 	}
 
 	liveOffers := make([]livePayload, 0, len(offers))
+	seen := make(map[int64]bool, len(offers))
 	updated, inserted, failed := 0, 0, 0
 	for _, o := range offers {
 		var existingID int64
@@ -866,6 +867,15 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 				  AND btc_min = ? AND btc_max = ? AND payment_method = ?`,
 				exchange, fiat, direction, o.BTCMin, o.BTCMax, o.PaymentMethod).Scan(&existingID)
 			found = err == nil
+		}
+
+		// Many scraped offers (e.g. peachbitcoin, which has no stable offer_id) share
+		// one fingerprint and collapse onto the same offers row. Capture each distinct
+		// offer once per cycle, otherwise we write N identical order_lifecycle baseline
+		// rows and push N duplicate hub entries for it — the bloat that OOM-killed the
+		// server (offer #989 was getting 83 identical rows every snapshot).
+		if found && seen[existingID] {
+			continue
 		}
 
 		live := livePayload{
@@ -936,6 +946,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		} else {
 			inserted++
 		}
+		seen[live.ID] = true
 		liveOffers = append(liveOffers, live)
 	}
 
