@@ -223,16 +223,14 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	}
 }
 
-func TestSaveSnapshotDedupesFingerprintCollapsedOffers(t *testing.T) {
+func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 	db := testdb.Open(t)
 	btcMin := 0.01
 	btcMax := 0.02
 	priceType := priceTypeFixed()
 
-	// peachbitcoin offers carry no stable offer_id, so identical offers share one
-	// fingerprint and collapse onto a single offers row. saveSnapshot must emit that
-	// offer once per cycle — otherwise it writes N duplicate baseline rows and pushes
-	// N duplicate hub entries (the bloat that OOM-killed unified-api).
+	// Offers with NO stable id fall back to fingerprint identity, so identical-terms
+	// id-less offers collapse onto one row and emit one baseline/hub entry per cycle.
 	dup := offer{
 		FiatCurrency:  "EUR",
 		Price:         51899,
@@ -244,13 +242,47 @@ func TestSaveSnapshotDedupesFingerprintCollapsedOffers(t *testing.T) {
 	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{dup, dup, dup})
 
 	if len(live) != 1 {
-		t.Fatalf("live offers len = %d, want 1 (fingerprint duplicates should collapse)", len(live))
+		t.Fatalf("live offers len = %d, want 1 (id-less duplicates collapse by fingerprint)", len(live))
 	}
 	var count int
 	if err := db.QueryRow(`SELECT count(*) FROM offers WHERE exchange = ?`, "peachbitcoin").Scan(&count); err != nil {
 		t.Fatalf("count offers: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("persisted peachbitcoin offers = %d, want 1", count)
+		t.Fatalf("persisted offers = %d, want 1", count)
+	}
+}
+
+func TestSaveSnapshotKeepsDistinctIdOffersWithSameFingerprint(t *testing.T) {
+	db := testdb.Open(t)
+	btcMin := 0.0021
+	btcMax := 0.0021
+	priceType := priceTypeFixed()
+
+	// The peach case: many distinct offers (each a stable id) share one fingerprint
+	// (e.g. 91 makers all offering 0.0021 BTC via Revolut). Because they carry real
+	// ids, each must get its own row — the fingerprint fallback must NOT merge them.
+	mk := func(id string) offer {
+		return offer{
+			OfferID:       id,
+			FiatCurrency:  "EUR",
+			Price:         51899,
+			BTCMin:        &btcMin,
+			BTCMax:        &btcMax,
+			PaymentMethod: "revolut",
+			PriceType:     priceType,
+		}
+	}
+	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{mk("p-1"), mk("p-2"), mk("p-3")})
+
+	if len(live) != 3 {
+		t.Fatalf("live offers len = %d, want 3 (distinct ids must not collapse)", len(live))
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM offers WHERE exchange = ?`, "peachbitcoin").Scan(&count); err != nil {
+		t.Fatalf("count offers: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("persisted offers = %d, want 3 (one row per distinct offer_id)", count)
 	}
 }

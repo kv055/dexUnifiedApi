@@ -857,23 +857,30 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		var existingID int64
 		var found bool
 
+		// Identity resolution. When the exchange gives us a stable offer id (all of
+		// them currently do), that id IS the offer's identity: match on it and, if it
+		// is new, fall through to INSERT. The fingerprint is only a fallback for
+		// genuinely id-less offers — it must NOT collapse a distinct id-bearing offer
+		// onto a same-terms row. Peach is full of identical-terms offers (e.g. 91
+		// distinct makers all offering 0.0021 BTC via Revolut); the old code fell back
+		// to fingerprint whenever an id wasn't yet in the DB, so every new peach offer
+		// re-merged onto the first row of its group every cycle, writing N identical
+		// order_lifecycle rows and pushing N duplicate hub entries — the bloat that
+		// OOM-killed the server (offer #989 got 83 rows every snapshot).
 		if o.OfferID != "" {
 			err := tx.QueryRow("SELECT id FROM offers WHERE offer_id = ?", o.OfferID).Scan(&existingID)
 			found = err == nil
-		}
-		if !found {
+		} else {
 			err := tx.QueryRow(`SELECT id FROM offers
 				WHERE exchange = ? AND fiat_currency = ? AND direction = ?
-				  AND btc_min = ? AND btc_max = ? AND payment_method = ?`,
+				  AND btc_min = ? AND btc_max = ? AND payment_method = ?
+				  AND offer_id IS NULL`,
 				exchange, fiat, direction, o.BTCMin, o.BTCMax, o.PaymentMethod).Scan(&existingID)
 			found = err == nil
 		}
 
-		// Many scraped offers (e.g. peachbitcoin, which has no stable offer_id) share
-		// one fingerprint and collapse onto the same offers row. Capture each distinct
-		// offer once per cycle, otherwise we write N identical order_lifecycle baseline
-		// rows and push N duplicate hub entries for it — the bloat that OOM-killed the
-		// server (offer #989 was getting 83 identical rows every snapshot).
+		// Belt-and-suspenders: if the same identity resolves twice within one scrape
+		// (e.g. a duplicate id from the source), capture it once per cycle.
 		if found && seen[existingID] {
 			continue
 		}
