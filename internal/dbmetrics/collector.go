@@ -216,8 +216,7 @@ type snapshot struct {
 func (c *Collector) query(ctx context.Context) *snapshot {
 	s := &snapshot{}
 
-	// Each scan gets its own deadline so a single slow query (e.g. dirstats over a
-	// large order_lifecycle) can't consume the budget and blank the other gauges.
+	// Each scan gets its own deadline so one slow query can't starve the others.
 	for _, scan := range []func(context.Context, *snapshot){
 		c.scanOffers,
 		c.scanDirStats,
@@ -267,23 +266,26 @@ func (c *Collector) scanOffers(ctx context.Context, s *snapshot) {
 }
 
 func (c *Collector) scanDirStats(ctx context.Context, s *snapshot) {
+	// Start from live offers (~1.5k rows) and LATERAL-fetch the latest lifecycle
+	// point per offer via idx_lifecycle_offer_time. DISTINCT ON over order_lifecycle
+	// (~2.6M rows) made Postgres scan the whole table and blew the scrape timeout.
 	rows, err := c.db.QueryContext(ctx, `
-		WITH latest AS (
-			SELECT DISTINCT ON (ol.offer_db_id)
-			       ol.net_premium_pct, o.direction
+		SELECT o.direction,
+		       (COUNT(*) FILTER (WHERE latest.net_premium_pct > 0))::float8 AS profitable,
+		       COALESCE(MAX(latest.net_premium_pct), 0) AS best,
+		       COALESCE(AVG(latest.net_premium_pct), 0) AS avg,
+		       COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY latest.net_premium_pct), 0) AS p50,
+		       COALESCE(percentile_cont(0.9) WITHIN GROUP (ORDER BY latest.net_premium_pct), 0) AS p90
+		FROM offers o
+		CROSS JOIN LATERAL (
+			SELECT ol.net_premium_pct
 			FROM order_lifecycle ol
-			JOIN offers o ON o.id = ol.offer_db_id
-			WHERE o.is_live
-			ORDER BY ol.offer_db_id, ol.snapshot_time DESC
-		)
-		SELECT direction,
-		       (COUNT(*) FILTER (WHERE net_premium_pct > 0))::float8 AS profitable,
-		       COALESCE(MAX(net_premium_pct), 0) AS best,
-		       COALESCE(AVG(net_premium_pct), 0) AS avg,
-		       COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY net_premium_pct), 0) AS p50,
-		       COALESCE(percentile_cont(0.9) WITHIN GROUP (ORDER BY net_premium_pct), 0) AS p90
-		FROM latest
-		GROUP BY direction`)
+			WHERE ol.offer_db_id = o.id
+			ORDER BY ol.snapshot_time DESC
+			LIMIT 1
+		) latest
+		WHERE o.is_live
+		GROUP BY o.direction`)
 	if err != nil {
 		logErr("dirstats", err)
 		return
