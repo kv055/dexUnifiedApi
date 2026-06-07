@@ -1106,6 +1106,14 @@ func main() {
 			slog.InfoContext(ctx, "fetching offers", "direction", direction)
 			for _, f := range fetchers {
 				result := f.fn(direction, refPrice)
+				if result == nil {
+					continue
+				}
+				before := len(result.Offers)
+				result.Offers = filterDustOffers(result.Offers)
+				if dropped := before - len(result.Offers); dropped > 0 {
+					slog.InfoContext(ctx, "dust offers filtered", "exchange", f.name, "direction", direction, "dropped", dropped)
+				}
 				if !recordFetchResult(exchangeData, f.name, result) || len(result.Offers) == 0 {
 					continue
 				}
@@ -1441,6 +1449,34 @@ func parseDBTimeUnix(s string) int64 {
 }
 
 // --- Helpers ---
+
+// minIngestFiat is the minimum quote-currency trade size (whole units) for an
+// offer to be ingested. Offers below this are dust/spam and are dropped before
+// persistence or live-hub push.
+const minIngestFiat = 1
+
+func effectiveFiatMax(o offer) int {
+	if o.FiatMax != nil && *o.FiatMax > 0 {
+		return *o.FiatMax
+	}
+	if o.BTCMax != nil && *o.BTCMax > 0 && o.Price > 0 {
+		return int(math.Round(*o.BTCMax * o.Price))
+	}
+	return 0
+}
+
+func filterDustOffers(offers []offer) []offer {
+	if len(offers) == 0 {
+		return offers
+	}
+	kept := make([]offer, 0, len(offers))
+	for _, o := range offers {
+		if effectiveFiatMax(o) >= minIngestFiat {
+			kept = append(kept, o)
+		}
+	}
+	return kept
+}
 
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100

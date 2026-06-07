@@ -253,6 +253,171 @@ func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 	}
 }
 
+func intPtr(v int) *int { return &v }
+func floatPtr(v float64) *float64 { return &v }
+
+func TestEffectiveFiatMax(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		offer   offer
+		wantMax int
+	}{
+		{
+			name:    "stored fiat max",
+			offer:   offer{FiatMax: intPtr(500), BTCMax: floatPtr(0.01), Price: 60000},
+			wantMax: 500,
+		},
+		{
+			name:    "derive from btc when fiat zero",
+			offer:   offer{FiatMax: intPtr(0), BTCMax: floatPtr(0.0002), Price: 60000},
+			wantMax: 12,
+		},
+		{
+			name:    "sub unit derived fiat rounds up",
+			offer:   offer{FiatMax: intPtr(0), BTCMax: floatPtr(0.00001), Price: 60000},
+			wantMax: 1, // round(0.6)
+		},
+		{
+			name:    "sub unit derived fiat rounds down",
+			offer:   offer{FiatMax: intPtr(0), BTCMax: floatPtr(0.000008), Price: 60000},
+			wantMax: 0, // round(0.48)
+		},
+		{
+			name:    "no volume",
+			offer:   offer{Price: 60000},
+			wantMax: 0,
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := effectiveFiatMax(tc.offer); got != tc.wantMax {
+				t.Fatalf("effectiveFiatMax() = %d, want %d", got, tc.wantMax)
+			}
+		})
+	}
+}
+
+func TestFilterDustOffers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		offers    []offer
+		wantCount int
+		wantIDs   []string
+	}{
+		{
+			name: "drops sub unit derived max",
+			offers: []offer{
+				{OfferID: "dust", FiatMax: intPtr(0), BTCMax: floatPtr(0.000008), Price: 60000},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "keeps bisq whole unit zero with derived max",
+			offers: []offer{
+				{OfferID: "ok", FiatMax: intPtr(0), BTCMax: floatPtr(0.0002), Price: 60000},
+			},
+			wantCount: 1,
+			wantIDs:   []string{"ok"},
+		},
+		{
+			name: "keeps normal stored fiat max",
+			offers: []offer{
+				{OfferID: "normal", FiatMax: intPtr(500), BTCMax: floatPtr(0.01), Price: 60000},
+			},
+			wantCount: 1,
+			wantIDs:   []string{"normal"},
+		},
+		{
+			name: "drops no volume",
+			offers: []offer{
+				{OfferID: "empty", Price: 60000},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "mixed batch",
+			offers: []offer{
+				{OfferID: "dust", FiatMax: intPtr(0), BTCMax: floatPtr(0.000008), Price: 60000},
+				{OfferID: "ok", FiatMax: intPtr(100), BTCMax: floatPtr(0.01), Price: 60000},
+			},
+			wantCount: 1,
+			wantIDs:   []string{"ok"},
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := filterDustOffers(tc.offers)
+			if len(got) != tc.wantCount {
+				t.Fatalf("filterDustOffers() len = %d, want %d", len(got), tc.wantCount)
+			}
+			for i, wantID := range tc.wantIDs {
+				if got[i].OfferID != wantID {
+					t.Fatalf("got[%d].OfferID = %q, want %q", i, got[i].OfferID, wantID)
+				}
+			}
+		})
+	}
+}
+
+func TestFilterDustOffersAllDustKeepsExchangeOnline(t *testing.T) {
+	exchangeData := make(exchangeSnapshotData)
+	dust := []offer{
+		{OfferID: "d1", FiatMax: intPtr(0), BTCMax: floatPtr(0.000008), Price: 60000},
+		{OfferID: "d2", FiatMax: intPtr(0), BTCMax: floatPtr(0.000005), Price: 60000},
+	}
+	filtered := filterDustOffers(dust)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered len = %d, want 0", len(filtered))
+	}
+	result := &fetchResult{Offers: filtered}
+	if !recordFetchResult(exchangeData, "peachbitcoin", result) {
+		t.Fatal("recordFetchResult returned false for successful empty-after-filter result")
+	}
+	if _, ok := exchangeData["peachbitcoin"]; !ok {
+		t.Fatal("peachbitcoin exchange missing from snapshot data after all-dust filter")
+	}
+}
+
+func TestSaveSnapshotSkipsDustOffersWhenFiltered(t *testing.T) {
+	db := testdb.Open(t)
+	priceType := priceTypeFixed()
+	dust := offer{
+		OfferID:       "dust-offer",
+		FiatCurrency:  "EUR",
+		Price:         60000,
+		FiatMax:       intPtr(0),
+		BTCMax:        floatPtr(0.000008),
+		PaymentMethod: "SEPA",
+		PriceType:     priceType,
+	}
+	ok := offer{
+		OfferID:       "ok-offer",
+		FiatCurrency:  "EUR",
+		Price:         60000,
+		FiatMax:       intPtr(100),
+		BTCMax:        floatPtr(0.01),
+		PaymentMethod: "SEPA",
+		PriceType:     priceType,
+	}
+	live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, filterDustOffers([]offer{dust, ok}))
+	if len(live) != 1 {
+		t.Fatalf("live offers len = %d, want 1", len(live))
+	}
+	var dustCount int
+	if err := db.QueryRow(`SELECT count(*) FROM offers WHERE offer_id = ?`, "dust-offer").Scan(&dustCount); err != nil {
+		t.Fatalf("count dust offer: %v", err)
+	}
+	if dustCount != 0 {
+		t.Fatalf("dust offer persisted = %d, want 0", dustCount)
+	}
+}
+
 func TestSaveSnapshotKeepsDistinctIdOffersWithSameFingerprint(t *testing.T) {
 	db := testdb.Open(t)
 	btcMin := 0.0021
