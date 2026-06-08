@@ -620,6 +620,79 @@ func normalizePeachMethod(raw string) string {
 	return out
 }
 
+// mapPeachOffer converts one Peach API offer into our internal offer schema.
+// Peach uses fixed-size orders: amount is either a single satoshi value (sell) or
+// [min, max] with min == max (buy). For sells, prices.EUR is the total fiat volume
+// of the trade, not EUR/BTC.
+func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
+	methods, hasEUR := o.MeansOfPayment["EUR"]
+	if !hasEUR || len(methods) == 0 {
+		return offer{}, false
+	}
+
+	var btcMin, btcMax float64
+	var arr []int64
+	if err := json.Unmarshal(o.Amount, &arr); err == nil && len(arr) >= 1 {
+		btcMin = round8(float64(arr[0]) / 1e8)
+		if len(arr) >= 2 {
+			btcMax = round8(float64(arr[1]) / 1e8)
+		} else {
+			btcMax = btcMin
+		}
+	} else {
+		var single int64
+		if err := json.Unmarshal(o.Amount, &single); err != nil {
+			return offer{}, false
+		}
+		btcMin = round8(float64(single) / 1e8)
+		btcMax = btcMin
+	}
+	if btcMax <= 0 {
+		return offer{}, false
+	}
+
+	var fiatMin, fiatMax int
+	var price float64
+
+	switch direction {
+	case "sell":
+		eurFiat, ok := o.Prices["EUR"]
+		if !ok || eurFiat <= 0 {
+			return offer{}, false
+		}
+		fiatMin = int(math.Round(eurFiat))
+		fiatMax = fiatMin
+		price = eurFiat / btcMax
+	default: // buy
+		if btcPrice <= 0 {
+			return offer{}, false
+		}
+		price = float64(btcPrice)
+		fiat := int(math.Round(btcMax * price))
+		fiatMin = fiat
+		fiatMax = fiat
+	}
+
+	return offer{
+		OfferID:       o.ID,
+		FiatCurrency:  "EUR",
+		Price:         price,
+		BTCMin:        &btcMin,
+		BTCMax:        &btcMax,
+		FiatMin:       &fiatMin,
+		FiatMax:       &fiatMax,
+		PaymentMethod: normalizePeachMethod(methods[0]),
+		PriceType:     priceTypeFixed(),
+	}, true
+}
+
+type peachOffer struct {
+	ID             string              `json:"id"`
+	Amount         json.RawMessage     `json:"amount"` // int64 (sell) or [min,max] int64 array (buy)
+	MeansOfPayment map[string][]string `json:"meansOfPayment"`
+	Prices         map[string]float64  `json:"prices"`
+}
+
 func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[PeachBitcoin] Could not get reference price")
@@ -631,12 +704,6 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 		peachType = "bid" // buy offers (maker buys BTC)
 	}
 
-	type peachOffer struct {
-		ID             string              `json:"id"`
-		Amount         json.RawMessage     `json:"amount"` // int64 (sell) or [min,max] int64 array (buy)
-		MeansOfPayment map[string][]string `json:"meansOfPayment"`
-		Prices         map[string]float64  `json:"prices"`
-	}
 	type peachResponse struct {
 		Offers    []peachOffer `json:"offers"`
 		Total     int          `json:"total"`
@@ -678,53 +745,11 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 
 	var offers []offer
 	for _, o := range allOffers {
-		// Sell offers have an explicit EUR price; buy offers don't — use market price.
-		eurPrice, ok := o.Prices["EUR"]
-		if !ok || eurPrice == 0 {
-			eurPrice = float64(btcPrice)
-		}
-		if eurPrice == 0 {
+		mapped, ok := mapPeachOffer(o, direction, btcPrice)
+		if !ok {
 			continue
 		}
-
-		// amount is either a plain int64 (sell offers) or [min, max] int64 array (buy offers).
-		var btcMin, btcMax float64
-		var arr []int64
-		if err := json.Unmarshal(o.Amount, &arr); err == nil && len(arr) >= 1 {
-			btcMin = round8(float64(arr[0]) / 1e8)
-			if len(arr) >= 2 {
-				btcMax = round8(float64(arr[1]) / 1e8)
-			} else {
-				btcMax = btcMin
-			}
-		} else {
-			var single int64
-			if err := json.Unmarshal(o.Amount, &single); err != nil {
-				continue
-			}
-			btcMin = round8(float64(single) / 1e8)
-			btcMax = btcMin
-		}
-
-		fiatMin := int(btcMin * eurPrice)
-		fiatMax := int(btcMax * eurPrice)
-
-		var method string
-		if methods, ok := o.MeansOfPayment["EUR"]; ok && len(methods) > 0 {
-			method = normalizePeachMethod(methods[0])
-		}
-
-		offers = append(offers, offer{
-			OfferID:       o.ID,
-			FiatCurrency:  "EUR",
-			Price:         eurPrice,
-			BTCMin:        &btcMin,
-			BTCMax:        &btcMax,
-			FiatMin:       &fiatMin,
-			FiatMax:       &fiatMax,
-			PaymentMethod: method,
-			PriceType:     priceTypeFixed(),
-		})
+		offers = append(offers, mapped)
 	}
 
 	fmt.Printf("[PeachBitcoin] Found %d %s offers\n", len(offers), direction)

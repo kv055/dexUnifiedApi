@@ -256,6 +256,104 @@ func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 func intPtr(v int) *int { return &v }
 func floatPtr(v float64) *float64 { return &v }
 
+func TestMapPeachOffer(t *testing.T) {
+	t.Parallel()
+
+	sellAmount, _ := json.Marshal(int64(30000))
+	buyAmount, _ := json.Marshal([]int64{598730, 598730})
+
+	tests := []struct {
+		name      string
+		in        peachOffer
+		direction string
+		btcPrice  int
+		wantOK    bool
+		wantFiat  int
+		wantBTC   float64
+	}{
+		{
+			name: "sell uses prices.EUR as fiat volume",
+			in: peachOffer{
+				ID:             "361418",
+				Amount:         sellAmount,
+				MeansOfPayment: map[string][]string{"EUR": {"revolut"}},
+				Prices:         map[string]float64{"EUR": 17},
+			},
+			direction: "sell",
+			btcPrice:  55359,
+			wantOK:    true,
+			wantFiat:  17,
+			wantBTC:   0.0003,
+		},
+		{
+			name: "buy derives fiat from market price",
+			in: peachOffer{
+				ID:             "353910",
+				Amount:         buyAmount,
+				MeansOfPayment: map[string][]string{"EUR": {"sepa"}},
+			},
+			direction: "buy",
+			btcPrice:  55359,
+			wantOK:    true,
+			wantFiat:  331, // round(0.0059873 * 55359)
+			wantBTC:   0.0059873,
+		},
+		{
+			name: "sell without EUR price skipped",
+			in: peachOffer{
+				ID:             "361885",
+				Amount:         sellAmount,
+				MeansOfPayment: map[string][]string{"EUR": {"sepa"}},
+				Prices:         map[string]float64{"SAT": 66950},
+			},
+			direction: "sell",
+			btcPrice:  55359,
+			wantOK:    false,
+		},
+		{
+			name: "non EUR payment skipped",
+			in: peachOffer{
+				ID:             "361885",
+				Amount:         sellAmount,
+				MeansOfPayment: map[string][]string{"SAT": {"lnurl"}},
+				Prices:         map[string]float64{"EUR": 17},
+			},
+			direction: "sell",
+			btcPrice:  55359,
+			wantOK:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := mapPeachOffer(tc.in, tc.direction, tc.btcPrice)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if got.FiatMin == nil || got.FiatMax == nil || *got.FiatMin != *got.FiatMax {
+				t.Fatalf("fiat min/max = %v/%v, want equal fixed size", got.FiatMin, got.FiatMax)
+			}
+			if *got.FiatMax != tc.wantFiat {
+				t.Fatalf("fiat_max = %d, want %d", *got.FiatMax, tc.wantFiat)
+			}
+			if got.BTCMax == nil || *got.BTCMax != tc.wantBTC {
+				t.Fatalf("btc_max = %v, want %f", got.BTCMax, tc.wantBTC)
+			}
+			if got.BTCMin == nil || *got.BTCMin != *got.BTCMax {
+				t.Fatalf("btc_min = %v, btc_max = %v, want equal fixed size", got.BTCMin, got.BTCMax)
+			}
+			if tc.direction == "sell" && got.Price <= 1000 {
+				t.Fatalf("sell price = %f, want EUR/BTC not total fiat", got.Price)
+			}
+		})
+	}
+}
+
 func TestEffectiveFiatMax(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
