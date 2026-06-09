@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"time"
 )
 
 const deleteBelowPremiumPct = -3.0
@@ -28,17 +29,20 @@ type closedOfferRecord struct {
 func analyzeClosedOffers(sdb closedOfferDB) {
 	resetIgnoredClosedOffersWithLifecycle(sdb)
 
+	graceCutoff := closedOfferAnalysisGraceCutoff(time.Now())
+
 	rows, err := sdb.Query(`
 		SELECT id, exchange, direction, price, btc_min, btc_max,
 		       to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 		       to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 		FROM offers
 		WHERE is_live = FALSE
+		  AND last_seen < ?
 		  AND (
 			historical_analysis_status IS NULL
 			OR historical_analysis_status = 'ignored_no_lifecycle'
 		  )
-	`)
+	`, graceCutoff)
 	if err != nil {
 		fmt.Printf("[ClosedAnalysis] query error: %v\n", err)
 		return

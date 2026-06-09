@@ -6,6 +6,7 @@ import (
 	"dexunifiedapi/internal/testdb"
 	"math"
 	"testing"
+	"time"
 )
 
 func openClosedOfferAnalysisDB(t *testing.T) *dbutil.DB {
@@ -18,6 +19,26 @@ func assertAnalysisFloat(t *testing.T, got, want float64) {
 	if math.Abs(got-want) > 1e-9 {
 		t.Fatalf("got %.12f, want %.12f", got, want)
 	}
+}
+
+func insertClosedOfferTimed(t *testing.T, db *dbutil.DB, status any, isLive bool, lastSeen time.Time) int64 {
+	t.Helper()
+
+	var id int64
+	if err := db.QueryRow(`
+		INSERT INTO offers (
+			exchange, fiat_currency, direction, price,
+			historical_analysis_status, avg_estimated_profit_btc,
+			hedge_open_fee_btc, hedge_close_fee_btc, hedge_funding_fee_btc, hedge_fee_sum_btc,
+			hedge_venue, hedge_instrument, hedge_transfer_minutes,
+			best_route_cex, best_route_method, is_live, first_seen, last_seen
+		)
+		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'onchain', ?, ?, ?)
+		RETURNING id
+	`, status, isLive, lastSeen.UTC().Add(-time.Hour), lastSeen.UTC()).Scan(&id); err != nil {
+		t.Fatalf("insert offer: %v", err)
+	}
+	return id
 }
 
 func insertClosedOffer(t *testing.T, db *dbutil.DB, status any) int64 {
@@ -65,6 +86,36 @@ func offerAnalysisStatus(t *testing.T, db *dbutil.DB, offerID int64) string {
 		return ""
 	}
 	return status.String
+}
+
+func TestAnalyzeClosedOffersSkipsOffersWithinGraceWindow(t *testing.T) {
+	t.Setenv("SNAPSHOT_INTERVAL_MIN", "1")
+	t.Setenv("CLOSED_OFFER_ANALYSIS_GRACE_CYCLES", "3")
+
+	db := openClosedOfferAnalysisDB(t)
+	offerID := insertClosedOfferTimed(t, db, nil, false, time.Now().UTC().Add(-2*time.Minute))
+	insertLifecycleRow(t, db, offerID, 5, 1, 4, 0.004, 0.1)
+
+	analyzeClosedOffers(db)
+
+	if got := offerAnalysisStatus(t, db, offerID); got != "" {
+		t.Fatalf("status = %q, want empty (grace should defer analysis)", got)
+	}
+}
+
+func TestAnalyzeClosedOffersProcessesOffersPastGraceWindow(t *testing.T) {
+	t.Setenv("SNAPSHOT_INTERVAL_MIN", "1")
+	t.Setenv("CLOSED_OFFER_ANALYSIS_GRACE_CYCLES", "3")
+
+	db := openClosedOfferAnalysisDB(t)
+	offerID := insertClosedOfferTimed(t, db, nil, false, time.Now().UTC().Add(-4*time.Minute))
+	insertLifecycleRow(t, db, offerID, 5, 1, 4, 0.004, 0.1)
+
+	analyzeClosedOffers(db)
+
+	if got := offerAnalysisStatus(t, db, offerID); got != "analyzed" {
+		t.Fatalf("status = %q, want analyzed", got)
+	}
 }
 
 func TestAnalyzeSingleClosedOfferMarksMissingLifecycleAsRetryable(t *testing.T) {

@@ -12,9 +12,19 @@ Taker Opportunities backtesting view.
 ## Runtime Role
 
 The snapshot command records offer lifecycle samples while offers are live. Once
-an offer closes, this file analyzes all lifecycle rows for that offer and
-updates the closed `offers` record with averaged premium, trade cost, net
-premium, BTC profit, fiat profit, route, hedge, and size values.
+an offer closes and stays unseen for a configurable grace window, this file
+analyzes all lifecycle rows for that offer and updates the closed `offers` record
+with averaged premium, trade cost, net premium, BTC profit, fiat profit, route,
+hedge, and size values.
+
+Grace is controlled by `CLOSED_OFFER_ANALYSIS_GRACE_CYCLES` (default `3`) times
+`SNAPSHOT_INTERVAL_MIN` (default `1` minute). Closed offers are not analyzed
+until `last_seen` is older than that window, which avoids marking short-lived
+flickers as `analyzed` before they reappear.
+
+When a previously analyzed offer becomes live again, the snapshot bulk `is_live`
+update in `main.go` clears `historical_analysis_status` and closure `avg_*`
+fields so `analyzed` cannot coexist with `is_live = true`.
 
 The analysis is database-driven. It reads from `offers` and `order_lifecycle`,
 writes the derived `avg_*` fields back to `offers`, marks offers that cannot be
@@ -36,9 +46,10 @@ Finds closed offers that still need historical analysis. Before scanning, it
 calls `resetIgnoredClosedOffersWithLifecycle` so offers that were previously
 ignored can be retried after lifecycle rows arrive.
 
-The query selects closed offers where `is_live = FALSE` and
-`historical_analysis_status` is either missing or `ignored_no_lifecycle`. Each
-row is converted into a `closedOfferRecord`, then passed to
+The query selects closed offers where `is_live = FALSE`,
+`last_seen` is before the grace cutoff (`grace_cycles × SNAPSHOT_INTERVAL_MIN`),
+and `historical_analysis_status` is either missing or `ignored_no_lifecycle`.
+Each row is converted into a `closedOfferRecord`, then passed to
 `analyzeSingleClosedOffer`.
 
 Called by:
@@ -152,6 +163,27 @@ Notes:
 The profitable-only conditional averages are important: later monitor views
 should explain profitable historical trades, not dilute those values with
 unprofitable lifecycle samples from the same closed offer.
+
+## One-time cleanup for inconsistent rows
+
+If live offers already carry closure analysis from before the relive reset shipped,
+run once against production:
+
+```sql
+UPDATE offers SET
+  historical_analysis_status = NULL,
+  avg_ref_price = NULL,
+  avg_premium_pct = NULL,
+  avg_trade_cost_pct = NULL,
+  avg_trade_cost_btc = NULL,
+  avg_hedge_fee_sum_btc = NULL,
+  avg_net_premium_pct = NULL,
+  avg_estimated_profit_btc = NULL,
+  avg_estimated_profit_fiat = NULL,
+  avg_btc_amount = NULL
+WHERE is_live = TRUE
+  AND historical_analysis_status IS NOT NULL;
+```
 
 ### `historicalRound4`
 

@@ -1152,12 +1152,24 @@ func main() {
 	})
 
 	// Update is_live and duration in one pass:
-	// - live offers: is_live=true, duration=NULL
+	// - live offers: is_live=true, duration=NULL, closure analysis fields cleared
 	// - closed offers: is_live=false, duration=seconds between first_seen and last_seen
 	sdb.Exec(`UPDATE offers SET
 		is_live = (last_seen >= ?),
-		duration = CASE WHEN last_seen < ? THEN EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT ELSE NULL END`,
-		snapshotStart, snapshotStart)
+		duration = CASE WHEN last_seen < ? THEN EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT ELSE NULL END,
+		historical_analysis_status = CASE WHEN last_seen >= ? THEN NULL ELSE historical_analysis_status END,
+		avg_ref_price              = CASE WHEN last_seen >= ? THEN NULL ELSE avg_ref_price END,
+		avg_premium_pct            = CASE WHEN last_seen >= ? THEN NULL ELSE avg_premium_pct END,
+		avg_trade_cost_pct         = CASE WHEN last_seen >= ? THEN NULL ELSE avg_trade_cost_pct END,
+		avg_trade_cost_btc         = CASE WHEN last_seen >= ? THEN NULL ELSE avg_trade_cost_btc END,
+		avg_hedge_fee_sum_btc      = CASE WHEN last_seen >= ? THEN NULL ELSE avg_hedge_fee_sum_btc END,
+		avg_net_premium_pct        = CASE WHEN last_seen >= ? THEN NULL ELSE avg_net_premium_pct END,
+		avg_estimated_profit_btc   = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_btc END,
+		avg_estimated_profit_fiat  = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_fiat END,
+		avg_btc_amount             = CASE WHEN last_seen >= ? THEN NULL ELSE avg_btc_amount END`,
+		snapshotStart, snapshotStart,
+		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
+		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart)
 
 	// Explicitly close offers from any exchange that failed entirely this run
 	for _, name := range offlineExchangeNames(fetchers, exchangeData) {
