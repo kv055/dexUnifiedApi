@@ -1,4 +1,12 @@
 -- Drop Internal Infrastructure category; LND wallet is uncategorized (NULL).
+--
+-- Idempotent: EnsureUnifiedSchema re-applies every schema file on each boot, so the
+-- guard must skip once the column is already the new generated form. The previous
+-- guard ("category column exists") was always true, so every boot dropped and re-added
+-- the column — and Postgres keeps dropped columns counting toward the 1600-column
+-- limit until a table rewrite, which eventually crash-looped unified-api. We now only
+-- rebuild when category is still the OLD definition (not generated, or its expression
+-- still references the removed 'Internal Infrastructure' category).
 
 DO $$
 BEGIN
@@ -8,6 +16,8 @@ BEGIN
         WHERE table_schema = 'public'
           AND table_name = 'accounts'
           AND column_name = 'category'
+          AND (is_generated <> 'ALWAYS'
+               OR generation_expression LIKE '%Internal Infrastructure%')
     ) THEN
         ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_category_allowed_check;
         ALTER TABLE accounts DROP COLUMN category;
