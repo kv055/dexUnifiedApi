@@ -136,6 +136,7 @@ type liveOfferScenario struct {
 	Profit        liveOfferProfit              `json:"profit"`
 	Costs         liveOfferScenarioCosts       `json:"costs"`
 	AbortCost     tradecost.AbortCostBreakdown `json:"abort_cost"`
+	Capital       tradecost.CapitalRequirement `json:"capital"` // capital to commit for this scenario's trade size
 }
 
 type liveOfferAnalysis struct {
@@ -252,6 +253,7 @@ func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, ca
 			},
 		},
 		AbortCost: tradecost.AbortCostFromBreakdown(bd),
+		Capital:   bd.Capital,
 	}
 }
 
