@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"commons/accounts"
 	"dexunifiedapi/db"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -39,11 +40,12 @@ func NewDBRecorder(db *dbutil.DB) DBRecorder {
 
 // EnsureAccount creates a provider account row if it does not already exist.
 func (s DBRecorder) EnsureAccount(ctx context.Context, provider string) error {
+	category := accounts.CategoryForProvider(provider)
 	if _, err := s.db.DB.ExecContext(ctx, `
-		INSERT INTO accounts (provider)
-		VALUES ($1)
-		ON CONFLICT (provider) DO NOTHING
-	`, provider); err != nil {
+		INSERT INTO accounts (provider, category)
+		VALUES ($1, NULLIF($2, ''))
+		ON CONFLICT (provider, category) DO NOTHING
+	`, provider, category); err != nil {
 		return fmt.Errorf("ensure account %s: %w", provider, err)
 	}
 	return nil
