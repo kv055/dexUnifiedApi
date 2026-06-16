@@ -197,17 +197,21 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	fiatMin := 600
 	fiatMax := 1200
 	priceType := priceTypeFixed()
+	depositBTC := 0.003
+	depositPct := 0.15
 
 	live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{{
-		OfferID:       "bisq-offer-1",
-		FiatCurrency:  "EUR",
-		Price:         61000,
-		BTCMin:        &btcMin,
-		BTCMax:        &btcMax,
-		FiatMin:       &fiatMin,
-		FiatMax:       &fiatMax,
-		PaymentMethod: "SEPA",
-		PriceType:     priceType,
+		OfferID:            "bisq-offer-1",
+		FiatCurrency:       "EUR",
+		Price:              61000,
+		BTCMin:             &btcMin,
+		BTCMax:             &btcMax,
+		FiatMin:            &fiatMin,
+		FiatMax:            &fiatMax,
+		PaymentMethod:      "SEPA",
+		PriceType:          priceType,
+		SecurityDepositBTC: &depositBTC,
+		SecurityDepositPct: &depositPct,
 	}})
 
 	if len(live) != 1 {
@@ -215,11 +219,18 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	}
 
 	var count int
-	if err := db.QueryRow(`SELECT count(*) FROM offers WHERE exchange = ? AND offer_id = ?`, "bisq", "bisq-offer-1").Scan(&count); err != nil {
+	var gotDepositBTC, gotDepositPct float64
+	if err := db.QueryRow(`SELECT count(*), security_deposit_btc, security_deposit_pct FROM offers WHERE exchange = ? AND offer_id = ? GROUP BY security_deposit_btc, security_deposit_pct`, "bisq", "bisq-offer-1").Scan(&count, &gotDepositBTC, &gotDepositPct); err != nil {
 		t.Fatalf("count persisted bisq offer: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("persisted bisq offers = %d, want 1", count)
+	}
+	if gotDepositBTC != depositBTC {
+		t.Fatalf("security_deposit_btc = %v, want %v", gotDepositBTC, depositBTC)
+	}
+	if gotDepositPct != depositPct {
+		t.Fatalf("security_deposit_pct = %v, want %v", gotDepositPct, depositPct)
 	}
 }
 

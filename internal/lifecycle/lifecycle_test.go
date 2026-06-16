@@ -73,6 +73,13 @@ func TestPersistSnapshotEnrichesBaselineAndStoresStaticCostsOnOffer(t *testing.T
 			TotalCostPct:       1,
 			TotalCostBTC:       0.001,
 			EstimatedProfitBTC: 0.004,
+			Hedge: tradecost.HedgeBreakdown{
+				Position: &tradecost.HedgePositionDetail{
+					HedgeNotionalEUR:         10.5,
+					LeverageUsed:             5,
+					RecommendedCollateralEUR: 3.25,
+				},
+			},
 		},
 	}})
 	if err != nil {
@@ -106,6 +113,17 @@ func TestPersistSnapshotEnrichesBaselineAndStoresStaticCostsOnOffer(t *testing.T
 	assertFloat(t, netPct, 4)
 	assertFloat(t, netBTC, 0.004)
 	assertFloat(t, btcAmount, 0.1)
+
+	var hedgeNotionalEUR, leverageUsed, recommendedCollateralEUR float64
+	if err := db.QueryRow(`
+		SELECT hedge_notional_eur, leverage_used, recommended_collateral_eur
+		FROM order_lifecycle WHERE offer_db_id = ?
+	`, offerID).Scan(&hedgeNotionalEUR, &leverageUsed, &recommendedCollateralEUR); err != nil {
+		t.Fatalf("select hedge position: %v", err)
+	}
+	assertFloat(t, hedgeNotionalEUR, 10.5)
+	assertFloat(t, leverageUsed, 5)
+	assertFloat(t, recommendedCollateralEUR, 3.25)
 
 	var taker, withdrawal, network, dexFee, abortBTC, abortPct float64
 	if err := db.QueryRow(`

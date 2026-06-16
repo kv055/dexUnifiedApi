@@ -214,7 +214,10 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 			trade_cost_btc  = ?,
 			net_premium_pct = ?,
 			net_premium_btc = ?,
-			btc_amount      = ?
+			btc_amount      = ?,
+			hedge_notional_eur = ?,
+			leverage_used = ?,
+			recommended_collateral_eur = ?
 		WHERE id = ?
 	`)
 	if err != nil {
@@ -262,12 +265,19 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 			if storedPremium > 0 && bd.RouteCEX != "" {
 				net := tradecost.Round4(storedPremium - bd.TotalCostPct)
 				netBTC := tradecost.Round8(bd.BTCAmount * net / 100)
+				var hedgeNotionalEUR, leverageUsed, recommendedCollateralEUR any
+				if pos := bd.Hedge.Position; pos != nil {
+					hedgeNotionalEUR = tradecost.Round2(pos.HedgeNotionalEUR)
+					leverageUsed = tradecost.Round4(pos.LeverageUsed)
+					recommendedCollateralEUR = tradecost.Round2(pos.RecommendedCollateralEUR)
+				}
 				if _, err := enrichStmt.ExecContext(ctx,
 					tradecost.Round4(bd.TotalCostPct),
 					tradecost.Round8(bd.TotalCostBTC),
 					net,
 					netBTC,
 					tradecost.Round8(bd.BTCAmount),
+					hedgeNotionalEUR, leverageUsed, recommendedCollateralEUR,
 					rowID,
 				); err != nil {
 					return fmt.Errorf("enrich lifecycle for offer %d: %w", o.ID, err)

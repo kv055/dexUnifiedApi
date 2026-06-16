@@ -117,6 +117,11 @@ type offer struct {
 	FiatMax       *int     `json:"fiat_max,omitempty"`
 	PaymentMethod string   `json:"payment_method,omitempty"`
 	PriceType     *string  `json:"price_type,omitempty"`
+	// SecurityDepositBTC/Pct are the deposit or bond the taker of this offer
+	// must lock, in BTC and as a fraction of the trade amount. Nil for
+	// exchanges with no deposit/bond concept (bisq2, hodlhodl, peachbitcoin).
+	SecurityDepositBTC *float64 `json:"security_deposit_btc,omitempty"`
+	SecurityDepositPct *float64 `json:"security_deposit_pct,omitempty"`
 }
 
 type fetchResult struct {
@@ -132,20 +137,22 @@ type exchFetcher struct {
 type exchangeSnapshotData map[string]map[string]bool
 
 type livePayload struct {
-	ID            int64    `json:"id"`
-	Exchange      string   `json:"exchange"`
-	FiatCurrency  string   `json:"fiat_currency"`
-	Direction     string   `json:"direction"`
-	Price         float64  `json:"price"`
-	BTCMin        *float64 `json:"btc_min"`
-	BTCMax        *float64 `json:"btc_max"`
-	FiatMin       *int64   `json:"fiat_min"`
-	FiatMax       *int64   `json:"fiat_max"`
-	PaymentMethod *string  `json:"payment_method"`
-	OfferID       *string  `json:"offer_id"`
-	FirstSeen     string   `json:"first_seen"`
-	LastSeen      string   `json:"last_seen"`
-	PriceType     *string  `json:"price_type"`
+	ID                 int64    `json:"id"`
+	Exchange           string   `json:"exchange"`
+	FiatCurrency       string   `json:"fiat_currency"`
+	Direction          string   `json:"direction"`
+	Price              float64  `json:"price"`
+	BTCMin             *float64 `json:"btc_min"`
+	BTCMax             *float64 `json:"btc_max"`
+	FiatMin            *int64   `json:"fiat_min"`
+	FiatMax            *int64   `json:"fiat_max"`
+	PaymentMethod      *string  `json:"payment_method"`
+	OfferID            *string  `json:"offer_id"`
+	FirstSeen          string   `json:"first_seen"`
+	LastSeen           string   `json:"last_seen"`
+	PriceType          *string  `json:"price_type"`
+	SecurityDepositBTC *float64 `json:"security_deposit_btc"`
+	SecurityDepositPct *float64 `json:"security_deposit_pct"`
 }
 
 func priceTypeFixed() *string    { s := "fixed"; return &s }
@@ -351,16 +358,28 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 		if o.UseMarketBasedPrice {
 			pt = priceTypeFloating()
 		}
+		// The taker plays the opposite side of the maker: on a "sell" offer
+		// (maker sells BTC) the taker buys, so they post the buyer deposit;
+		// on a "buy" offer the taker sells, so they post the seller deposit.
+		// Mirrors the isBid mapping in tradecost.computeCapitalRequirement.
+		depositSats := o.BuyerSecurityDeposit
+		if direction == "buy" {
+			depositSats = o.SellerSecurityDeposit
+		}
+		depositBTC := float64(depositSats) / 1e8
+		depositPct := depositBTC / btcMax
 		offers = append(offers, offer{
-			OfferID:       o.Id,
-			FiatCurrency:  "EUR",
-			Price:         price,
-			BTCMin:        &btcMin,
-			BTCMax:        &btcMax,
-			FiatMin:       &fiatMin,
-			FiatMax:       &fiatMax,
-			PaymentMethod: o.PaymentMethodShortName,
-			PriceType:     pt,
+			OfferID:            o.Id,
+			FiatCurrency:       "EUR",
+			Price:              price,
+			BTCMin:             &btcMin,
+			BTCMax:             &btcMax,
+			FiatMin:            &fiatMin,
+			FiatMax:            &fiatMax,
+			PaymentMethod:      o.PaymentMethodShortName,
+			PriceType:          pt,
+			SecurityDepositBTC: &depositBTC,
+			SecurityDepositPct: &depositPct,
 		})
 	}
 
@@ -794,6 +813,9 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 				MinAmount     json.Number  `json:"min_amount"`
 				MaxAmount     json.Number  `json:"max_amount"`
 				PaymentMethod string       `json:"payment_method"`
+				// BondSize is the maker's bond as a percent (e.g. 3.0 for 3%);
+				// it applies symmetrically to the taker.
+				BondSize json.Number `json:"bond_size"`
 			}
 			if err := json.Unmarshal(raw, &line); err != nil {
 				continue
@@ -830,16 +852,26 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 			btcMin := round8(float64(fiatMin) / price)
 			btcMax := round8(float64(fiatMax) / price)
 
+			// bond_size is a percent, not an absolute amount; derive the BTC
+			// figure from the trade size since the book listing carries no
+			// sats value (the order-detail endpoint does, but fetching it
+			// per-order would mean N+1 calls per snapshot cycle over Tor).
+			bondPct, _ := line.BondSize.Float64()
+			depositPct := bondPct / 100
+			depositBTC := round8(depositPct * btcMax)
+
 			offers = append(offers, offer{
-				OfferID:       line.ID.String(),
-				FiatCurrency:  "EUR",
-				Price:         price,
-				BTCMin:        &btcMin,
-				BTCMax:        &btcMax,
-				FiatMin:       &fiatMin,
-				FiatMax:       &fiatMax,
-				PaymentMethod: line.PaymentMethod,
-				PriceType:     pt,
+				OfferID:            line.ID.String(),
+				FiatCurrency:       "EUR",
+				Price:              price,
+				BTCMin:             &btcMin,
+				BTCMax:             &btcMax,
+				FiatMin:            &fiatMin,
+				FiatMax:            &fiatMax,
+				PaymentMethod:      line.PaymentMethod,
+				PriceType:          pt,
+				SecurityDepositBTC: &depositBTC,
+				SecurityDepositPct: &depositPct,
 			})
 		}
 
@@ -911,13 +943,15 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		}
 
 		live := livePayload{
-			Exchange:     exchange,
-			FiatCurrency: fiat,
-			Direction:    direction,
-			Price:        o.Price,
-			BTCMin:       o.BTCMin,
-			BTCMax:       o.BTCMax,
-			PriceType:    o.PriceType,
+			Exchange:           exchange,
+			FiatCurrency:       fiat,
+			Direction:          direction,
+			Price:              o.Price,
+			BTCMin:             o.BTCMin,
+			BTCMax:             o.BTCMax,
+			PriceType:          o.PriceType,
+			SecurityDepositBTC: o.SecurityDepositBTC,
+			SecurityDepositPct: o.SecurityDepositPct,
 		}
 		if o.FiatMin != nil {
 			v := int64(*o.FiatMin)
@@ -945,23 +979,28 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 				fiat_min = ?,
 				fiat_max = ?,
 				payment_method = ?,
-				offer_id = COALESCE(offer_id, ?)
+				offer_id = COALESCE(offer_id, ?),
+				security_deposit_btc = ?,
+				security_deposit_pct = ?
 				WHERE id = ?
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
-				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID), existingID,
+				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID),
+				o.SecurityDepositBTC, o.SecurityDepositPct, existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		} else {
 			upsertErr = tx.QueryRow(`INSERT INTO offers
 				(exchange, fiat_currency, direction, btc_min, btc_max,
-				 fiat_min, fiat_max, payment_method, offer_id, price_type, price)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 fiat_min, fiat_max, payment_method, offer_id, price_type, price,
+				 security_deposit_btc, security_deposit_pct)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				exchange, fiat, direction, o.BTCMin, o.BTCMax,
 				o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
+				o.SecurityDepositBTC, o.SecurityDepositPct,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		}
 		if upsertErr != nil {

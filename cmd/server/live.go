@@ -50,6 +50,11 @@ type LiveOffer struct {
 	LastSeen string `json:"last_seen"`
 	// PriceType is the price value used by the live offer.
 	PriceType *string `json:"price_type"`
+	// SecurityDepositPct is the real per-offer security deposit/bond fraction
+	// (offers.security_deposit_pct), already picked for the taker's side at
+	// snapshot time. Nil for exchanges with no deposit concept, or offers
+	// snapshotted before this was persisted.
+	SecurityDepositPct *float64 `json:"security_deposit_pct"`
 }
 
 // LifecyclePoint is a single price observation from the order_lifecycle table.
@@ -342,16 +347,16 @@ func computeNetPremiumFields(premiumPct float64, btcSize float64, dexExchange st
 }
 
 func computeNetPremiumFieldsWithConfirmations(premiumPct float64, btcSize float64, dexExchange string, direction string, requiredConfirmations int) (float64, float64, tradecost.CostBreakdown) {
-	return computeNetPremiumFieldsFull(premiumPct, btcSize, 0, dexExchange, direction, requiredConfirmations, nil, "", true)
+	return computeNetPremiumFieldsFull(premiumPct, btcSize, 0, dexExchange, direction, requiredConfirmations, nil, "", true, nil)
 }
 
-func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedCEXes []string, feeTier string, coupledHedge bool) (float64, float64, tradecost.CostBreakdown) {
+func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedCEXes []string, feeTier string, coupledHedge bool, realDepositPct *float64) (float64, float64, tradecost.CostBreakdown) {
 	if tradeRouteOptimizer == nil || premiumPct <= 0 {
 		return 0, 0, tradecost.CostBreakdown{}
 	}
 
 	requiredConfirmations = tradecost.ResolveRequiredConfirmations(direction, requiredConfirmations)
-	bd := tradeRouteOptimizer.BestBreakdownFull(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedCEXes, feeTier, coupledHedge)
+	bd := tradeRouteOptimizer.BestBreakdownFull(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedCEXes, feeTier, coupledHedge, realDepositPct)
 	if bd.RouteCEX == "" {
 		return 0, 0, tradecost.CostBreakdown{}
 	}
@@ -512,7 +517,7 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 	for _, o := range offers {
 		pct := computeDirectionalPremiumPct(o.Direction, o.Price, price)
 		btcSize := selectBTCTradeSize(o.BTCMax, o.BTCMin)
-		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge)
+		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 
 		// If a max fiat limit is set and the offer's full size exceeds it, compute a second
 		// breakdown capped to that fiat amount so the frontend can show both side by side.
@@ -523,7 +528,7 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		if sub.maxFiatLimitEUR > 0 && price > 0 {
 			btcCap := sub.maxFiatLimitEUR / price
 			if btcSize > btcCap {
-				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge)
+				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 				bdCapped = &bd2
 				abort2 := tradecost.AbortCostFromBreakdown(bd2)
 				abortCapped = &abort2

@@ -107,6 +107,68 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.Pct, 0.75)
 }
 
+func TestLiveOffersRESTUsesRealSecurityDepositFromOffer(t *testing.T) {
+	oldHub := hub
+	oldPrices := cexPrices
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	defer func() {
+		hub = oldHub
+		cexPrices = oldPrices
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+	}()
+
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	cexPrices = map[string]float64{"kraken": 100}
+
+	est := tradecost.NewFixedEstimatorForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.01
+	btcMax := 0.1
+	// A real measured deposit (18%) different from the 15% bisq estimate —
+	// the real value must win and DepositEstimated must be false.
+	realDepositPct := 0.18
+	hub.offers = []LiveOffer{{
+		ID:                 1,
+		Exchange:           "bisq",
+		Direction:          "buy",
+		Price:              102.5,
+		BTCMin:             &btcMin,
+		BTCMax:             &btcMax,
+		FirstSeen:          "2026-04-01 12:00:00",
+		LastSeen:           "2026-04-01 12:00:00",
+		SecurityDepositPct: &realDepositPct,
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
+	rec := httptest.NewRecorder()
+
+	handleLiveOffersREST(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var offers []liveOfferAPI
+	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offer count = %d, want 1", len(offers))
+	}
+
+	cap := offers[0].Analysis.FullVolume.Capital
+	assertFloat(t, cap.SecurityDepositPct, 0.18)
+	assertFloat(t, cap.SecurityDepositBTC, 0.018) // 0.1 * 0.18
+	assertFloat(t, cap.SecurityDepositEUR, 1.8)   // 0.018 * 100
+	if cap.DepositEstimated {
+		t.Fatal("DepositEstimated = true, want false for a real measured deposit")
+	}
+}
+
 func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	oldOptimizer := tradeRouteOptimizer
 	oldEstimators := tradeCostEstimators
