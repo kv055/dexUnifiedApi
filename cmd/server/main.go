@@ -4,6 +4,7 @@ import (
 	"commons/logging"
 	"commons/metrics"
 	"commons/prices"
+	"commons/session"
 	"commons/tracing"
 	"commons/tradecost"
 	"context"
@@ -28,6 +29,17 @@ import (
 
 // serviceName is the OpenTelemetry/logging identity for this binary.
 const serviceName = "unified-api"
+
+// sessionProtected reports whether a path is a browser-facing endpoint that
+// requires a valid dashboard login session. Only the routes nginx exposes to the
+// browser are gated; internal service-to-service endpoints
+// (/api/accounts/health_check, /api/payment_notifications, /internal/*, /health,
+// /metrics) carry no user cookie and must stay open.
+func sessionProtected(path string) bool {
+	return strings.HasPrefix(path, "/api/live_offers") ||
+		strings.HasPrefix(path, "/api/trade_cost_config") ||
+		strings.HasPrefix(path, "/ws/live_offers")
+}
 
 var (
 	adminDatabaseURL          string
@@ -219,6 +231,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Dashboard login session: unified-api only VALIDATES the shared dex_session
+	// cookie (stored in the same Postgres `sessions` table dexMonitor creates);
+	// dexMonitor owns creating/destroying sessions. Default Secure=true (prod is
+	// HTTPS); set SESSION_COOKIE_SECURE=false for local HTTP dev.
+	sessionCookieSecure := !strings.EqualFold(os.Getenv("SESSION_COOKIE_SECURE"), "false")
+	sessionMgr := session.NewManager(db.DB, session.Config{CookieSecure: sessionCookieSecure})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	lifecycleRepo = lifecycle.NewRepository(db)
@@ -303,8 +322,15 @@ func main() {
 	// Order matters: tracing.WrapHandler is outermost so it starts the server
 	// span and continues any inbound trace context; RouteNamer is innermost so
 	// it can read the matched route pattern and name the span accordingly.
+	// LoadAndSave loads the shared session into context; Gate then rejects
+	// unauthenticated requests to the browser-facing live-offers/trade-cost routes
+	// (internal + health/metrics routes stay open — see sessionProtected).
 	handler := tracing.WrapHandler(
-		corsMiddleware(metricsReg.Middleware(tracing.RouteNamer(mux))),
+		corsMiddleware(metricsReg.Middleware(
+			sessionMgr.LoadAndSave(
+				sessionMgr.Gate(sessionProtected)(tracing.RouteNamer(mux)),
+			),
+		)),
 		serviceName,
 	)
 
