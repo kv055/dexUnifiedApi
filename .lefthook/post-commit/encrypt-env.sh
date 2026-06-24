@@ -25,7 +25,17 @@ fi
 
 REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
 
+# Preserve the existing keypair across the cp. Plain `cp .env .env.enc` wipes the
+# DOTENV_PUBLIC_KEY_ENC header, so `dotenvx encrypt` would mint a BRAND-NEW keypair
+# on every .env change — and the new private key only ever lands in the gitignored
+# .env.keys, never reaching the CI secret or other machines, which breaks the deploy
+# decrypt step (WRONG_PRIVATE_KEY). Re-inject the committed pubkey so the keypair
+# stays stable. (Empty PUB = no prior .env.enc → first-time encrypt mints one, fine.)
+PUB=$(grep -oE 'DOTENV_PUBLIC_KEY_ENC="[0-9a-f]+"' .env.enc 2>/dev/null | head -1)
 cp .env .env.enc
+if [[ -n "$PUB" ]]; then
+  printf '%s\n' "$PUB" | cat - .env.enc > .env.enc.tmp && mv .env.enc.tmp .env.enc
+fi
 dotenvx encrypt -f .env.enc
 
 echo "$CURRENT_HASH" > "$HASH_FILE"
