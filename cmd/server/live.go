@@ -124,12 +124,13 @@ type liveOfferNetworkCost struct {
 }
 
 type liveOfferScenarioCosts struct {
-	CexTaker   liveOfferCostComponent   `json:"cex_taker"`
-	Withdrawal liveOfferCostComponent   `json:"withdrawal"`
-	DexFee     liveOfferCostComponent   `json:"dex_fee"`
-	Network    liveOfferNetworkCost     `json:"network"`
-	Hedge      tradecost.HedgeBreakdown `json:"hedge"`
-	Total      liveOfferCostComponent   `json:"total"`
+	CexTaker   liveOfferCostComponent        `json:"cex_taker"`
+	Withdrawal liveOfferCostComponent        `json:"withdrawal"`
+	DexFee     liveOfferCostComponent        `json:"dex_fee"`
+	Network    liveOfferNetworkCost          `json:"network"`
+	Conversion tradecost.ConversionBreakdown `json:"conversion"`
+	Hedge      tradecost.HedgeBreakdown      `json:"hedge"`
+	Total      liveOfferCostComponent        `json:"total"`
 }
 
 type liveOfferScenario struct {
@@ -251,7 +252,8 @@ func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, ca
 			Network: liveOfferNetworkCost{
 				Pct: bd.NetworkFeePct,
 			},
-			Hedge: bd.Hedge,
+			Conversion: bd.Conversion,
+			Hedge:      bd.Hedge,
 			Total: liveOfferCostComponent{
 				Pct: bd.TotalCostPct,
 				BTC: bd.TotalCostBTC,

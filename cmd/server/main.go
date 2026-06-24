@@ -216,15 +216,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One orchestrator serves every CEX: it picks the cheapest non-excluded CEX
+	// internally via the cextrading engine. The map is kept (the shared instance
+	// under each CEX key) only for CEX-name validation and optimizer adoption.
+	orchestrator := tradecost.NewTradeCostEstimator()
 	tradeCostEstimators = make(map[string]*tradecost.TradeCostEstimator, len(supportedCEXes))
 	for _, c := range supportedCEXes {
-		tradeCostEstimators[c] = tradecost.NewTradeCostEstimator(c)
-		slog.Info("trade-cost estimator initialized",
+		tradeCostEstimators[c] = orchestrator
+		slog.Info("trade-cost CEX enabled",
 			"cex", c,
 			"taker_fallback_pct", tradecost.TakerFeeFallback(c)*100,
-			"onchain_withdrawal_fallback_btc", tradecost.WithdrawalFallback(c, tradecost.MethodOnchain))
+			"onchain_withdrawal_fallback_btc", tradecost.WithdrawalFallback(c))
 	}
-	tradeRouteOptimizer = tradecost.NewOptimizer(supportedCEXes, tradeCostEstimators)
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
 
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		slog.Error("schema init error", "err", err)
@@ -482,22 +486,11 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 
 func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {
 	type cexInfo struct {
-		Name         string   `json:"name"`
-		Methods      []string `json:"methods"`
-		HasLightning bool     `json:"has_lightning"`
+		Name string `json:"name"`
 	}
 	cexes := make([]cexInfo, 0, len(supportedCEXes))
 	for _, name := range supportedCEXes {
-		profile := tradecost.ProfileFor(name)
-		methods := make([]string, 0, len(profile.Methods))
-		hasLN := false
-		for _, m := range profile.Methods {
-			methods = append(methods, string(m))
-			if m == tradecost.MethodLightning {
-				hasLN = true
-			}
-		}
-		cexes = append(cexes, cexInfo{Name: name, Methods: methods, HasLightning: hasLN})
+		cexes = append(cexes, cexInfo{Name: name})
 	}
 
 	tiers := []map[string]string{
@@ -510,8 +503,9 @@ func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"cexes":     cexes,
-		"fee_tiers": tiers,
+		"cexes":                cexes,
+		"dex_routing_profiles": tradecost.DexRoutingProfiles(),
+		"fee_tiers":            tiers,
 	})
 }
 

@@ -75,10 +75,10 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	if offer.Pricing.PriceType != "unknown" {
 		t.Fatalf("price type = %q, want unknown", offer.Pricing.PriceType)
 	}
-	assertFloat(t, offer.BTCNetworkFee.BTC, 0.0001)
+	assertFloat(t, offer.BTCNetworkFee.BTC, 0.00005)
 	assertFloat(t, offer.BTCNetworkFee.Confidence, 0.875)
-	if offer.BTCNetworkFee.Method != "onchain" {
-		t.Fatalf("network fee method = %q, want onchain", offer.BTCNetworkFee.Method)
+	if offer.BTCNetworkFee.Method != "onchain_direct" {
+		t.Fatalf("network fee method = %q, want onchain_direct", offer.BTCNetworkFee.Method)
 	}
 	if offer.BTCNetworkFee.RequiredConfirmations != 2 {
 		t.Fatalf("required confirmations = %d, want 2", offer.BTCNetworkFee.RequiredConfirmations)
@@ -91,20 +91,20 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	}
 	assertFloat(t, offer.Analysis.FullVolume.TradeSizeBTC, 0.1)
 	assertFloat(t, offer.Analysis.FullVolume.TradeSizeFiat, 10)
-	assertFloat(t, offer.Analysis.FullVolume.Premium.TradeCostPercent, 0.6)
-	assertFloat(t, offer.Analysis.FullVolume.Premium.NetPercent, 1.9)
-	assertFloat(t, offer.Analysis.FullVolume.Profit.BTC, 0.0019)
+	assertFloat(t, offer.Analysis.FullVolume.Premium.TradeCostPercent, 0.55)
+	assertFloat(t, offer.Analysis.FullVolume.Premium.NetPercent, 1.95)
+	assertFloat(t, offer.Analysis.FullVolume.Profit.BTC, 0.00195)
 	assertFloat(t, offer.Analysis.FullVolume.Profit.Fiat, 0.19)
 	assertFloat(t, offer.Analysis.FullVolume.Costs.CexTaker.BTC, 0.00025)
 	assertFloat(t, offer.Analysis.FullVolume.Costs.Withdrawal.BTC, 0.00015)
-	assertFloat(t, offer.Analysis.FullVolume.Costs.Network.Pct, 0.1)
-	assertFloat(t, offer.Analysis.FullVolume.Costs.Total.BTC, 0.0006)
+	assertFloat(t, offer.Analysis.FullVolume.Costs.Network.Pct, 0.05)
+	assertFloat(t, offer.Analysis.FullVolume.Costs.Total.BTC, 0.00055)
 	assertFloat(t, offer.Analysis.FullVolume.AbortCost.CexBuyTaker.BTC, 0.00025)
 	assertFloat(t, offer.Analysis.FullVolume.AbortCost.CexSellTaker.BTC, 0.00025)
 	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Withdrawal.BTC, 0.00015)
-	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Network.BTC, 0.0001)
-	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.BTC, 0.00075)
-	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.Pct, 0.75)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Network.BTC, 0.00005)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.BTC, 0.0007)
+	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.Pct, 0.7)
 }
 
 func TestLiveOffersRESTUsesRealSecurityDepositFromOffer(t *testing.T) {
@@ -221,20 +221,20 @@ func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	if offer.Analysis.CappedVolume == nil {
 		t.Fatal("expected capped cost breakdown")
 	}
-	assertFloat(t, offer.BTCNetworkFee.BTC, 0.0001)
+	assertFloat(t, offer.BTCNetworkFee.BTC, 0.00005)
 	if offer.Analysis.CappedVolume.CapFiat == nil {
 		t.Fatal("expected capped volume cap_fiat")
 	}
 	assertFloat(t, *offer.Analysis.CappedVolume.CapFiat, 5)
 	assertFloat(t, offer.Analysis.CappedVolume.TradeSizeBTC, 0.05)
 	assertFloat(t, offer.Analysis.CappedVolume.TradeSizeFiat, 5)
-	assertFloat(t, offer.Analysis.CappedVolume.Premium.TradeCostPercent, 0.85)
-	assertFloat(t, offer.Analysis.CappedVolume.Premium.NetPercent, 1.65)
-	assertFloat(t, offer.Analysis.CappedVolume.Profit.BTC, 0.000825)
-	assertFloat(t, offer.Analysis.CappedVolume.Profit.Fiat, 0.08)
-	assertFloat(t, offer.Analysis.CappedVolume.Costs.Network.Pct, 0.2)
-	assertFloat(t, offer.Analysis.CappedVolume.AbortCost.Total.BTC, 0.0005)
-	assertFloat(t, offer.Analysis.CappedVolume.AbortCost.Total.Pct, 1)
+	assertFloat(t, offer.Analysis.CappedVolume.Premium.TradeCostPercent, 0.75)
+	assertFloat(t, offer.Analysis.CappedVolume.Premium.NetPercent, 1.75)
+	assertFloat(t, offer.Analysis.CappedVolume.Profit.BTC, 0.000875)
+	assertFloat(t, offer.Analysis.CappedVolume.Profit.Fiat, 0.09)
+	assertFloat(t, offer.Analysis.CappedVolume.Costs.Network.Pct, 0.1)
+	assertFloat(t, offer.Analysis.CappedVolume.AbortCost.Total.BTC, 0.00045)
+	assertFloat(t, offer.Analysis.CappedVolume.AbortCost.Total.Pct, 0.9)
 }
 
 func TestHandleLiveOfferLifecycleRESTReturnsLifecyclePoints(t *testing.T) {
@@ -399,6 +399,6 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 	}
 	assertFloat(t, takerFee, 0.00025)
 	assertFloat(t, withdrawalFee, 0.00015)
-	assertFloat(t, networkFee, 0.0001)
+	assertFloat(t, networkFee, 0.00005) // bisq bid is a single on-chain tx
 	assertFloat(t, dexFee, 0.0001)
 }
