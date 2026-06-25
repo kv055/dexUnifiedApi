@@ -19,9 +19,11 @@ ensure_account_row_in_database() {
     -v BISQ2_ACCOUNT_PROVIDER_SQL="$ACCOUNT_PROVIDER" \
     "$BACKUP_DATABASE_URL" <<'SQL'
 \set ON_ERROR_STOP on
-INSERT INTO accounts (provider, email, password)
-VALUES (:'BISQ2_ACCOUNT_PROVIDER_SQL', NULL, NULL)
-ON CONFLICT (provider) DO NOTHING;
+INSERT INTO accounts (provider, category)
+SELECT :'BISQ2_ACCOUNT_PROVIDER_SQL', 'DEX'
+WHERE NOT EXISTS (
+    SELECT 1 FROM accounts WHERE provider = :'BISQ2_ACCOUNT_PROVIDER_SQL'
+);
 SQL
   then
     echo "[startup] Failed to ensure Bisq2 account row for provider '$ACCOUNT_PROVIDER'" >&2
