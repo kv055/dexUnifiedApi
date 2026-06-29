@@ -115,7 +115,7 @@ type offer struct {
 	BTCMax        *float64 `json:"btc_max,omitempty"`
 	FiatMin       *int     `json:"fiat_min,omitempty"`
 	FiatMax       *int     `json:"fiat_max,omitempty"`
-	PaymentMethod string   `json:"payment_method,omitempty"`
+	PaymentMethods []string `json:"payment_methods,omitempty"`
 	PriceType     *string  `json:"price_type,omitempty"`
 	// SecurityDepositBTC/Pct are the deposit or bond the taker of this offer
 	// must lock, in BTC and as a fraction of the trade amount. Nil for
@@ -146,7 +146,7 @@ type livePayload struct {
 	BTCMax             *float64 `json:"btc_max"`
 	FiatMin            *int64   `json:"fiat_min"`
 	FiatMax            *int64   `json:"fiat_max"`
-	PaymentMethod      *string  `json:"payment_method"`
+	PaymentMethods     []string `json:"payment_methods"`
 	OfferID            *string  `json:"offer_id"`
 	FirstSeen          string   `json:"first_seen"`
 	LastSeen           string   `json:"last_seen"`
@@ -376,7 +376,7 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 			BTCMax:             &btcMax,
 			FiatMin:            &fiatMin,
 			FiatMax:            &fiatMax,
-			PaymentMethod:      o.PaymentMethodShortName,
+			PaymentMethods:     []string{o.PaymentMethodShortName},
 			PriceType:          pt,
 			SecurityDepositBTC: &depositBTC,
 			SecurityDepositPct: &depositPct,
@@ -499,21 +499,23 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 		btcMin := float64(fiatMin) / price
 		btcMax := float64(fiatMax) / price
 
-		var paymentMethod string
-		if len(o.QuoteSidePaymentMethodSpecs) > 0 {
-			paymentMethod = o.QuoteSidePaymentMethodSpecs[0].PaymentMethod
+		var methods []string
+		for _, spec := range o.QuoteSidePaymentMethodSpecs {
+			if m := strings.TrimSpace(spec.PaymentMethod); m != "" {
+				methods = append(methods, m)
+			}
 		}
 
 		offers = append(offers, offer{
-			OfferID:       o.ID,
-			FiatCurrency:  "EUR",
-			Price:         price,
-			BTCMin:        &btcMin,
-			BTCMax:        &btcMax,
-			FiatMin:       &fiatMin,
-			FiatMax:       &fiatMax,
-			PaymentMethod: paymentMethod,
-			PriceType:     pt,
+			OfferID:        o.ID,
+			FiatCurrency:   "EUR",
+			Price:          price,
+			BTCMin:         &btcMin,
+			BTCMax:         &btcMax,
+			FiatMin:        &fiatMin,
+			FiatMax:        &fiatMax,
+			PaymentMethods: methods,
+			PriceType:      pt,
 		})
 	}
 
@@ -560,35 +562,45 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 		fiatMin := int(parseFloatStr(o.MinAmount))
 		fiatMax := int(parseFloatStr(o.MaxAmount))
 
-		var method string
-		if direction == "buy" && len(o.PaymentMethods) > 0 {
-			method = o.PaymentMethods[0].Name
-		} else if len(o.PaymentMethodInstructions) > 0 {
-			method = o.PaymentMethodInstructions[0].PaymentMethodName
-		}
-		if strings.Contains(method, "SEPA") {
-			method = "SEPA"
-		} else if strings.Contains(method, "Any national bank") {
-			method = "NATIONAL_BANK"
+		var methods []string
+		if direction == "buy" {
+			for _, pm := range o.PaymentMethods {
+				methods = append(methods, normalizeHodlHodlMethod(pm.Name))
+			}
+		} else {
+			for _, pmi := range o.PaymentMethodInstructions {
+				methods = append(methods, normalizeHodlHodlMethod(pmi.PaymentMethodName))
+			}
 		}
 
 		btcMin := round8(float64(fiatMin) / price)
 		btcMax := round8(float64(fiatMax) / price)
 		offers = append(offers, offer{
-			OfferID:       o.ID,
-			FiatCurrency:  "EUR",
-			Price:         price,
-			BTCMin:        &btcMin,
-			BTCMax:        &btcMax,
-			FiatMin:       &fiatMin,
-			FiatMax:       &fiatMax,
-			PaymentMethod: method,
-			PriceType:     normalizeHodlHodlPriceType(o.PriceSource),
+			OfferID:        o.ID,
+			FiatCurrency:   "EUR",
+			Price:          price,
+			BTCMin:         &btcMin,
+			BTCMax:         &btcMax,
+			FiatMin:        &fiatMin,
+			FiatMax:        &fiatMax,
+			PaymentMethods: methods,
+			PriceType:      normalizeHodlHodlPriceType(o.PriceSource),
 		})
 	}
 
 	fmt.Printf("[HodlHodl] Found %d %s offers\n", len(offers), direction)
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+}
+
+// normalizeHodlHodlMethod normalizes a single HodlHodl payment method name.
+func normalizeHodlHodlMethod(method string) string {
+	if strings.Contains(method, "SEPA") {
+		return "SEPA"
+	}
+	if strings.Contains(method, "Any national bank") {
+		return "NATIONAL_BANK"
+	}
+	return method
 }
 
 // normalizePeachMethod converts a Peach Bitcoin payment-method identifier
@@ -635,6 +647,17 @@ func normalizePeachMethod(raw string) string {
 		return "MB Way"
 	case "Paypal":
 		return "PayPal"
+	}
+	return out
+}
+
+// normalizeAllPeachMethods normalizes every Peach method string in the slice.
+func normalizeAllPeachMethods(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		if m := normalizePeachMethod(r); m != "" {
+			out = append(out, m)
+		}
 	}
 	return out
 }
@@ -700,7 +723,7 @@ func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
 		BTCMax:        &btcMax,
 		FiatMin:       &fiatMin,
 		FiatMax:       &fiatMax,
-		PaymentMethod: normalizePeachMethod(methods[0]),
+		PaymentMethods: normalizeAllPeachMethods(methods),
 		PriceType:     priceTypeFixed(),
 	}, true
 }
@@ -868,7 +891,7 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 				BTCMax:             &btcMax,
 				FiatMin:            &fiatMin,
 				FiatMax:            &fiatMax,
-				PaymentMethod:      line.PaymentMethod,
+				PaymentMethods:     []string{line.PaymentMethod},
 				PriceType:          pt,
 				SecurityDepositBTC: &depositBTC,
 				SecurityDepositPct: &depositPct,
@@ -930,9 +953,9 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		} else {
 			err := tx.QueryRow(`SELECT id FROM offers
 				WHERE exchange = ? AND fiat_currency = ? AND direction = ?
-				  AND btc_min = ? AND btc_max = ? AND payment_method = ?
+				  AND btc_min = ? AND btc_max = ?
 				  AND offer_id IS NULL`,
-				exchange, fiat, direction, o.BTCMin, o.BTCMax, o.PaymentMethod).Scan(&existingID)
+				exchange, fiat, direction, o.BTCMin, o.BTCMax).Scan(&existingID)
 			found = err == nil
 		}
 
@@ -961,9 +984,8 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 			v := int64(*o.FiatMax)
 			live.FiatMax = &v
 		}
-		if o.PaymentMethod != "" {
-			method := o.PaymentMethod
-			live.PaymentMethod = &method
+		if len(o.PaymentMethods) > 0 {
+			live.PaymentMethods = o.PaymentMethods
 		}
 		if o.OfferID != "" {
 			offerID := o.OfferID
@@ -978,7 +1000,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 				price = ?,
 				fiat_min = ?,
 				fiat_max = ?,
-				payment_method = ?,
+				payment_methods = ?,
 				offer_id = COALESCE(offer_id, ?),
 				security_deposit_btc = ?,
 				security_deposit_pct = ?
@@ -986,20 +1008,20 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
-				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID),
+				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
 				o.SecurityDepositBTC, o.SecurityDepositPct, existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		} else {
 			upsertErr = tx.QueryRow(`INSERT INTO offers
 				(exchange, fiat_currency, direction, btc_min, btc_max,
-				 fiat_min, fiat_max, payment_method, offer_id, price_type, price,
+				 fiat_min, fiat_max, payment_methods, offer_id, price_type, price,
 				 security_deposit_btc, security_deposit_pct)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				exchange, fiat, direction, o.BTCMin, o.BTCMax,
-				o.FiatMin, o.FiatMax, nilIfEmpty(o.PaymentMethod), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
+				o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		}
@@ -1569,6 +1591,13 @@ func parseFloatStr(s string) float64 {
 
 func nilIfEmpty(s string) any {
 	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nilIfEmptySlice(s []string) any {
+	if len(s) == 0 {
 		return nil
 	}
 	return s

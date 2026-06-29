@@ -3,6 +3,7 @@ package dbutil
 import (
 	"embed"
 	"fmt"
+	"io/fs"
 	"path"
 	"sort"
 	"strings"
@@ -11,13 +12,17 @@ import (
 //go:embed schema/*.sql
 var schemaFiles embed.FS
 
-// EnsureUnifiedSchema ensures the required state exists.
+//go:embed migrations/*
+var migrationFiles embed.FS
+
+// EnsureUnifiedSchema applies the base schema (schema/*.sql) and then any
+// forward-only migrations (migrations/*.sql), each at most once.
 //
-// Each migration in schema/*.sql is applied at most once: an applied filename is
-// recorded in the schema_migrations tracking table, in the same transaction as
-// the migration itself, so the record is atomic with the change. Already-recorded
-// files are skipped on subsequent boots. Migrations should still be written
-// idempotently (the existing files are), but correctness no longer depends on it.
+// Base schema files use CREATE TABLE IF NOT EXISTS so they're safe on existing
+// DBs. Migrations are one-shot changes (ALTER, data fixes, etc.) that run
+// exactly once. Both are tracked in the schema_migrations table — an applied
+// filename is recorded atomically with the change, and already-recorded files
+// are skipped on subsequent boots.
 func EnsureUnifiedSchema(db *DB) error {
 	if _, err := db.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		filename   TEXT PRIMARY KEY,
@@ -31,9 +36,21 @@ func EnsureUnifiedSchema(db *DB) error {
 		return err
 	}
 
-	entries, err := schemaFiles.ReadDir("schema")
+	if err := applyDir(db, schemaFiles, "schema", applied); err != nil {
+		return err
+	}
+	if err := applyDir(db, migrationFiles, "migrations", applied); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyDir reads .sql files from an embedded directory, sorts them, and applies
+// any that haven't been recorded in schema_migrations yet.
+func applyDir(db *DB, fsys embed.FS, dir string, applied map[string]bool) error {
+	entries, err := fsys.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("read schema directory: %w", err)
+		return fmt.Errorf("read %s directory: %w", dir, err)
 	}
 
 	var filenames []string
@@ -46,34 +63,47 @@ func EnsureUnifiedSchema(db *DB) error {
 	sort.Strings(filenames)
 
 	for _, filename := range filenames {
-		if applied[filename] {
+		trackingKey := trackingKeyForDir(dir, filename)
+		if applied[trackingKey] {
 			continue
 		}
 
-		sqlBytes, err := schemaFiles.ReadFile(path.Join("schema", filename))
+		sqlBytes, err := fs.ReadFile(fsys, path.Join(dir, filename))
 		if err != nil {
-			return fmt.Errorf("read schema file %s: %w", filename, err)
+			return fmt.Errorf("read %s/%s: %w", dir, filename, err)
 		}
 
 		tx, err := db.DB.Begin()
 		if err != nil {
-			return fmt.Errorf("begin schema file %s: %w", filename, err)
+			return fmt.Errorf("begin %s/%s: %w", dir, filename, err)
 		}
 
 		if _, err := tx.Exec(string(sqlBytes)); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("apply schema file %s: %w", filename, err)
+			return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, filename); err != nil {
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, trackingKey); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("record schema file %s: %w", filename, err)
+			return fmt.Errorf("record %s/%s: %w", dir, filename, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit schema file %s: %w", filename, err)
+			return fmt.Errorf("commit %s/%s: %w", dir, filename, err)
 		}
+
+		applied[trackingKey] = true
 	}
 
 	return nil
+}
+
+// trackingKeyForDir returns the schema_migrations filename key. Base schema files
+// use the bare filename (backwards-compatible with the old single-directory layout);
+// migration files are prefixed with "migrations/" so the two namespaces don't collide.
+func trackingKeyForDir(dir, filename string) string {
+	if dir == "schema" {
+		return filename
+	}
+	return dir + "/" + filename
 }
 
 // appliedMigrations returns the set of migration filenames already recorded in

@@ -208,7 +208,7 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 		BTCMax:             &btcMax,
 		FiatMin:            &fiatMin,
 		FiatMax:            &fiatMax,
-		PaymentMethod:      "SEPA",
+		PaymentMethods: []string{"SEPA"},
 		PriceType:          priceType,
 		SecurityDepositBTC: &depositBTC,
 		SecurityDepositPct: &depositPct,
@@ -247,7 +247,7 @@ func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 		Price:         51899,
 		BTCMin:        &btcMin,
 		BTCMax:        &btcMax,
-		PaymentMethod: "SEPA",
+		PaymentMethods: []string{"SEPA"},
 		PriceType:     priceType,
 	}
 	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{dup, dup, dup})
@@ -502,7 +502,7 @@ func TestSaveSnapshotSkipsDustOffersWhenFiltered(t *testing.T) {
 		Price:         60000,
 		FiatMax:       intPtr(0),
 		BTCMax:        floatPtr(0.000008),
-		PaymentMethod: "SEPA",
+		PaymentMethods: []string{"SEPA"},
 		PriceType:     priceType,
 	}
 	ok := offer{
@@ -511,7 +511,7 @@ func TestSaveSnapshotSkipsDustOffersWhenFiltered(t *testing.T) {
 		Price:         60000,
 		FiatMax:       intPtr(100),
 		BTCMax:        floatPtr(0.01),
-		PaymentMethod: "SEPA",
+		PaymentMethods: []string{"SEPA"},
 		PriceType:     priceType,
 	}
 	live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, filterDustOffers([]offer{dust, ok}))
@@ -543,7 +543,7 @@ func TestSaveSnapshotKeepsDistinctIdOffersWithSameFingerprint(t *testing.T) {
 			Price:         51899,
 			BTCMin:        &btcMin,
 			BTCMax:        &btcMax,
-			PaymentMethod: "revolut",
+			PaymentMethods: []string{"revolut"},
 			PriceType:     priceType,
 		}
 	}

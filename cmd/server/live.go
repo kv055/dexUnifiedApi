@@ -40,8 +40,8 @@ type LiveOffer struct {
 	FiatMin *int64 `json:"fiat_min"`
 	// FiatMax is a fiat-denominated fiat max value.
 	FiatMax *int64 `json:"fiat_max"`
-	// PaymentMethod is the payment method value for the live offer.
-	PaymentMethod *string `json:"payment_method"`
+	// PaymentMethods lists the payment methods accepted by this offer.
+	PaymentMethods []string `json:"payment_methods"`
 	// OfferID is the offer id value for the live offer.
 	OfferID *string `json:"offer_id"`
 	// FirstSeen is the first seen value for the live offer.
@@ -154,7 +154,7 @@ type liveOfferAPI struct {
 	ID            int64                  `json:"id"`
 	Exchange      string                 `json:"exchange"`
 	OfferID       string                 `json:"offer_id"`
-	PaymentMethod string                 `json:"payment_method"`
+	PaymentMethods []string              `json:"payment_methods"`
 	Direction     string                 `json:"direction"`
 	Status        liveOfferStatus        `json:"status"`
 	Pricing       liveOfferPricing       `json:"pricing"`
@@ -189,7 +189,7 @@ type liveOutOffer struct {
 	BTCMax                    *float64                      `json:"btc_max"`
 	FiatMin                   *int64                        `json:"fiat_min"`
 	FiatMax                   *int64                        `json:"fiat_max"`
-	PaymentMethod             *string                       `json:"payment_method"`
+	PaymentMethods            []string                      `json:"payment_methods"`
 	OfferID                   *string                       `json:"offer_id"`
 	FirstSeen                 string                        `json:"first_seen"`
 	LastSeen                  string                        `json:"last_seen"`
@@ -290,7 +290,7 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 		ID:            o.ID,
 		Exchange:      o.Exchange,
 		OfferID:       derefStringOrEmpty(o.OfferID),
-		PaymentMethod: derefStringOrEmpty(o.PaymentMethod),
+		PaymentMethods: o.PaymentMethods,
 		Direction:     o.Direction,
 		Status: liveOfferStatus{
 			IsLive:    o.IsLive,
@@ -568,7 +568,7 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			BTCMax:                    o.BTCMax,
 			FiatMin:                   o.FiatMin,
 			FiatMax:                   o.FiatMax,
-			PaymentMethod:             o.PaymentMethod,
+			PaymentMethods:            o.PaymentMethods,
 			OfferID:                   o.OfferID,
 			FirstSeen:                 o.FirstSeen,
 			LastSeen:                  o.LastSeen,

@@ -9,22 +9,24 @@ import (
 	"dexunifiedapi/internal/testdb"
 )
 
-// countSchemaFiles counts the *.sql migration files on disk so the test does not
+// countSQLFiles counts *.sql files in schema/ and migrations/ so the test does not
 // hard-code the migration count.
 func countSchemaFiles(t *testing.T) int {
 	t.Helper()
-	entries, err := os.ReadDir("schema")
-	if err != nil {
-		t.Fatalf("read schema dir: %v", err)
-	}
 	n := 0
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			n++
+	for _, dir := range []string{"schema", "migrations"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+				n++
+			}
 		}
 	}
 	if n == 0 {
-		t.Fatal("no schema files found")
+		t.Fatal("no schema/migration files found")
 	}
 	return n
 }

@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS offers (
     id BIGSERIAL PRIMARY KEY,
-    exchange VARCHAR(16) NOT NULL CHECK (exchange IN ('bisq', 'hodlhodl', 'robosats')),
+    exchange VARCHAR(16) NOT NULL,
     fiat_currency CHAR(3) NOT NULL CHECK (fiat_currency = UPPER(fiat_currency)),
     direction VARCHAR(4) NOT NULL CHECK (direction IN ('buy', 'sell')),
     price DOUBLE PRECISION,
@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS offers (
     btc_max DOUBLE PRECISION CHECK (btc_max IS NULL OR btc_max >= 0),
     fiat_min BIGINT CHECK (fiat_min IS NULL OR fiat_min >= 0),
     fiat_max BIGINT CHECK (fiat_max IS NULL OR fiat_max >= 0),
-    payment_method VARCHAR(128),
+    payment_methods TEXT[],
     offer_id VARCHAR(128),
     first_seen TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -42,7 +42,17 @@ CREATE TABLE IF NOT EXISTS offers (
     avg_btc_amount DOUBLE PRECISION CHECK (avg_btc_amount IS NULL OR avg_btc_amount >= 0),
     price_type VARCHAR(16) CHECK (price_type IS NULL OR price_type IN ('fixed', 'floating', 'unknown')),
     best_route_cex VARCHAR(16) CHECK (best_route_cex IS NULL OR best_route_cex IN ('kraken', 'binance', 'coinbase', 'bitstamp')),
-    best_route_method VARCHAR(16) CHECK (best_route_method IS NULL OR best_route_method IN ('onchain', 'lightning')),
+    best_route_method VARCHAR(16),
+    security_deposit_btc DOUBLE PRECISION CHECK (security_deposit_btc IS NULL OR security_deposit_btc >= 0),
+    security_deposit_pct DOUBLE PRECISION CHECK (security_deposit_pct IS NULL OR security_deposit_pct >= 0),
+    CONSTRAINT offers_exchange_check CHECK (
+        exchange IN ('bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin')
+    ),
+    CONSTRAINT offers_best_route_method_check CHECK (
+        best_route_method IS NULL OR best_route_method IN (
+            'onchain', 'lightning', 'onchain_swap', 'onchain_direct', 'onchain_hub'
+        )
+    ),
     CHECK (btc_max IS NULL OR btc_min IS NULL OR btc_max >= btc_min),
     CHECK (fiat_max IS NULL OR fiat_min IS NULL OR fiat_max >= fiat_min),
     CHECK (last_seen >= first_seen)
@@ -51,5 +61,17 @@ CREATE TABLE IF NOT EXISTS offers (
 CREATE INDEX IF NOT EXISTS idx_offers_exchange ON offers(exchange);
 CREATE INDEX IF NOT EXISTS idx_offers_direction ON offers(direction);
 CREATE INDEX IF NOT EXISTS idx_offers_last_seen ON offers(last_seen);
-CREATE INDEX IF NOT EXISTS idx_offers_fingerprint ON offers(exchange, fiat_currency, direction, btc_min, btc_max, payment_method);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_offer_id ON offers(offer_id) WHERE offer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_offers_fingerprint
+    ON offers(exchange, fiat_currency, direction, btc_min, btc_max);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_offer_id
+    ON offers(offer_id) WHERE offer_id IS NOT NULL;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'offers' AND column_name = 'payment_methods'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_offers_payment_methods ON offers USING GIN (payment_methods)';
+    END IF;
+END $$;

@@ -4,3 +4,5 @@ CREATE TABLE IF NOT EXISTS snapshot_log (
     exchanges JSONB NOT NULL,
     offers_count INTEGER NOT NULL CHECK (offers_count >= 0)
 );
+
+CREATE INDEX IF NOT EXISTS idx_snapshot_log_timestamp ON snapshot_log (timestamp DESC);
