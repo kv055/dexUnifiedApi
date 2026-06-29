@@ -2,6 +2,7 @@ package main
 
 import (
 	"commons/logging"
+	"commons/paymentmethods"
 	"commons/tracing"
 	"context"
 	dbutil "dexunifiedapi/db"
@@ -984,8 +985,9 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 			v := int64(*o.FiatMax)
 			live.FiatMax = &v
 		}
-		if len(o.PaymentMethods) > 0 {
-			live.PaymentMethods = o.PaymentMethods
+		if methods := paymentmethods.CanonicalizeAll(o.PaymentMethods); len(methods) > 0 {
+			o.PaymentMethods = methods
+			live.PaymentMethods = methods
 		}
 		if o.OfferID != "" {
 			offerID := o.OfferID
