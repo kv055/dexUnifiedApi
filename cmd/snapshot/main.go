@@ -8,6 +8,7 @@ import (
 	dbutil "dexunifiedapi/db"
 	"dexunifiedapi/internal/config"
 	"dexunifiedapi/internal/lifecycle"
+	"dexunifiedapi/internal/sellerrating"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	bisqgrpc "dexunifiedapi/bisq_grpc/go"
@@ -55,6 +57,14 @@ var (
 		"http://4t4jxmivv6uqej6xzx2jx3fxh75gtt65v3szjoqmc4ugdlhipzdat6yd.onion",
 		"http://otmoonrndnrddqdlhu6b36heunmbyw3cgvadqo2oqeau3656wfv7fwad.onion",
 	}
+)
+
+const (
+	// robosatsBondMin/MaxPct bound the documented RoboSats fidelity-bond range
+	// (default ~3%, maker-customizable 2-15%), used to scale the bond into a
+	// 0-100 stake-based reputation proxy.
+	robosatsBondMinPct = 2.0
+	robosatsBondMaxPct = 15.0
 )
 
 func init() {
@@ -108,21 +118,37 @@ func (c bisqCreds) RequireTransportSecurity() bool { return false }
 // --- Offer type ---
 
 type offer struct {
-	OfferID       string   `json:"offer_id,omitempty"`
-	FiatCurrency  string   `json:"fiat_currency,omitempty"`
-	Price         float64  `json:"price"`
-	PriceDiffPct  *float64 `json:"price_diff_percent,omitempty"`
-	BTCMin        *float64 `json:"btc_min,omitempty"`
-	BTCMax        *float64 `json:"btc_max,omitempty"`
-	FiatMin       *int     `json:"fiat_min,omitempty"`
-	FiatMax       *int     `json:"fiat_max,omitempty"`
+	OfferID        string   `json:"offer_id,omitempty"`
+	FiatCurrency   string   `json:"fiat_currency,omitempty"`
+	Price          float64  `json:"price"`
+	PriceDiffPct   *float64 `json:"price_diff_percent,omitempty"`
+	BTCMin         *float64 `json:"btc_min,omitempty"`
+	BTCMax         *float64 `json:"btc_max,omitempty"`
+	FiatMin        *int     `json:"fiat_min,omitempty"`
+	FiatMax        *int     `json:"fiat_max,omitempty"`
 	PaymentMethods []string `json:"payment_methods,omitempty"`
-	PriceType     *string  `json:"price_type,omitempty"`
+	PriceType      *string  `json:"price_type,omitempty"`
 	// SecurityDepositBTC/Pct are the deposit or bond the taker of this offer
 	// must lock, in BTC and as a fraction of the trade amount. Nil for
 	// exchanges with no deposit/bond concept (bisq2, hodlhodl, peachbitcoin).
 	SecurityDepositBTC *float64 `json:"security_deposit_btc,omitempty"`
 	SecurityDepositPct *float64 `json:"security_deposit_pct,omitempty"`
+	// SellerRating* are the maker's reputation normalized across exchanges by
+	// commons/sellerrating. Score is 0-100 (nil when no signal is obtainable,
+	// e.g. bisq v1); Confidence records which methodology produced it; Raw
+	// preserves the exchange-specific inputs. Set via applyRating.
+	SellerRatingScore      *float64        `json:"seller_rating_score,omitempty"`
+	SellerRatingConfidence *string         `json:"seller_rating_confidence,omitempty"`
+	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
+}
+
+// applyRating copies a normalized sellerrating.Score onto an offer. Every
+// fetcher calls this once per offer so the three rating fields are populated
+// consistently (including the bisq v1 Unavailable() case).
+func applyRating(o *offer, s sellerrating.Score) {
+	o.SellerRatingScore = s.Value
+	o.SellerRatingConfidence = s.ConfidencePtr()
+	o.SellerRatingRaw = s.Raw
 }
 
 type fetchResult struct {
@@ -154,6 +180,11 @@ type livePayload struct {
 	PriceType          *string  `json:"price_type"`
 	SecurityDepositBTC *float64 `json:"security_deposit_btc"`
 	SecurityDepositPct *float64 `json:"security_deposit_pct"`
+	// SellerRating* carry the normalized maker reputation to the live feed so
+	// the frontend can show it alongside each offer (see internal/sellerrating).
+	SellerRatingScore      *float64        `json:"seller_rating_score"`
+	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
+	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
 }
 
 func priceTypeFixed() *string    { s := "fixed"; return &s }
@@ -369,7 +400,7 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 		}
 		depositBTC := float64(depositSats) / 1e8
 		depositPct := depositBTC / btcMax
-		offers = append(offers, offer{
+		newOffer := offer{
 			OfferID:            o.Id,
 			FiatCurrency:       "EUR",
 			Price:              price,
@@ -381,7 +412,16 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 			PriceType:          pt,
 			SecurityDepositBTC: &depositBTC,
 			SecurityDepositPct: &depositPct,
-		})
+		}
+		// Bisq v1's trust signal is its account-signing web of trust (sign-state
+		// tier + account age). Stock gRPC OfferInfo strips it (it lives in
+		// OfferPayload.extra_data); our bisq-patches/offerinfo-witness.patch adds
+		// the two fields below. An unpatched daemon sends "" for the sign-state,
+		// which NormalizeBisqAccountSigning maps to Unavailable() — so this stays
+		// safe before/during the patched-image rollout.
+		applyRating(&newOffer, sellerrating.NormalizeBisqAccountSigning(
+			o.GetAccountAgeWitnessSignState(), o.GetAccountAgeWitnessDate(), time.Now()))
+		offers = append(offers, newOffer)
 	}
 
 	fmt.Printf("[Bisq] Found %d %s offers\n", len(offers), direction)
@@ -449,6 +489,16 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 				PaymentMethod string `json:"paymentMethod"`
 			} `json:"quoteSidePaymentMethodSpecs"`
 		} `json:"bisqEasyOffer"`
+		// reputationScore is a sibling of bisqEasyOffer in each list item; the
+		// Bisq2 node computes it with the same ReputationService the desktop UI
+		// uses (burned/bonded BSQ + imported bisq1 account age). fiveSystemScore
+		// is the 0-5 star value shown to users. Present in the response body we
+		// already read — previously discarded because the struct omitted it.
+		ReputationScore struct {
+			TotalScore      int64   `json:"totalScore"`
+			FiveSystemScore float64 `json:"fiveSystemScore"`
+			Ranking         int     `json:"ranking"`
+		} `json:"reputationScore"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		fmt.Printf("[Bisq2] Parse error: %v\n", err)
@@ -507,7 +557,7 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 			}
 		}
 
-		offers = append(offers, offer{
+		newOffer := offer{
 			OfferID:        o.ID,
 			FiatCurrency:   "EUR",
 			Price:          price,
@@ -517,11 +567,67 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 			FiatMax:        &fiatMax,
 			PaymentMethods: methods,
 			PriceType:      pt,
+		}
+		rep := item.ReputationScore
+		repRaw, _ := json.Marshal(map[string]any{
+			"total_score":       rep.TotalScore,
+			"five_system_score": rep.FiveSystemScore,
+			"ranking":           rep.Ranking,
 		})
+		applyRating(&newOffer, sellerrating.NormalizeReputationScore(rep.FiveSystemScore, 5.0, repRaw))
+		offers = append(offers, newOffer)
 	}
 
 	fmt.Printf("[Bisq2] Found %d %s offers\n", len(offers), direction)
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+}
+
+// hodlHodlTrader is the maker reputation nested per-offer in the HodlHodl offer
+// listing. Rating is a 0-1 fraction and is null for makers with no rating yet,
+// so it MUST stay a pointer — a bare float64 would decode null to 0.0,
+// indistinguishable from a genuinely terrible rating.
+type hodlHodlTrader struct {
+	TradesCount  int      `json:"trades_count"`
+	Rating       *float64 `json:"rating"`
+	StrongHodler bool     `json:"strong_hodler"`
+}
+
+const (
+	// Shrinkage parameters for HodlHodl's peer-feedback rating. priorMean is a
+	// mildly-optimistic neutral rating; priorWeight is how many prior
+	// observations a new maker starts with (so a lone lucky trade can't dominate).
+	hodlHodlRatingPriorMean   = 0.85
+	hodlHodlRatingPriorWeight = 10
+	// verifiedThreshold is the trade count at which the score is trusted enough
+	// to tag feedback_verified rather than feedback_new.
+	hodlHodlVerifiedThreshold = 5
+	// strongHodlerBonus is a small bounded credit for the community "Strong
+	// Hodler" vouch, capped so Value never exceeds 100.
+	hodlHodlStrongHodlerBonus = 2.0
+)
+
+// mapHodlHodlTrader normalizes a HodlHodl maker's reputation into a Score. Kept
+// separate from the network call so it is unit-testable. Rating is already a
+// 0-1 fraction, so no rescale is needed before the shared feedback formula.
+func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
+	raw, _ := json.Marshal(map[string]any{
+		"rating":        t.Rating,
+		"trades_count":  t.TradesCount,
+		"strong_hodler": t.StrongHodler,
+	})
+	s := sellerrating.NormalizeFeedbackRating(
+		t.Rating, t.TradesCount,
+		hodlHodlRatingPriorMean, hodlHodlRatingPriorWeight, hodlHodlVerifiedThreshold,
+		raw,
+	)
+	if t.StrongHodler && s.Value != nil {
+		v := *s.Value + hodlHodlStrongHodlerBonus
+		if v > 100 {
+			v = 100
+		}
+		s.Value = &v
+	}
+	return s
 }
 
 func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
@@ -547,6 +653,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 			PaymentMethodInstructions []struct {
 				PaymentMethodName string `json:"payment_method_name"`
 			} `json:"payment_method_instructions"`
+			Trader hodlHodlTrader `json:"trader"`
 		} `json:"offers"`
 	}
 	if err := json.Unmarshal(body, &data); err != nil {
@@ -576,7 +683,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 
 		btcMin := round8(float64(fiatMin) / price)
 		btcMax := round8(float64(fiatMax) / price)
-		offers = append(offers, offer{
+		newOffer := offer{
 			OfferID:        o.ID,
 			FiatCurrency:   "EUR",
 			Price:          price,
@@ -586,7 +693,9 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 			FiatMax:        &fiatMax,
 			PaymentMethods: methods,
 			PriceType:      normalizeHodlHodlPriceType(o.PriceSource),
-		})
+		}
+		applyRating(&newOffer, mapHodlHodlTrader(o.Trader))
+		offers = append(offers, newOffer)
 	}
 
 	fmt.Printf("[HodlHodl] Found %d %s offers\n", len(offers), direction)
@@ -667,7 +776,7 @@ func normalizeAllPeachMethods(raw []string) []string {
 // Peach uses fixed-size orders: amount is either a single satoshi value (sell) or
 // [min, max] with min == max (buy). For sells, prices.EUR is the total fiat volume
 // of the trade, not EUR/BTC.
-func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
+func mapPeachOffer(o peachOffer, direction string, btcPrice int, rating sellerrating.Score) (offer, bool) {
 	methods, hasEUR := o.MeansOfPayment["EUR"]
 	if !hasEUR || len(methods) == 0 {
 		return offer{}, false
@@ -716,17 +825,19 @@ func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
 		fiatMax = fiat
 	}
 
-	return offer{
-		OfferID:       o.ID,
-		FiatCurrency:  "EUR",
-		Price:         price,
-		BTCMin:        &btcMin,
-		BTCMax:        &btcMax,
-		FiatMin:       &fiatMin,
-		FiatMax:       &fiatMax,
+	result := offer{
+		OfferID:        o.ID,
+		FiatCurrency:   "EUR",
+		Price:          price,
+		BTCMin:         &btcMin,
+		BTCMax:         &btcMax,
+		FiatMin:        &fiatMin,
+		FiatMax:        &fiatMax,
 		PaymentMethods: normalizeAllPeachMethods(methods),
-		PriceType:     priceTypeFixed(),
-	}, true
+		PriceType:      priceTypeFixed(),
+	}
+	applyRating(&result, rating)
+	return result, true
 }
 
 type peachOffer struct {
@@ -734,6 +845,132 @@ type peachOffer struct {
 	Amount         json.RawMessage     `json:"amount"` // int64 (sell) or [min,max] int64 array (buy)
 	MeansOfPayment map[string][]string `json:"meansOfPayment"`
 	Prices         map[string]float64  `json:"prices"`
+	// User carries only the maker id inline; reputation lives behind a separate
+	// GET /v1/user/:id call (see fetchPeachRatings).
+	User struct {
+		ID string `json:"id"`
+	} `json:"user"`
+}
+
+// peachUserReputation is the maker profile returned by GET /v1/user/:id.
+type peachUserReputation struct {
+	Rating      float64 `json:"rating"` // -1..1
+	RatingCount int     `json:"ratingCount"`
+	Trades      int     `json:"trades"`
+	Disputes    struct {
+		Opened int `json:"opened"`
+		Won    int `json:"won"`
+		Lost   int `json:"lost"`
+	} `json:"disputes"`
+}
+
+const (
+	// Shrinkage parameters for Peach's peer-feedback rating, mirroring HodlHodl.
+	peachRatingPriorMean   = 0.85
+	peachRatingPriorWeight = 10
+	peachVerifiedThreshold = 5
+	// peachDisputePenaltyPts is subtracted per lost dispute, since a rolling
+	// rating average alone can under-weight a clear-cut dispute loss.
+	peachDisputePenaltyPts = 5.0
+	// peachUserFetchWorkers/Timeout bound the per-maker reputation lookups so a
+	// slow response can't stall the snapshot cycle.
+	peachUserFetchWorkers = 8
+	peachUserFetchTimeout = 8 * time.Second
+)
+
+// mapPeachReputation normalizes a Peach maker profile into a Score. Peach's
+// rating is -1..1, so it is rescaled to 0..1 before the shared feedback
+// formula, then a bounded penalty is applied per lost dispute. Kept separate
+// from the network call so it is unit-testable.
+func mapPeachReputation(r peachUserReputation) sellerrating.Score {
+	rescaled := (r.Rating + 1) / 2
+	raw, _ := json.Marshal(map[string]any{
+		"rating":        r.Rating,
+		"rating_count":  r.RatingCount,
+		"trades":        r.Trades,
+		"disputes_lost": r.Disputes.Lost,
+	})
+	s := sellerrating.NormalizeFeedbackRating(
+		&rescaled, r.RatingCount,
+		peachRatingPriorMean, peachRatingPriorWeight, peachVerifiedThreshold,
+		raw,
+	)
+	return sellerrating.ApplyDisputePenalty(s, r.Disputes.Lost, peachDisputePenaltyPts)
+}
+
+// fetchPeachUserReputation fetches one maker's profile with a caller-supplied
+// context (for the per-call timeout).
+func fetchPeachUserReputation(ctx context.Context, userID string) (peachUserReputation, error) {
+	var rep peachUserReputation
+	reqURL := "https://api.peachbitcoin.com/v1/user/" + url.PathEscape(userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return rep, err
+	}
+	resp, err := clearnetClient().Do(req)
+	if err != nil {
+		return rep, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return rep, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &rep); err != nil {
+		return rep, err
+	}
+	return rep, nil
+}
+
+// fetchPeachRatings resolves each DISTINCT maker id in offers to a normalized
+// Score, once per maker (many offers share a maker), using a bounded worker
+// pool. A failed/timed-out lookup degrades to Unavailable() for that maker
+// rather than failing the whole snapshot cycle.
+func fetchPeachRatings(offers []peachOffer) map[string]sellerrating.Score {
+	ids := make(map[string]bool)
+	for _, o := range offers {
+		if o.User.ID != "" {
+			ids[o.User.ID] = true
+		}
+	}
+	result := make(map[string]sellerrating.Score, len(ids))
+	if len(ids) == 0 {
+		return result
+	}
+
+	workers := peachUserFetchWorkers
+	if len(ids) < workers {
+		workers = len(ids)
+	}
+	idCh := make(chan string)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range idCh {
+				ctx, cancel := context.WithTimeout(context.Background(), peachUserFetchTimeout)
+				rep, err := fetchPeachUserReputation(ctx, id)
+				cancel()
+				score := sellerrating.Unavailable()
+				if err == nil {
+					score = mapPeachReputation(rep)
+				} else {
+					fmt.Printf("[PeachBitcoin] reputation fetch failed for %s: %v\n", id, err)
+				}
+				mu.Lock()
+				result[id] = score
+				mu.Unlock()
+			}
+		}()
+	}
+	for id := range ids {
+		idCh <- id
+	}
+	close(idCh)
+	wg.Wait()
+	return result
 }
 
 func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
@@ -786,9 +1023,15 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 		}
 	}
 
+	ratings := fetchPeachRatings(allOffers)
+
 	var offers []offer
 	for _, o := range allOffers {
-		mapped, ok := mapPeachOffer(o, direction, btcPrice)
+		rating := sellerrating.Unavailable()
+		if s, ok := ratings[o.User.ID]; ok {
+			rating = s
+		}
+		mapped, ok := mapPeachOffer(o, direction, btcPrice, rating)
 		if !ok {
 			continue
 		}
@@ -884,7 +1127,7 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 			depositPct := bondPct / 100
 			depositBTC := round8(depositPct * btcMax)
 
-			offers = append(offers, offer{
+			newOffer := offer{
 				OfferID:            line.ID.String(),
 				FiatCurrency:       "EUR",
 				Price:              price,
@@ -896,7 +1139,14 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 				PriceType:          pt,
 				SecurityDepositBTC: &depositBTC,
 				SecurityDepositPct: &depositPct,
-			})
+			}
+			// RoboSats has no persistent maker identity or peer feedback by
+			// design — the fidelity bond the maker locks is the only trust
+			// signal, so we use the bond percentage as a stake-based proxy over
+			// its documented ~2-15% range.
+			bondRaw, _ := json.Marshal(map[string]any{"bond_size_pct": bondPct})
+			applyRating(&newOffer, sellerrating.NormalizeStakeBond(bondPct, robosatsBondMinPct, robosatsBondMaxPct, bondRaw))
+			offers = append(offers, newOffer)
 		}
 
 		fmt.Printf("[Robosats] Found %d %s offers\n", len(offers), direction)
@@ -976,6 +1226,9 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 			PriceType:          o.PriceType,
 			SecurityDepositBTC: o.SecurityDepositBTC,
 			SecurityDepositPct: o.SecurityDepositPct,
+			SellerRatingScore:      o.SellerRatingScore,
+			SellerRatingConfidence: o.SellerRatingConfidence,
+			SellerRatingRaw:        o.SellerRatingRaw,
 		}
 		if o.FiatMin != nil {
 			v := int64(*o.FiatMin)
@@ -1005,26 +1258,32 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 				payment_methods = ?,
 				offer_id = COALESCE(offer_id, ?),
 				security_deposit_btc = ?,
-				security_deposit_pct = ?
+				security_deposit_pct = ?,
+				seller_rating_score = ?,
+				seller_rating_confidence = ?,
+				seller_rating_raw = ?::jsonb
 				WHERE id = ?
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
-				o.SecurityDepositBTC, o.SecurityDepositPct, existingID,
+				o.SecurityDepositBTC, o.SecurityDepositPct,
+				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw), existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		} else {
 			upsertErr = tx.QueryRow(`INSERT INTO offers
 				(exchange, fiat_currency, direction, btc_min, btc_max,
 				 fiat_min, fiat_max, payment_methods, offer_id, price_type, price,
-				 security_deposit_btc, security_deposit_pct)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 security_deposit_btc, security_deposit_pct,
+				 seller_rating_score, seller_rating_confidence, seller_rating_raw)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				exchange, fiat, direction, o.BTCMin, o.BTCMax,
 				o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
 				o.SecurityDepositBTC, o.SecurityDepositPct,
+				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		}
 		if upsertErr != nil {
@@ -1603,4 +1862,13 @@ func nilIfEmptySlice(s []string) any {
 		return nil
 	}
 	return s
+}
+
+// nilIfEmptyRawMessage returns nil for an absent JSON blob so the ?::jsonb
+// bind writes SQL NULL rather than an empty string (which is invalid jsonb).
+func nilIfEmptyRawMessage(b json.RawMessage) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return string(b)
 }

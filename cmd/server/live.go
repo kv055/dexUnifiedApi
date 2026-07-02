@@ -55,6 +55,12 @@ type LiveOffer struct {
 	// snapshot time. Nil for exchanges with no deposit concept, or offers
 	// snapshotted before this was persisted.
 	SecurityDepositPct *float64 `json:"security_deposit_pct"`
+	// SellerRating* are the maker's normalized reputation (internal/sellerrating).
+	// Score is 0-100, nil when no signal is obtainable; Confidence records the
+	// methodology ('unavailable' when there is none); Raw holds the source inputs.
+	SellerRatingScore      *float64        `json:"seller_rating_score"`
+	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
+	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw"`
 }
 
 // LifecyclePoint is a single price observation from the order_lifecycle table.
@@ -161,6 +167,9 @@ type liveOfferAPI struct {
 	VolumeLimits  liveOfferVolumeLimits  `json:"volume_limits"`
 	BTCNetworkFee liveOfferBTCNetworkFee `json:"btc_network_fee"`
 	Analysis      liveOfferAnalysis      `json:"analysis"`
+	SellerRatingScore      *float64        `json:"seller_rating_score"`
+	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
+	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
 }
 
 // liveOutOffer is the shape sent to clients — includes computed premium fields.
@@ -195,6 +204,9 @@ type liveOutOffer struct {
 	LastSeen                  string                        `json:"last_seen"`
 	IsLive                    bool                          `json:"is_live"`
 	PriceType                 *string                       `json:"price_type"`
+	SellerRatingScore         *float64                      `json:"seller_rating_score"`
+	SellerRatingConfidence    *string                       `json:"seller_rating_confidence"`
+	SellerRatingRaw           json.RawMessage               `json:"seller_rating_raw,omitempty"`
 	Lifecycle                 []LifecyclePoint              `json:"lifecycle,omitempty"`
 }
 
@@ -314,6 +326,9 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 		Analysis: liveOfferAnalysis{
 			FullVolume: buildScenarioFromBreakdown(o.CostBreakdown, o.RefPrice, nil, o.TradeCostPct, o.NetPremiumPct),
 		},
+		SellerRatingScore:      o.SellerRatingScore,
+		SellerRatingConfidence: o.SellerRatingConfidence,
+		SellerRatingRaw:        o.SellerRatingRaw,
 	}
 	if o.CostBreakdownCapped != nil && o.TradeCostPctCapped != nil && o.NetPremiumPctCapped != nil {
 		capFiat := tradecost.Round2(o.CostBreakdownCapped.BTCAmount * o.RefPrice)
@@ -574,6 +589,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			LastSeen:                  o.LastSeen,
 			IsLive:                    true,
 			PriceType:                 o.PriceType,
+			SellerRatingScore:         o.SellerRatingScore,
+			SellerRatingConfidence:    o.SellerRatingConfidence,
+			SellerRatingRaw:           o.SellerRatingRaw,
 			Lifecycle:                 lc[o.ID],
 		})
 	}

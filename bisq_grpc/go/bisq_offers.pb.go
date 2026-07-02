@@ -149,8 +149,14 @@ type OfferInfo struct {
 	IsMyOffer                bool                   `protobuf:"varint,25,opt,name=is_my_offer,json=isMyOffer,proto3" json:"is_my_offer,omitempty"`
 	IsMyPendingOffer         bool                   `protobuf:"varint,26,opt,name=is_my_pending_offer,json=isMyPendingOffer,proto3" json:"is_my_pending_offer,omitempty"`
 	IsBsqSwapOffer           bool                   `protobuf:"varint,27,opt,name=is_bsq_swap_offer,json=isBsqSwapOffer,proto3" json:"is_bsq_swap_offer,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// Added by our bisq-patches/offerinfo-witness.patch: the maker's
+	// account-signing sign-state (SignState.name(), "" if unknown) and the
+	// account-age-witness creation time in epoch millis (-1 if none). Field
+	// numbers match the patched upstream grpc.proto OfferInfo (which uses 1-31).
+	AccountAgeWitnessSignState string `protobuf:"bytes,32,opt,name=account_age_witness_sign_state,json=accountAgeWitnessSignState,proto3" json:"account_age_witness_sign_state,omitempty"`
+	AccountAgeWitnessDate      int64  `protobuf:"varint,33,opt,name=account_age_witness_date,json=accountAgeWitnessDate,proto3" json:"account_age_witness_date,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
 }
 
 func (x *OfferInfo) Reset() {
@@ -372,6 +378,20 @@ func (x *OfferInfo) GetIsBsqSwapOffer() bool {
 	return false
 }
 
+func (x *OfferInfo) GetAccountAgeWitnessSignState() string {
+	if x != nil {
+		return x.AccountAgeWitnessSignState
+	}
+	return ""
+}
+
+func (x *OfferInfo) GetAccountAgeWitnessDate() int64 {
+	if x != nil {
+		return x.AccountAgeWitnessDate
+	}
+	return 0
+}
+
 var File_bisq_offers_proto protoreflect.FileDescriptor
 
 const file_bisq_offers_proto_rawDesc = "" +
@@ -381,7 +401,7 @@ const file_bisq_offers_proto_rawDesc = "" +
 	"\tdirection\x18\x01 \x01(\tR\tdirection\x12#\n" +
 	"\rcurrency_code\x18\x02 \x01(\tR\fcurrencyCode\"H\n" +
 	"\x0eGetOffersReply\x126\n" +
-	"\x06offers\x18\x01 \x03(\v2\x1e.io.bisq.protobuffer.OfferInfoR\x06offers\"\xa5\b\n" +
+	"\x06offers\x18\x01 \x03(\v2\x1e.io.bisq.protobuffer.OfferInfoR\x06offers\"\xa2\t\n" +
 	"\tOfferInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\tdirection\x18\x02 \x01(\tR\tdirection\x12\x14\n" +
@@ -412,9 +432,11 @@ const file_bisq_offers_proto_rawDesc = "" +
 	"\fis_activated\x18\x18 \x01(\bR\visActivated\x12\x1e\n" +
 	"\vis_my_offer\x18\x19 \x01(\bR\tisMyOffer\x12-\n" +
 	"\x13is_my_pending_offer\x18\x1a \x01(\bR\x10isMyPendingOffer\x12)\n" +
-	"\x11is_bsq_swap_offer\x18\x1b \x01(\bR\x0eisBsqSwapOffer2c\n" +
+	"\x11is_bsq_swap_offer\x18\x1b \x01(\bR\x0eisBsqSwapOffer\x12B\n" +
+	"\x1eaccount_age_witness_sign_state\x18  \x01(\tR\x1aaccountAgeWitnessSignState\x127\n" +
+	"\x18account_age_witness_date\x18! \x01(\x03R\x15accountAgeWitnessDate2c\n" +
 	"\x06Offers\x12Y\n" +
-	"\tGetOffers\x12%.io.bisq.protobuffer.GetOffersRequest\x1a#.io.bisq.protobuffer.GetOffersReply\"\x00B\"Z dexmonitor/bisq_grpc/go;bisqgrpcb\x06proto3"
+	"\tGetOffers\x12%.io.bisq.protobuffer.GetOffersRequest\x1a#.io.bisq.protobuffer.GetOffersReply\"\x00B%Z#dexunifiedapi/bisq_grpc/go;bisqgrpcb\x06proto3"
 
 var (
 	file_bisq_offers_proto_rawDescOnce sync.Once

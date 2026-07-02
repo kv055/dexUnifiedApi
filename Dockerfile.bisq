@@ -13,6 +13,13 @@ RUN git clone --depth 1 --branch "v${BISQ_VERSION}" --recurse-submodules --shall
 
 WORKDIR /src/bisq
 
+# Surface each maker's account-signing sign-state + account-age-witness date on
+# the gRPC getOffers response (stock OfferInfo strips it), for seller-rating
+# ingestion. If a future BISQ_VERSION refactors the touched files, this apply
+# fails and the build stops here — rebase bisq-patches/offerinfo-witness.patch.
+COPY bisq-patches/offerinfo-witness.patch /tmp/offerinfo-witness.patch
+RUN git apply --3way /tmp/offerinfo-witness.patch
+
 RUN ./gradlew --no-daemon :daemon:installDist -x test
 
 RUN if [ -d daemon/build/install/daemon/lib ]; then \

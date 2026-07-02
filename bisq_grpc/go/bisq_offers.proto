@@ -46,4 +46,10 @@ message OfferInfo {
     bool is_my_offer = 25;
     bool is_my_pending_offer = 26;
     bool is_bsq_swap_offer = 27;
+    // Added by our bisq-patches/offerinfo-witness.patch: the maker's
+    // account-signing sign-state (SignState.name(), "" if unknown) and the
+    // account-age-witness creation time in epoch millis (-1 if none). Field
+    // numbers match the patched upstream grpc.proto OfferInfo (which uses 1-31).
+    string account_age_witness_sign_state = 32;
+    int64 account_age_witness_date = 33;
 }

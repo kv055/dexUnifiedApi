@@ -1,0 +1,160 @@
+diff --git a/core/src/main/java/bisq/core/api/model/OfferInfo.java b/core/src/main/java/bisq/core/api/model/OfferInfo.java
+index 444d0fe..180e043 100644
+--- a/core/src/main/java/bisq/core/api/model/OfferInfo.java
++++ b/core/src/main/java/bisq/core/api/model/OfferInfo.java
+@@ -17,6 +17,8 @@
+ 
+ package bisq.core.api.model;
+ 
++import bisq.core.account.witness.AccountAgeWitness;
++import bisq.core.account.witness.AccountAgeWitnessService;
+ import bisq.core.api.model.builder.OfferInfoBuilder;
+ import bisq.core.monetary.Price;
+ import bisq.core.offer.Offer;
+@@ -78,6 +80,11 @@ public class OfferInfo implements Payload {
+     private final String pubKeyRing;
+     private final String versionNumber;
+     private final int protocolVersion;
++    // Added by dexUnifiedApi bisq-patches/offerinfo-witness.patch: the maker's
++    // account-signing sign-state (SignState.name()) and account-age-witness
++    // creation date in millis (-1 if none), for external reputation monitoring.
++    private final String accountAgeWitnessSignState;
++    private final long accountAgeWitnessDate;
+ 
+     public OfferInfo(OfferInfoBuilder builder) {
+         this.id = builder.getId();
+@@ -111,6 +118,8 @@ public class OfferInfo implements Payload {
+         this.pubKeyRing = builder.getPubKeyRing();
+         this.versionNumber = builder.getVersionNumber();
+         this.protocolVersion = builder.getProtocolVersion();
++        this.accountAgeWitnessSignState = builder.getAccountAgeWitnessSignState();
++        this.accountAgeWitnessDate = builder.getAccountAgeWitnessDate();
+     }
+ 
+     public static OfferInfo toMyInactiveOfferInfo(Offer offer) {
+@@ -127,6 +136,20 @@ public class OfferInfo implements Payload {
+                 .build();
+     }
+ 
++    public static OfferInfo toOfferInfo(Offer offer, AccountAgeWitnessService accountAgeWitnessService) {
++        // Same as toOfferInfo(offer), but also resolves the maker's account-signing
++        // sign-state and account-age-witness date from the witness service (which
++        // the static getBuilder path has no access to). Added for external
++        // reputation monitoring; see dexUnifiedApi bisq-patches/offerinfo-witness.patch.
++        return getBuilder(offer, false)
++                .withIsActivated(true)
++                .withAccountAgeWitnessSignState(accountAgeWitnessService.getSignState(offer).name())
++                .withAccountAgeWitnessDate(accountAgeWitnessService.findWitness(offer)
++                        .map(AccountAgeWitness::getDate)
++                        .orElse(-1L))
++                .build();
++    }
++
+     public static OfferInfo toMyPendingOfferInfo(Offer myNewOffer) {
+         // Use this to build an OfferInfo instance when a new OpenOffer is being
+         // prepared, and no valid OpenOffer state (AVAILABLE, DEACTIVATED) exists.
+@@ -245,6 +268,8 @@ public class OfferInfo implements Payload {
+                 .setPubKeyRing(pubKeyRing)
+                 .setVersionNr(versionNumber)
+                 .setProtocolVersion(protocolVersion)
++                .setAccountAgeWitnessSignState(accountAgeWitnessSignState == null ? "" : accountAgeWitnessSignState)
++                .setAccountAgeWitnessDate(accountAgeWitnessDate)
+                 .build();
+     }
+ 
+@@ -282,6 +307,8 @@ public class OfferInfo implements Payload {
+                 .withPubKeyRing(proto.getPubKeyRing())
+                 .withVersionNumber(proto.getVersionNr())
+                 .withProtocolVersion(proto.getProtocolVersion())
++                .withAccountAgeWitnessSignState(proto.getAccountAgeWitnessSignState())
++                .withAccountAgeWitnessDate(proto.getAccountAgeWitnessDate())
+                 .build();
+     }
+ }
+diff --git a/core/src/main/java/bisq/core/api/model/builder/OfferInfoBuilder.java b/core/src/main/java/bisq/core/api/model/builder/OfferInfoBuilder.java
+index 02e41e3..5b2e62a 100644
+--- a/core/src/main/java/bisq/core/api/model/builder/OfferInfoBuilder.java
++++ b/core/src/main/java/bisq/core/api/model/builder/OfferInfoBuilder.java
+@@ -61,6 +61,8 @@ public final class OfferInfoBuilder {
+     private String pubKeyRing;
+     private String versionNumber;
+     private int protocolVersion;
++    private String accountAgeWitnessSignState;
++    private long accountAgeWitnessDate = -1;
+ 
+     public OfferInfoBuilder withId(String id) {
+         this.id = id;
+@@ -217,6 +219,16 @@ public final class OfferInfoBuilder {
+         return this;
+     }
+ 
++    public OfferInfoBuilder withAccountAgeWitnessSignState(String accountAgeWitnessSignState) {
++        this.accountAgeWitnessSignState = accountAgeWitnessSignState;
++        return this;
++    }
++
++    public OfferInfoBuilder withAccountAgeWitnessDate(long accountAgeWitnessDate) {
++        this.accountAgeWitnessDate = accountAgeWitnessDate;
++        return this;
++    }
++
+     public OfferInfo build() {
+         return new OfferInfo(this);
+     }
+diff --git a/daemon/src/main/java/bisq/daemon/grpc/GrpcOffersService.java b/daemon/src/main/java/bisq/daemon/grpc/GrpcOffersService.java
+index 75c92c7..415724c 100644
+--- a/daemon/src/main/java/bisq/daemon/grpc/GrpcOffersService.java
++++ b/daemon/src/main/java/bisq/daemon/grpc/GrpcOffersService.java
+@@ -17,6 +17,7 @@
+ 
+ package bisq.daemon.grpc;
+ 
++import bisq.core.account.witness.AccountAgeWitnessService;
+ import bisq.core.api.CoreApi;
+ import bisq.core.api.model.OfferInfo;
+ import bisq.core.offer.Offer;
+@@ -80,11 +81,17 @@ class GrpcOffersService extends OffersImplBase {
+ 
+     private final CoreApi coreApi;
+     private final GrpcExceptionHandler exceptionHandler;
++    // Resolves each maker's account-signing sign-state + witness date on the
++    // getOffers list path (see bisq-patches/offerinfo-witness.patch).
++    private final AccountAgeWitnessService accountAgeWitnessService;
+ 
+     @Inject
+-    public GrpcOffersService(CoreApi coreApi, GrpcExceptionHandler exceptionHandler) {
++    public GrpcOffersService(CoreApi coreApi,
++                             GrpcExceptionHandler exceptionHandler,
++                             AccountAgeWitnessService accountAgeWitnessService) {
+         this.coreApi = coreApi;
+         this.exceptionHandler = exceptionHandler;
++        this.accountAgeWitnessService = accountAgeWitnessService;
+     }
+ 
+     @Override
+@@ -178,7 +185,7 @@ class GrpcOffersService extends OffersImplBase {
+         try {
+             List<OfferInfo> result = coreApi.getOffers(req.getDirection(), req.getCurrencyCode())
+                     .stream()
+-                    .map(OfferInfo::toOfferInfo)
++                    .map(offer -> toOfferInfo(offer, accountAgeWitnessService))
+                     .collect(Collectors.toList());
+             var reply = GetOffersReply.newBuilder()
+                     .addAllOffers(result.stream()
+diff --git a/proto/src/main/proto/grpc.proto b/proto/src/main/proto/grpc.proto
+index be4e6c6..3252375 100644
+--- a/proto/src/main/proto/grpc.proto
++++ b/proto/src/main/proto/grpc.proto
+@@ -343,6 +343,12 @@ message OfferInfo {
+     string version_nr = 30;
+     // The bitcoin protocol version used to create the offer.
+     int32 protocol_version = 31;
++    // The maker's account-signing sign-state (SignState.name(), "" if unknown).
++    // Added by dexUnifiedApi bisq-patches/offerinfo-witness.patch for external
++    // reputation monitoring; only populated on the getOffers (list) path.
++    string account_age_witness_sign_state = 32;
++    // The maker's account-age-witness creation time in epoch millis, -1 if none.
++    int64 account_age_witness_date = 33;
+ }
+ 
+ // An offer's current availability status.

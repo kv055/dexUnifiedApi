@@ -107,6 +107,58 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.Pct, 0.7)
 }
 
+func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
+	oldHub := hub
+	oldPrices := cexPrices
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	defer func() {
+		hub = oldHub
+		cexPrices = oldPrices
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+	}()
+
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	cexPrices = map[string]float64{"kraken": 100}
+
+	est := tradecost.NewFixedEstimatorForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.01
+	btcMax := 0.1
+	score := 82.5
+	conf := "feedback_verified"
+	hub.offers = []LiveOffer{{
+		ID:                     1,
+		Exchange:               "bisq",
+		Direction:              "buy",
+		Price:                  102.5,
+		BTCMin:                 &btcMin,
+		BTCMax:                 &btcMax,
+		FirstSeen:              "2026-04-01 12:00:00",
+		LastSeen:               "2026-04-01 12:00:00",
+		SellerRatingScore:      &score,
+		SellerRatingConfidence: &conf,
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
+	rec := httptest.NewRecorder()
+	handleLiveOffersREST(rec, req)
+
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := raw[0]["seller_rating_score"]; !ok {
+		t.Fatalf("seller_rating_score missing from live offers API response: %s", rec.Body.String())
+	}
+	if _, ok := raw[0]["seller_rating_confidence"]; !ok {
+		t.Fatalf("seller_rating_confidence missing from live offers API response: %s", rec.Body.String())
+	}
+}
+
 func TestLiveOffersRESTUsesRealSecurityDepositFromOffer(t *testing.T) {
 	oldHub := hub
 	oldPrices := cexPrices

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"dexunifiedapi/internal/sellerrating"
 	"dexunifiedapi/internal/testdb"
 )
 
@@ -208,7 +209,7 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 		BTCMax:             &btcMax,
 		FiatMin:            &fiatMin,
 		FiatMax:            &fiatMax,
-		PaymentMethods: []string{"SEPA"},
+		PaymentMethods:     []string{"SEPA"},
 		PriceType:          priceType,
 		SecurityDepositBTC: &depositBTC,
 		SecurityDepositPct: &depositPct,
@@ -243,12 +244,12 @@ func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 	// Offers with NO stable id fall back to fingerprint identity, so identical-terms
 	// id-less offers collapse onto one row and emit one baseline/hub entry per cycle.
 	dup := offer{
-		FiatCurrency:  "EUR",
-		Price:         51899,
-		BTCMin:        &btcMin,
-		BTCMax:        &btcMax,
+		FiatCurrency:   "EUR",
+		Price:          51899,
+		BTCMin:         &btcMin,
+		BTCMax:         &btcMax,
 		PaymentMethods: []string{"SEPA"},
-		PriceType:     priceType,
+		PriceType:      priceType,
 	}
 	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{dup, dup, dup})
 
@@ -264,7 +265,127 @@ func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 	}
 }
 
-func intPtr(v int) *int { return &v }
+func TestMapHodlHodlTrader(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		trader   hodlHodlTrader
+		wantConf sellerrating.Confidence
+		// wantMin/Max bound the expected score (shrinkage makes exact values noisy).
+		wantMin, wantMax float64
+	}{
+		{
+			name:     "no rating yet (nil) sits near the prior, tagged new",
+			trader:   hodlHodlTrader{TradesCount: 0, Rating: floatPtr(0)}, // Rating ignored when nil; use nil below
+			wantConf: sellerrating.ConfidenceFeedbackNew,
+			wantMin:  80, wantMax: 90,
+		},
+		{
+			name:     "few good trades stay new",
+			trader:   hodlHodlTrader{TradesCount: 3, Rating: floatPtr(1.0)},
+			wantConf: sellerrating.ConfidenceFeedbackNew,
+			wantMin:  85, wantMax: 92,
+		},
+		{
+			name:     "many good trades verified",
+			trader:   hodlHodlTrader{TradesCount: 200, Rating: floatPtr(0.98)},
+			wantConf: sellerrating.ConfidenceFeedbackVerified,
+			wantMin:  95, wantMax: 100,
+		},
+		{
+			name:     "strong hodler bonus applied, capped at 100",
+			trader:   hodlHodlTrader{TradesCount: 500, Rating: floatPtr(1.0), StrongHodler: true},
+			wantConf: sellerrating.ConfidenceFeedbackVerified,
+			wantMin:  99, wantMax: 100,
+		},
+	}
+	// First case exercises the genuine nil-rating path.
+	tests[0].trader.Rating = nil
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := mapHodlHodlTrader(tc.trader)
+			if s.Value == nil {
+				t.Fatal("Value = nil, want a number")
+			}
+			if *s.Value < tc.wantMin || *s.Value > tc.wantMax {
+				t.Fatalf("Value = %v, want in [%v,%v]", *s.Value, tc.wantMin, tc.wantMax)
+			}
+			if s.Confidence != tc.wantConf {
+				t.Fatalf("Confidence = %q, want %q", s.Confidence, tc.wantConf)
+			}
+		})
+	}
+}
+
+func TestSaveSnapshotPersistsSellerRating(t *testing.T) {
+	db := testdb.Open(t)
+	btcMin := 0.01
+	btcMax := 0.02
+
+	// A populated feedback score and a bisq-style unavailable (all-NULL) score
+	// must both round-trip through the new columns and the ?::jsonb cast.
+	rated := offer{
+		OfferID:      "hh-rated-1",
+		FiatCurrency: "EUR",
+		Price:        61000,
+		BTCMin:       &btcMin,
+		BTCMax:       &btcMax,
+		PriceType:    priceTypeFixed(),
+	}
+	applyRating(&rated, mapHodlHodlTrader(hodlHodlTrader{TradesCount: 42, Rating: floatPtr(0.98), StrongHodler: true}))
+	saveSnapshot(db, "hodlhodl", "EUR", "sell", 60000, []offer{rated})
+
+	var gotScore *float64
+	var gotConf *string
+	var gotRaw *string
+	if err := db.QueryRow(`SELECT seller_rating_score, seller_rating_confidence, seller_rating_raw::text
+		FROM offers WHERE exchange = ? AND offer_id = ?`, "hodlhodl", "hh-rated-1").Scan(&gotScore, &gotConf, &gotRaw); err != nil {
+		t.Fatalf("read rated offer: %v", err)
+	}
+	if gotScore == nil || *gotScore <= 0 || *gotScore > 100 {
+		t.Fatalf("seller_rating_score = %v, want a value in (0,100]", gotScore)
+	}
+	if gotConf == nil || *gotConf != string(sellerrating.ConfidenceFeedbackVerified) {
+		t.Fatalf("seller_rating_confidence = %v, want %q", gotConf, sellerrating.ConfidenceFeedbackVerified)
+	}
+	if gotRaw == nil {
+		t.Fatal("seller_rating_raw = NULL, want a JSON blob")
+	}
+
+	// Unavailable path stores NULL score/raw and the literal 'unavailable'.
+	unrated := offer{
+		OfferID:      "bisq-unrated-1",
+		FiatCurrency: "EUR",
+		Price:        61000,
+		BTCMin:       &btcMin,
+		BTCMax:       &btcMax,
+		PriceType:    priceTypeFixed(),
+	}
+	applyRating(&unrated, sellerrating.Unavailable())
+	saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{unrated})
+
+	var uScore *float64
+	var uConf *string
+	var uRaw *string
+	if err := db.QueryRow(`SELECT seller_rating_score, seller_rating_confidence, seller_rating_raw::text
+		FROM offers WHERE exchange = ? AND offer_id = ?`, "bisq", "bisq-unrated-1").Scan(&uScore, &uConf, &uRaw); err != nil {
+		t.Fatalf("read unrated offer: %v", err)
+	}
+	if uScore != nil {
+		t.Fatalf("seller_rating_score = %v, want NULL", *uScore)
+	}
+	if uRaw != nil {
+		t.Fatalf("seller_rating_raw = %v, want NULL", *uRaw)
+	}
+	if uConf == nil || *uConf != string(sellerrating.ConfidenceUnavailable) {
+		t.Fatalf("seller_rating_confidence = %v, want %q", uConf, sellerrating.ConfidenceUnavailable)
+	}
+}
+
+func intPtr(v int) *int           { return &v }
 func floatPtr(v float64) *float64 { return &v }
 
 func TestMapPeachOffer(t *testing.T) {
@@ -273,11 +394,14 @@ func TestMapPeachOffer(t *testing.T) {
 	sellAmount, _ := json.Marshal(int64(30000))
 	buyAmount, _ := json.Marshal([]int64{598730, 598730})
 
+	verified := sellerrating.NormalizeReputationScore(5, 5, nil) // Value=100, reputation_bonded
+
 	tests := []struct {
 		name      string
 		in        peachOffer
 		direction string
 		btcPrice  int
+		rating    sellerrating.Score
 		wantOK    bool
 		wantFiat  int
 		wantBTC   float64
@@ -292,6 +416,7 @@ func TestMapPeachOffer(t *testing.T) {
 			},
 			direction: "sell",
 			btcPrice:  55359,
+			rating:    verified,
 			wantOK:    true,
 			wantFiat:  17,
 			wantBTC:   0.0003,
@@ -339,12 +464,21 @@ func TestMapPeachOffer(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := mapPeachOffer(tc.in, tc.direction, tc.btcPrice)
+			got, ok := mapPeachOffer(tc.in, tc.direction, tc.btcPrice, tc.rating)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
 			if !ok {
 				return
+			}
+			// The passed-in Score must thread onto the offer's rating fields.
+			if tc.rating.Value != nil {
+				if got.SellerRatingScore == nil || *got.SellerRatingScore != *tc.rating.Value {
+					t.Fatalf("seller_rating_score = %v, want %v", got.SellerRatingScore, *tc.rating.Value)
+				}
+				if got.SellerRatingConfidence == nil || *got.SellerRatingConfidence != string(tc.rating.Confidence) {
+					t.Fatalf("seller_rating_confidence = %v, want %q", got.SellerRatingConfidence, tc.rating.Confidence)
+				}
 			}
 			if got.FiatMin == nil || got.FiatMax == nil || *got.FiatMin != *got.FiatMax {
 				t.Fatalf("fiat min/max = %v/%v, want equal fixed size", got.FiatMin, got.FiatMax)
@@ -497,22 +631,22 @@ func TestSaveSnapshotSkipsDustOffersWhenFiltered(t *testing.T) {
 	db := testdb.Open(t)
 	priceType := priceTypeFixed()
 	dust := offer{
-		OfferID:       "dust-offer",
-		FiatCurrency:  "EUR",
-		Price:         60000,
-		FiatMax:       intPtr(0),
-		BTCMax:        floatPtr(0.000008),
+		OfferID:        "dust-offer",
+		FiatCurrency:   "EUR",
+		Price:          60000,
+		FiatMax:        intPtr(0),
+		BTCMax:         floatPtr(0.000008),
 		PaymentMethods: []string{"SEPA"},
-		PriceType:     priceType,
+		PriceType:      priceType,
 	}
 	ok := offer{
-		OfferID:       "ok-offer",
-		FiatCurrency:  "EUR",
-		Price:         60000,
-		FiatMax:       intPtr(100),
-		BTCMax:        floatPtr(0.01),
+		OfferID:        "ok-offer",
+		FiatCurrency:   "EUR",
+		Price:          60000,
+		FiatMax:        intPtr(100),
+		BTCMax:         floatPtr(0.01),
 		PaymentMethods: []string{"SEPA"},
-		PriceType:     priceType,
+		PriceType:      priceType,
 	}
 	live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, filterDustOffers([]offer{dust, ok}))
 	if len(live) != 1 {
@@ -538,13 +672,13 @@ func TestSaveSnapshotKeepsDistinctIdOffersWithSameFingerprint(t *testing.T) {
 	// ids, each must get its own row — the fingerprint fallback must NOT merge them.
 	mk := func(id string) offer {
 		return offer{
-			OfferID:       id,
-			FiatCurrency:  "EUR",
-			Price:         51899,
-			BTCMin:        &btcMin,
-			BTCMax:        &btcMax,
+			OfferID:        id,
+			FiatCurrency:   "EUR",
+			Price:          51899,
+			BTCMin:         &btcMin,
+			BTCMax:         &btcMax,
 			PaymentMethods: []string{"revolut"},
-			PriceType:     priceType,
+			PriceType:      priceType,
 		}
 	}
 	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{mk("p-1"), mk("p-2"), mk("p-3")})
