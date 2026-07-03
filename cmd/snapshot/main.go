@@ -702,14 +702,9 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
 }
 
-// normalizeHodlHodlMethod normalizes a single HodlHodl payment method name.
+// normalizeHodlHodlMethod passes HodlHodl labels through; canonicalization in
+// commons/paymentmethods handles SEPA and national-bank variants.
 func normalizeHodlHodlMethod(method string) string {
-	if strings.Contains(method, "SEPA") {
-		return "SEPA"
-	}
-	if strings.Contains(method, "Any national bank") {
-		return "NATIONAL_BANK"
-	}
 	return method
 }
 
@@ -748,16 +743,6 @@ func normalizePeachMethod(raw string) string {
 		parts[i] = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
 	}
 	out := strings.Join(parts, " ")
-	switch out {
-	case "Sepa":
-		return "SEPA"
-	case "Instant Sepa":
-		return "Instant SEPA"
-	case "Mb Way":
-		return "MB Way"
-	case "Paypal":
-		return "PayPal"
-	}
 	return out
 }
 

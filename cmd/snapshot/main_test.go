@@ -54,15 +54,15 @@ func TestNormalizePeachMethod(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{"sepa", "SEPA"},
-		{"instantSepa", "Instant SEPA"},
+		{"sepa", "Sepa"},
+		{"instantSepa", "Instant Sepa"},
 		{"nationalTransferDE", "National Transfer"},
 		{"nationalTransferFR", "National Transfer"},
 		{"revolut", "Revolut"},
 		{"wise", "Wise"},
-		{"paypal", "PayPal"},
+		{"paypal", "Paypal"},
 		{"n26", "N26"},
-		{"mbWay", "MB Way"},
+		{"mbWay", "Mb Way"},
 		{"bizum", "Bizum"},
 		{"twint", "Twint"},
 		{"vipps", "Vipps"},
