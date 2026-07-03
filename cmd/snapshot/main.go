@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	bisqgrpc "dexunifiedapi/bisq_grpc/go"
@@ -140,6 +139,11 @@ type offer struct {
 	SellerRatingScore      *float64        `json:"seller_rating_score,omitempty"`
 	SellerRatingConfidence *string         `json:"seller_rating_confidence,omitempty"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
+	// MakerID is the exchange's seller identity, sent to the unified-api server
+	// so it can look up a per-maker reputation for offers it marks profitable.
+	// Only Peach sets it (its listing omits the rating); not persisted to the
+	// offers table.
+	MakerID string `json:"maker_id,omitempty"`
 }
 
 // applyRating copies a normalized sellerrating.Score onto an offer. Every
@@ -185,6 +189,9 @@ type livePayload struct {
 	SellerRatingScore      *float64        `json:"seller_rating_score"`
 	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
+	// MakerID lets the server look up a per-maker reputation for offers it marks
+	// profitable (Peach only; its listing omits the rating).
+	MakerID string `json:"maker_id,omitempty"`
 }
 
 func priceTypeFixed() *string    { s := "fixed"; return &s }
@@ -761,7 +768,7 @@ func normalizeAllPeachMethods(raw []string) []string {
 // Peach uses fixed-size orders: amount is either a single satoshi value (sell) or
 // [min, max] with min == max (buy). For sells, prices.EUR is the total fiat volume
 // of the trade, not EUR/BTC.
-func mapPeachOffer(o peachOffer, direction string, btcPrice int, rating sellerrating.Score) (offer, bool) {
+func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
 	methods, hasEUR := o.MeansOfPayment["EUR"]
 	if !hasEUR || len(methods) == 0 {
 		return offer{}, false
@@ -820,8 +827,11 @@ func mapPeachOffer(o peachOffer, direction string, btcPrice int, rating sellerra
 		FiatMax:        &fiatMax,
 		PaymentMethods: normalizeAllPeachMethods(methods),
 		PriceType:      priceTypeFixed(),
+		// Peach's offer listing has no seller rating; the maker id is carried to
+		// the unified-api server, which looks the rating up only for offers it
+		// marks net-profitable (see cmd/server/peach_reputation.go).
+		MakerID: o.User.ID,
 	}
-	applyRating(&result, rating)
 	return result, true
 }
 
@@ -831,131 +841,10 @@ type peachOffer struct {
 	MeansOfPayment map[string][]string `json:"meansOfPayment"`
 	Prices         map[string]float64  `json:"prices"`
 	// User carries only the maker id inline; reputation lives behind a separate
-	// GET /v1/user/:id call (see fetchPeachRatings).
+	// GET /v1/user/:id call, done by the server for profitable offers.
 	User struct {
 		ID string `json:"id"`
 	} `json:"user"`
-}
-
-// peachUserReputation is the maker profile returned by GET /v1/user/:id.
-type peachUserReputation struct {
-	Rating      float64 `json:"rating"` // -1..1
-	RatingCount int     `json:"ratingCount"`
-	Trades      int     `json:"trades"`
-	Disputes    struct {
-		Opened int `json:"opened"`
-		Won    int `json:"won"`
-		Lost   int `json:"lost"`
-	} `json:"disputes"`
-}
-
-const (
-	// Shrinkage parameters for Peach's peer-feedback rating, mirroring HodlHodl.
-	peachRatingPriorMean   = 0.85
-	peachRatingPriorWeight = 10
-	peachVerifiedThreshold = 5
-	// peachDisputePenaltyPts is subtracted per lost dispute, since a rolling
-	// rating average alone can under-weight a clear-cut dispute loss.
-	peachDisputePenaltyPts = 5.0
-	// peachUserFetchWorkers/Timeout bound the per-maker reputation lookups so a
-	// slow response can't stall the snapshot cycle.
-	peachUserFetchWorkers = 8
-	peachUserFetchTimeout = 8 * time.Second
-)
-
-// mapPeachReputation normalizes a Peach maker profile into a Score. Peach's
-// rating is -1..1, so it is rescaled to 0..1 before the shared feedback
-// formula, then a bounded penalty is applied per lost dispute. Kept separate
-// from the network call so it is unit-testable.
-func mapPeachReputation(r peachUserReputation) sellerrating.Score {
-	rescaled := (r.Rating + 1) / 2
-	raw, _ := json.Marshal(map[string]any{
-		"rating":        r.Rating,
-		"rating_count":  r.RatingCount,
-		"trades":        r.Trades,
-		"disputes_lost": r.Disputes.Lost,
-	})
-	s := sellerrating.NormalizeFeedbackRating(
-		&rescaled, r.RatingCount,
-		peachRatingPriorMean, peachRatingPriorWeight, peachVerifiedThreshold,
-		raw,
-	)
-	return sellerrating.ApplyDisputePenalty(s, r.Disputes.Lost, peachDisputePenaltyPts)
-}
-
-// fetchPeachUserReputation fetches one maker's profile with a caller-supplied
-// context (for the per-call timeout).
-func fetchPeachUserReputation(ctx context.Context, userID string) (peachUserReputation, error) {
-	var rep peachUserReputation
-	reqURL := "https://api.peachbitcoin.com/v1/user/" + url.PathEscape(userID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return rep, err
-	}
-	resp, err := clearnetClient().Do(req)
-	if err != nil {
-		return rep, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return rep, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &rep); err != nil {
-		return rep, err
-	}
-	return rep, nil
-}
-
-// fetchPeachRatings resolves each DISTINCT maker id in offers to a normalized
-// Score, once per maker (many offers share a maker), using a bounded worker
-// pool. A failed/timed-out lookup degrades to Unavailable() for that maker
-// rather than failing the whole snapshot cycle.
-func fetchPeachRatings(offers []peachOffer) map[string]sellerrating.Score {
-	ids := make(map[string]bool)
-	for _, o := range offers {
-		if o.User.ID != "" {
-			ids[o.User.ID] = true
-		}
-	}
-	result := make(map[string]sellerrating.Score, len(ids))
-	if len(ids) == 0 {
-		return result
-	}
-
-	workers := peachUserFetchWorkers
-	if len(ids) < workers {
-		workers = len(ids)
-	}
-	idCh := make(chan string)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for id := range idCh {
-				ctx, cancel := context.WithTimeout(context.Background(), peachUserFetchTimeout)
-				rep, err := fetchPeachUserReputation(ctx, id)
-				cancel()
-				score := sellerrating.Unavailable()
-				if err == nil {
-					score = mapPeachReputation(rep)
-				} else {
-					fmt.Printf("[PeachBitcoin] reputation fetch failed for %s: %v\n", id, err)
-				}
-				mu.Lock()
-				result[id] = score
-				mu.Unlock()
-			}
-		}()
-	}
-	for id := range ids {
-		idCh <- id
-	}
-	close(idCh)
-	wg.Wait()
-	return result
 }
 
 func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
@@ -1008,15 +897,9 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 		}
 	}
 
-	ratings := fetchPeachRatings(allOffers)
-
 	var offers []offer
 	for _, o := range allOffers {
-		rating := sellerrating.Unavailable()
-		if s, ok := ratings[o.User.ID]; ok {
-			rating = s
-		}
-		mapped, ok := mapPeachOffer(o, direction, btcPrice, rating)
+		mapped, ok := mapPeachOffer(o, direction, btcPrice)
 		if !ok {
 			continue
 		}
@@ -1202,18 +1085,19 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		}
 
 		live := livePayload{
-			Exchange:           exchange,
-			FiatCurrency:       fiat,
-			Direction:          direction,
-			Price:              o.Price,
-			BTCMin:             o.BTCMin,
-			BTCMax:             o.BTCMax,
-			PriceType:          o.PriceType,
-			SecurityDepositBTC: o.SecurityDepositBTC,
-			SecurityDepositPct: o.SecurityDepositPct,
+			Exchange:               exchange,
+			FiatCurrency:           fiat,
+			Direction:              direction,
+			Price:                  o.Price,
+			BTCMin:                 o.BTCMin,
+			BTCMax:                 o.BTCMax,
+			PriceType:              o.PriceType,
+			SecurityDepositBTC:     o.SecurityDepositBTC,
+			SecurityDepositPct:     o.SecurityDepositPct,
 			SellerRatingScore:      o.SellerRatingScore,
 			SellerRatingConfidence: o.SellerRatingConfidence,
 			SellerRatingRaw:        o.SellerRatingRaw,
+			MakerID:                o.MakerID,
 		}
 		if o.FiatMin != nil {
 			v := int64(*o.FiatMin)

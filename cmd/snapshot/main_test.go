@@ -394,14 +394,11 @@ func TestMapPeachOffer(t *testing.T) {
 	sellAmount, _ := json.Marshal(int64(30000))
 	buyAmount, _ := json.Marshal([]int64{598730, 598730})
 
-	verified := sellerrating.NormalizeReputationScore(5, 5, nil) // Value=100, reputation_bonded
-
 	tests := []struct {
 		name      string
 		in        peachOffer
 		direction string
 		btcPrice  int
-		rating    sellerrating.Score
 		wantOK    bool
 		wantFiat  int
 		wantBTC   float64
@@ -416,7 +413,6 @@ func TestMapPeachOffer(t *testing.T) {
 			},
 			direction: "sell",
 			btcPrice:  55359,
-			rating:    verified,
 			wantOK:    true,
 			wantFiat:  17,
 			wantBTC:   0.0003,
@@ -464,21 +460,20 @@ func TestMapPeachOffer(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := mapPeachOffer(tc.in, tc.direction, tc.btcPrice, tc.rating)
+			got, ok := mapPeachOffer(tc.in, tc.direction, tc.btcPrice)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
 			if !ok {
 				return
 			}
-			// The passed-in Score must thread onto the offer's rating fields.
-			if tc.rating.Value != nil {
-				if got.SellerRatingScore == nil || *got.SellerRatingScore != *tc.rating.Value {
-					t.Fatalf("seller_rating_score = %v, want %v", got.SellerRatingScore, *tc.rating.Value)
-				}
-				if got.SellerRatingConfidence == nil || *got.SellerRatingConfidence != string(tc.rating.Confidence) {
-					t.Fatalf("seller_rating_confidence = %v, want %q", got.SellerRatingConfidence, tc.rating.Confidence)
-				}
+			// Peach offers carry the maker id (for the server's profit-gated
+			// rating lookup) and no rating of their own at snapshot time.
+			if got.MakerID != tc.in.User.ID {
+				t.Fatalf("MakerID = %q, want %q", got.MakerID, tc.in.User.ID)
+			}
+			if got.SellerRatingScore != nil || got.SellerRatingConfidence != nil {
+				t.Fatalf("Peach offer should have no rating at snapshot time, got score=%v conf=%v", got.SellerRatingScore, got.SellerRatingConfidence)
 			}
 			if got.FiatMin == nil || got.FiatMax == nil || *got.FiatMin != *got.FiatMax {
 				t.Fatalf("fiat min/max = %v/%v, want equal fixed size", got.FiatMin, got.FiatMax)
@@ -496,6 +491,26 @@ func TestMapPeachOffer(t *testing.T) {
 				t.Fatalf("sell price = %f, want EUR/BTC not total fiat", got.Price)
 			}
 		})
+	}
+}
+
+func TestMapPeachOfferCarriesMakerID(t *testing.T) {
+	t.Parallel()
+	amount, _ := json.Marshal(int64(30000))
+	in := peachOffer{
+		ID:             "361418",
+		Amount:         amount,
+		MeansOfPayment: map[string][]string{"EUR": {"revolut"}},
+		Prices:         map[string]float64{"EUR": 17},
+	}
+	in.User.ID = "maker-9"
+
+	got, ok := mapPeachOffer(in, "sell", 55359)
+	if !ok {
+		t.Fatal("mapPeachOffer returned ok=false")
+	}
+	if got.MakerID != "maker-9" {
+		t.Fatalf("MakerID = %q, want %q", got.MakerID, "maker-9")
 	}
 }
 

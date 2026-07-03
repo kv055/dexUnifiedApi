@@ -61,6 +61,9 @@ type LiveOffer struct {
 	SellerRatingScore      *float64        `json:"seller_rating_score"`
 	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw"`
+	// MakerID is the exchange's seller identity, used to look up a per-maker
+	// reputation for profitable offers (Peach only; its listing omits the rating).
+	MakerID string `json:"maker_id,omitempty"`
 }
 
 // LifecyclePoint is a single price observation from the order_lifecycle table.
@@ -157,19 +160,19 @@ type liveOfferAnalysis struct {
 }
 
 type liveOfferAPI struct {
-	ID            int64                  `json:"id"`
-	Exchange      string                 `json:"exchange"`
-	OfferID       string                 `json:"offer_id"`
-	PaymentMethods []string              `json:"payment_methods"`
-	Direction     string                 `json:"direction"`
-	Status        liveOfferStatus        `json:"status"`
-	Pricing       liveOfferPricing       `json:"pricing"`
-	VolumeLimits  liveOfferVolumeLimits  `json:"volume_limits"`
-	BTCNetworkFee liveOfferBTCNetworkFee `json:"btc_network_fee"`
-	Analysis      liveOfferAnalysis      `json:"analysis"`
-	SellerRatingScore      *float64        `json:"seller_rating_score"`
-	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
-	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
+	ID                     int64                  `json:"id"`
+	Exchange               string                 `json:"exchange"`
+	OfferID                string                 `json:"offer_id"`
+	PaymentMethods         []string               `json:"payment_methods"`
+	Direction              string                 `json:"direction"`
+	Status                 liveOfferStatus        `json:"status"`
+	Pricing                liveOfferPricing       `json:"pricing"`
+	VolumeLimits           liveOfferVolumeLimits  `json:"volume_limits"`
+	BTCNetworkFee          liveOfferBTCNetworkFee `json:"btc_network_fee"`
+	Analysis               liveOfferAnalysis      `json:"analysis"`
+	SellerRatingScore      *float64               `json:"seller_rating_score"`
+	SellerRatingConfidence *string                `json:"seller_rating_confidence"`
+	SellerRatingRaw        json.RawMessage        `json:"seller_rating_raw,omitempty"`
 }
 
 // liveOutOffer is the shape sent to clients — includes computed premium fields.
@@ -299,11 +302,11 @@ func buildBTCLiveNetworkFee(bd tradecost.CostBreakdown, requiredConfirmations in
 func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 	requiredConfirmations := tradecost.ResolveRequiredConfirmations(o.Direction, sub.requiredConfirmations)
 	api := liveOfferAPI{
-		ID:            o.ID,
-		Exchange:      o.Exchange,
-		OfferID:       derefStringOrEmpty(o.OfferID),
+		ID:             o.ID,
+		Exchange:       o.Exchange,
+		OfferID:        derefStringOrEmpty(o.OfferID),
 		PaymentMethods: o.PaymentMethods,
-		Direction:     o.Direction,
+		Direction:      o.Direction,
 		Status: liveOfferStatus{
 			IsLive:    o.IsLive,
 			FirstSeen: o.FirstSeen,

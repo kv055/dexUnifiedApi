@@ -217,7 +217,7 @@ func offerExists(t *testing.T, db *dbutil.DB, offerID int64) bool {
 func TestClosedOfferEverNetProfitableIsNotDeleted(t *testing.T) {
 	db := openClosedOfferAnalysisDB(t)
 	offerID := insertClosedOffer(t, db, nil)
-	insertLifecycleRow(t, db, offerID, 5, 2, 3, 0.003, 0.1)    // profitable snapshot
+	insertLifecycleRow(t, db, offerID, 5, 2, 3, 0.003, 0.1)     // profitable snapshot
 	insertLifecycleRow(t, db, offerID, -12, 0, -12, -0.01, 0.1) // drags avg premium to -3.5%
 
 	status, removed := analyzeSingleClosedOffer(db, closedOfferRecord{id: offerID})
