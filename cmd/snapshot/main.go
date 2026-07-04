@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	bisqgrpc "dexunifiedapi/bisq_grpc/go"
@@ -712,8 +713,11 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 
 // normalizePeachMethod converts a Peach Bitcoin payment-method identifier
 // (e.g. "sepa", "instantSepa", "nationalTransferDE", "mbWay") into a
-// human-readable form aligned with the keyword rules used by
-// dexMonitor/internal/paymentmethods/groups.go.
+// human-readable form. This is an exchange-specific PRE-normalizer (camelCase
+// splitting, per-country nationalTransferXX collapse), not a second registry:
+// its output still flows through paymentmethods.CanonicalizeAll before the
+// offers upsert, so the payment_methods table remains the source of truth for
+// merging and categorization.
 func normalizePeachMethod(raw string) string {
 	if raw == "" {
 		return ""
@@ -1022,6 +1026,55 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 
 // --- Database ---
 
+// unknownPaymentMethods accumulates canonical atoms that have no
+// payment_methods row yet; flushed once per run as Others/inactive rows so
+// they surface in the categorization panel instead of only in logs.
+var unknownPaymentMethods = struct {
+	sync.Mutex
+	names map[string]struct{}
+}{names: make(map[string]struct{})}
+
+func collectUnknownPaymentMethods(methods []string) {
+	reg := paymentmethods.Default()
+	unknownPaymentMethods.Lock()
+	defer unknownPaymentMethods.Unlock()
+	for _, m := range methods {
+		m = strings.TrimSpace(m)
+		// Length cap guards against junky free-text labels (RoboSats) becoming
+		// unbounded catalog rows.
+		if m == "" || len(m) > 64 || reg.IsRegisteredCanonical(m) {
+			continue
+		}
+		unknownPaymentMethods.names[m] = struct{}{}
+	}
+}
+
+func flushUnknownPaymentMethods(ctx context.Context, sdb *dbutil.DB) {
+	unknownPaymentMethods.Lock()
+	names := make([]string, 0, len(unknownPaymentMethods.names))
+	for name := range unknownPaymentMethods.names {
+		names = append(names, name)
+	}
+	unknownPaymentMethods.names = make(map[string]struct{})
+	unknownPaymentMethods.Unlock()
+	if len(names) == 0 {
+		return
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		res, err := sdb.Exec(`INSERT INTO payment_methods (name, category)
+			VALUES (?, 'Others')
+			ON CONFLICT (name) DO NOTHING`, name)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to register unknown payment method", "name", name, "err", err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			slog.InfoContext(ctx, "registered unknown payment method as Others/inactive", "name", name)
+		}
+	}
+}
+
 func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice float64, offers []offer) []livePayload {
 	if len(offers) == 0 {
 		fmt.Printf("[%s] No offers to save\n", exchange)
@@ -1105,6 +1158,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		if methods := paymentmethods.CanonicalizeAll(o.PaymentMethods); len(methods) > 0 {
 			o.PaymentMethods = methods
 			live.PaymentMethods = methods
+			collectUnknownPaymentMethods(methods)
 		}
 		if o.OfferID != "" {
 			offerID := o.OfferID
@@ -1294,6 +1348,23 @@ func main() {
 		slog.ErrorContext(ctx, "failed to initialize schema", "err", err)
 		os.Exit(1)
 	}
+	if err := dbutil.SeedPaymentMethods(sdb); err != nil {
+		slog.ErrorContext(ctx, "failed to seed payment methods", "err", err)
+		os.Exit(1)
+	}
+	// Canonicalization must run against the live payment_methods table, not the
+	// built-in fallback — offers written with a stale registry would need a
+	// re-snapshot to heal. Hard-fail like the schema step above.
+	pmRows, err := paymentmethods.LoadRows(ctx, sdb.DB)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to load payment methods registry", "err", err)
+		os.Exit(1)
+	}
+	pmRegistry := paymentmethods.NewRegistry(pmRows)
+	for _, w := range pmRegistry.Warnings() {
+		slog.WarnContext(ctx, "payment methods registry", "warning", w)
+	}
+	paymentmethods.SetDefault(pmRegistry)
 
 	// Fetch and store Kraken OHLC candles before settlement
 	stage(ctx, "snapshot.fetch_ohlc", func() { fetchAndStoreKrakenOHLC(sdb) })
@@ -1336,6 +1407,8 @@ func main() {
 			}
 		}
 	})
+
+	stage(ctx, "snapshot.register_unknown_payment_methods", func() { flushUnknownPaymentMethods(ctx, sdb) })
 
 	// Update is_live and duration in one pass:
 	// - live offers: is_live=true, duration=NULL, closure analysis fields cleared

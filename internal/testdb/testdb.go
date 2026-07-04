@@ -49,6 +49,9 @@ func Open(t *testing.T) *dbutil.DB {
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		t.Fatalf("apply postgres test schema: %v", err)
 	}
+	if err := dbutil.SeedPaymentMethods(db); err != nil {
+		t.Fatalf("seed payment methods: %v", err)
+	}
 	return db
 }
 

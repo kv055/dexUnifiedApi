@@ -238,6 +238,10 @@ func main() {
 		slog.Error("schema init error", "err", err)
 		os.Exit(1)
 	}
+	if err := dbutil.SeedPaymentMethods(db); err != nil {
+		slog.Error("payment methods seed error", "err", err)
+		os.Exit(1)
+	}
 
 	// Dashboard login session: unified-api only VALIDATES the shared dex_session
 	// cookie (stored in the same Postgres `sessions` table dexMonitor creates);
