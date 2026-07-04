@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +17,24 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// upgrader restricts the origin to same-origin: /ws/live_offers is gated by the
+// shared dashboard session cookie, so allowing any origin would let a page on
+// another site open the stream with a logged-in operator's cookie (cross-site
+// WebSocket hijacking). A missing Origin (non-browser clients) is allowed.
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: sameOriginWS,
+}
+
+func sameOriginWS(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 // LiveOffer holds a single live offer pushed by the snapshot tool.
@@ -344,10 +361,6 @@ func ptrScenario(s liveOfferScenario) *liveOfferScenario {
 	return &s
 }
 
-func computePriceDiffPct(offerPrice, refPrice float64) float64 {
-	return lifecycle.PriceDiffPct(offerPrice, refPrice)
-}
-
 func computeDirectionalPremiumPct(direction string, offerPrice, refPrice float64) float64 {
 	return lifecycle.DirectionalPremiumPct(direction, offerPrice, refPrice)
 }
@@ -360,14 +373,6 @@ func selectBTCTradeSize(btcMax, btcMin *float64) float64 {
 		return *btcMin
 	}
 	return tradecost.DefaultBTCTradeSize()
-}
-
-func computeNetPremiumFields(premiumPct float64, btcSize float64, dexExchange string, direction string) (float64, float64, tradecost.CostBreakdown) {
-	return computeNetPremiumFieldsWithConfirmations(premiumPct, btcSize, dexExchange, direction, 0)
-}
-
-func computeNetPremiumFieldsWithConfirmations(premiumPct float64, btcSize float64, dexExchange string, direction string, requiredConfirmations int) (float64, float64, tradecost.CostBreakdown) {
-	return computeNetPremiumFieldsFull(premiumPct, btcSize, 0, dexExchange, direction, requiredConfirmations, nil, "", true, nil)
 }
 
 func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedCEXes []string, feeTier string, coupledHedge bool, realDepositPct *float64) (float64, float64, tradecost.CostBreakdown) {
@@ -409,14 +414,6 @@ type liveSubscription struct {
 var hub = &LiveHub{
 	lifecycle:   make(map[int64][]LifecyclePoint),
 	subscribers: make(map[chan []byte]liveSubscription),
-}
-
-// setLifecycle replaces the in-memory lifecycle cache (called before setOffers
-// so that the subsequent broadcast already includes fresh lifecycle points).
-func (h *LiveHub) setLifecycle(lc map[int64][]LifecyclePoint) {
-	h.offersMu.Lock()
-	h.lifecycle = lc
-	h.offersMu.Unlock()
 }
 
 // setOffers replaces the in-memory offer list and broadcasts to all subscribers.
@@ -503,7 +500,7 @@ func (h *LiveHub) broadcastAll() {
 	}
 	h.subsMu.Unlock()
 
-	// Always include the default so seedHubFromDB works even before any subscriber
+	// Always include the default so the first push broadcasts even before any subscriber
 	if len(configSet) == 0 {
 		configSet[liveSubscription{cex: defaultCEX}] = struct{}{}
 	}

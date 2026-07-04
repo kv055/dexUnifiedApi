@@ -243,7 +243,7 @@ func priceBisqTor(fiat string) (int, error) {
 			fmt.Printf("[RefPrice] bisq_tor: %s failed: %v\n", node, err)
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAllLimited(resp.Body)
 		resp.Body.Close()
 
 		var result struct {
@@ -273,7 +273,7 @@ func priceKraken(fiat string) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readAllLimited(resp.Body)
 
 	var data struct {
 		Result map[string]struct {
@@ -298,7 +298,7 @@ func priceCoinGecko(fiat string) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readAllLimited(resp.Body)
 
 	var data map[string]map[string]float64
 	if err := json.Unmarshal(body, &data); err != nil {
@@ -405,8 +405,7 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 		if direction == "buy" {
 			depositSats = o.SellerSecurityDeposit
 		}
-		depositBTC := float64(depositSats) / 1e8
-		depositPct := depositBTC / btcMax
+		depositBTCPtr, depositPctPtr := securityDeposit(depositSats, btcMax)
 		newOffer := offer{
 			OfferID:            o.Id,
 			FiatCurrency:       "EUR",
@@ -417,8 +416,8 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 			FiatMax:            &fiatMax,
 			PaymentMethods:     []string{o.PaymentMethodShortName},
 			PriceType:          pt,
-			SecurityDepositBTC: &depositBTC,
-			SecurityDepositPct: &depositPct,
+			SecurityDepositBTC: depositBTCPtr,
+			SecurityDepositPct: depositPctPtr,
 		}
 		// Bisq v1's trust signal is its account-signing web of trust (sign-state
 		// tier + account age). Stock gRPC OfferInfo strips it (it lives in
@@ -469,7 +468,7 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 		return nil
 	}
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readAllLimited(resp.Body)
 
 	// Offer fields live under bisqEasyOffer in the offerbook listing response.
 	// All quote-side amounts are integer fiat units in 4-decimal precision
@@ -645,7 +644,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 		return nil
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readAllLimited(resp.Body)
 
 	var data struct {
 		Offers []struct {
@@ -677,14 +676,16 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 		fiatMin := int(parseFloatStr(o.MinAmount))
 		fiatMax := int(parseFloatStr(o.MaxAmount))
 
+		// HodlHodl labels pass through as-is; canonicalization in
+		// commons/paymentmethods handles SEPA and national-bank variants.
 		var methods []string
 		if direction == "buy" {
 			for _, pm := range o.PaymentMethods {
-				methods = append(methods, normalizeHodlHodlMethod(pm.Name))
+				methods = append(methods, pm.Name)
 			}
 		} else {
 			for _, pmi := range o.PaymentMethodInstructions {
-				methods = append(methods, normalizeHodlHodlMethod(pmi.PaymentMethodName))
+				methods = append(methods, pmi.PaymentMethodName)
 			}
 		}
 
@@ -707,12 +708,6 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 
 	fmt.Printf("[HodlHodl] Found %d %s offers\n", len(offers), direction)
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
-}
-
-// normalizeHodlHodlMethod passes HodlHodl labels through; canonicalization in
-// commons/paymentmethods handles SEPA and national-bank variants.
-func normalizeHodlHodlMethod(method string) string {
-	return method
 }
 
 // normalizePeachMethod converts a Peach Bitcoin payment-method identifier
@@ -878,7 +873,7 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 			fmt.Printf("[PeachBitcoin] Error: %v\n", err)
 			break
 		}
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := readAllLimited(resp.Body)
 		resp.Body.Close()
 
 		if resp.StatusCode != 200 {
@@ -924,7 +919,7 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 			fmt.Printf("[Robosats] %s failed: %v, trying next...\n", onion, err)
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAllLimited(resp.Body)
 		resp.Body.Close()
 
 		var rawOffers []json.RawMessage
@@ -1345,7 +1340,7 @@ func main() {
 	// Update is_live and duration in one pass:
 	// - live offers: is_live=true, duration=NULL, closure analysis fields cleared
 	// - closed offers: is_live=false, duration=seconds between first_seen and last_seen
-	sdb.Exec(`UPDATE offers SET
+	if _, err := sdb.Exec(`UPDATE offers SET
 		is_live = (last_seen >= ?),
 		duration = CASE WHEN last_seen < ? THEN EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT ELSE NULL END,
 		historical_analysis_status = CASE WHEN last_seen >= ? THEN NULL ELSE historical_analysis_status END,
@@ -1360,7 +1355,11 @@ func main() {
 		avg_btc_amount             = CASE WHEN last_seen >= ? THEN NULL ELSE avg_btc_amount END`,
 		snapshotStart, snapshotStart,
 		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
-		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart)
+		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart); err != nil {
+		// Don't ignore this: on failure closed offers stay is_live=true and mislead
+		// the hub/analytics until a later cycle happens to succeed.
+		slog.ErrorContext(ctx, "failed to update is_live/duration for offers", "err", err)
+	}
 
 	// Explicitly close offers from any exchange that failed entirely this run
 	for _, name := range offlineExchangeNames(fetchers, exchangeData) {
@@ -1411,7 +1410,7 @@ func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
 		return
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readAllLimited(resp.Body)
 
 	var data struct {
 		Result map[string]json.RawMessage `json:"result"`
@@ -1458,7 +1457,10 @@ func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
 		}
 		break // only one non-"last" key
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		fmt.Printf("[OHLC] commit error (candles dropped this cycle): %v\n", err)
+		return
+	}
 	fmt.Printf("[OHLC] upserted %d candles\n", n)
 }
 
@@ -1614,7 +1616,7 @@ func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64) {
 		return
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readAllLimited(resp.Body)
 
 	var data struct {
 		Result map[string]json.RawMessage `json:"result"`
@@ -1661,11 +1663,14 @@ func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64) {
 		}
 		break
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		fmt.Printf("[OHLCSince] commit error (candles dropped this cycle): %v\n", err)
+		return
+	}
 	fmt.Printf("[OHLCSince] upserted %d historical candles\n", n)
 }
 
-// parseDBTimeUnix parses a SQLite timestamp string and returns its Unix timestamp.
+// parseDBTimeUnix parses a database timestamp string and returns its Unix timestamp.
 // Returns 0 if parsing fails.
 func parseDBTimeUnix(s string) int64 {
 	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02T15:04:05Z"} {
@@ -1706,8 +1711,28 @@ func filterDustOffers(offers []offer) []offer {
 	return kept
 }
 
-func round2(v float64) float64 {
-	return math.Round(v*100) / 100
+// maxFetchBytes bounds how much we read from any exchange/price/onion response.
+// A hostile or compromised endpoint — especially a Tor onion in the price/offer
+// paths — could otherwise stream unbounded data straight into memory. 8 MiB is
+// far above any real response (Kraken OHLC, a Peach page, a full HodlHodl book).
+const maxFetchBytes = 8 << 20
+
+func readAllLimited(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxFetchBytes))
+}
+
+// securityDeposit returns the taker's deposit in BTC and as a fraction of the
+// trade size, or (nil, nil) when btcMax <= 0. The guard matters: a zero-amount
+// offer would make depositPct = deposit/0 = +Inf, and json.Marshal rejects
+// non-finite floats — which failed the ENTIRE /internal/live_offers push for the
+// cycle, not just the one offer.
+func securityDeposit(depositSats uint64, btcMax float64) (*float64, *float64) {
+	if btcMax <= 0 {
+		return nil, nil
+	}
+	depositBTC := float64(depositSats) / 1e8
+	depositPct := depositBTC / btcMax
+	return &depositBTC, &depositPct
 }
 
 func round8(v float64) float64 {

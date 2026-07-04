@@ -8,6 +8,7 @@ import (
 	"commons/tracing"
 	"commons/tradecost"
 	"context"
+	"crypto/subtle"
 	"dexunifiedapi/db"
 	"dexunifiedapi/internal/accounthealth"
 	"dexunifiedapi/internal/config"
@@ -33,11 +34,14 @@ const serviceName = "unified-api"
 // sessionProtected reports whether a path is a browser-facing endpoint that
 // requires a valid dashboard login session. Only the routes nginx exposes to the
 // browser are gated; internal service-to-service endpoints
-// (/api/accounts/health_check, /api/payment_notifications, /internal/*, /health,
-// /metrics) carry no user cookie and must stay open.
+// (/api/accounts/health_check, /internal/*, /health, /metrics) carry no user
+// cookie and must stay open. The payment_notifications READ endpoint is
+// login-gated: it returns payment amounts/tx IDs and has no service consumer
+// (the /internal/payment_notifications webhook ingest is separate, secret-gated).
 func sessionProtected(path string) bool {
 	return strings.HasPrefix(path, "/api/live_offers") ||
 		strings.HasPrefix(path, "/api/trade_cost_config") ||
+		strings.HasPrefix(path, "/api/payment_notifications") ||
 		strings.HasPrefix(path, "/ws/live_offers")
 }
 
@@ -48,15 +52,19 @@ var (
 	listenAddr                string
 	paymentNotificationSecret string
 	internalAPISecret         string
-	bisqGRPCHost              string
-	bisqAPIPassword           string
-	bisq2RESTHost             string
-	bisq2APIPassword          string
-	accountHealthInterval     time.Duration
-	db                        *dbutil.DB
-	priceManager              *prices.Manager
-	lifecycleRepo             lifecycle.Repository
-	paymentNotifications      *paymentnotifications.Service
+	// allowInsecureInternal permits the internal ingest endpoints to run without a
+	// shared secret (local dev / tests). In prod it stays false, so an unset secret
+	// fails CLOSED instead of leaving the endpoints open. Set via ALLOW_INSECURE_INTERNAL.
+	allowInsecureInternal bool
+	bisqGRPCHost          string
+	bisqAPIPassword       string
+	bisq2RESTHost         string
+	bisq2APIPassword      string
+	accountHealthInterval time.Duration
+	db                    *dbutil.DB
+	priceManager          *prices.Manager
+	lifecycleRepo         lifecycle.Repository
+	paymentNotifications  *paymentnotifications.Service
 )
 
 var (
@@ -72,14 +80,6 @@ var supportedCEXes = tradecost.SupportedCEXes()
 
 var tradeCostEstimators map[string]*tradecost.TradeCostEstimator
 var tradeRouteOptimizer *tradecost.TradeRouteOptimizer
-
-func seedHubFromDB() {
-	// Live offers are now sourced from snapshot memory and pushed into the hub
-	// directly, so we intentionally avoid reconstructing them from persisted DB
-	// rows on startup.
-	hub.setOffers(nil)
-	fmt.Printf("[Hub] waiting for next snapshot push to seed live offers\n")
-}
 
 func coreTablesReady() bool {
 	var ready bool
@@ -116,6 +116,10 @@ func setCexPrice(cex string, p float64) {
 // --- Init & Main ---
 
 func init() {
+	// Under tests we run without a configured secret; allow insecure so the internal
+	// handler tests exercise the empty-secret path. In prod this is opt-in only.
+	allowInsecureInternal = runningUnderGoTest() ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_INSECURE_INTERNAL")), "true")
 	if err := config.LoadRequiredDotEnv(".env"); err != nil {
 		if runningUnderGoTest() {
 			listenAddr = ":5010"
@@ -301,8 +305,8 @@ func main() {
 		})),
 	)
 
-	// Seed hub from DB in the background
-	go seedHubFromDB()
+	// The hub starts empty and is seeded by the next snapshot push; live offers
+	// are intentionally not reconstructed from persisted DB rows on startup.
 
 	priceManager.Start(ctx)
 
@@ -456,14 +460,29 @@ func writeLifecycleEntries(ctx context.Context, offers []liveOutOffer) {
 
 // handleInternalLiveOffers receives the live offer list from the snapshot tool,
 // updates the hub, and persists lifecycle to the DB.
+// maxInternalBodyBytes bounds the internal ingest request bodies so a caller
+// can't stream an unbounded payload into memory before decoding.
+const maxInternalBodyBytes = 4 << 20 // 4 MiB
+
+// internalSecretAuthorized reports whether an internal-ingest request is allowed.
+// A configured secret must match in constant time; an empty secret is accepted
+// only when allowInsecureInternal is set (dev/tests), so prod fails CLOSED rather
+// than leaving the endpoint open when the secret is missing.
+func internalSecretAuthorized(provided, expected string) bool {
+	if expected == "" {
+		return allowInsecureInternal
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
 func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
-	if internalAPISecret != "" && r.Header.Get("X-Internal-Secret") != internalAPISecret {
+	if !internalSecretAuthorized(r.Header.Get("X-Internal-Secret"), internalAPISecret) {
 		http.Error(w, "unauthorized internal secret", http.StatusUnauthorized)
 		return
 	}
 
 	var offers []LiveOffer
-	if err := json.NewDecoder(r.Body).Decode(&offers); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxInternalBodyBytes)).Decode(&offers); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -665,16 +684,14 @@ func queryMaxFiatLimitEUR(r *http.Request) float64 {
 	return f
 }
 
-func parseFloat(s string) float64 {
-	v, _ := strconv.ParseFloat(s, 64)
-	return v
-}
-
 func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
 }
 
 func writeError(w http.ResponseWriter, err error) {
-	http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Log the real error server-side but return a generic message: raw err.Error()
+	// can leak DB/driver internals (table names, SQL state, connection details).
+	slog.Error("request failed", "err", err)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }

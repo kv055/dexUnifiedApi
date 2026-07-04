@@ -10,13 +10,13 @@ import (
 )
 
 func handleInternalPaymentNotifications(w http.ResponseWriter, r *http.Request) {
-	if paymentNotificationSecret != "" && r.Header.Get("X-Webhook-Secret") != paymentNotificationSecret {
+	if !internalSecretAuthorized(r.Header.Get("X-Webhook-Secret"), paymentNotificationSecret) {
 		http.Error(w, "unauthorized webhook secret", http.StatusUnauthorized)
 		return
 	}
 
 	var event paymentnotifications.Notification
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxInternalBodyBytes)).Decode(&event); err != nil {
 		http.Error(w, fmt.Sprintf("decode notification: %v", err), http.StatusBadRequest)
 		return
 	}
