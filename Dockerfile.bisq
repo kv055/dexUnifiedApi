@@ -20,6 +20,15 @@ WORKDIR /src/bisq
 COPY bisq-patches/offerinfo-witness.patch /tmp/offerinfo-witness.patch
 RUN git apply --3way /tmp/offerinfo-witness.patch
 
+# Add two PaymentAccounts gRPC methods the stock daemon lacks: CreateSepaPaymentAccount
+# (builds a SEPA account server-side from discrete fields — the generic CreatePaymentAccount
+# json path cannot round-trip SEPA on this build) and DeletePaymentAccount (surfaces the
+# existing core User.removePaymentAccount). If a future BISQ_VERSION refactors the touched
+# files, this apply fails and the build stops here — rebase
+# bisq-patches/payment-accounts-sepa-delete.patch.
+COPY bisq-patches/payment-accounts-sepa-delete.patch /tmp/payment-accounts-sepa-delete.patch
+RUN git apply --3way /tmp/payment-accounts-sepa-delete.patch
+
 RUN ./gradlew --no-daemon :daemon:installDist -x test
 
 RUN if [ -d daemon/build/install/daemon/lib ]; then \

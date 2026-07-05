@@ -1,0 +1,209 @@
+diff --git a/core/src/main/java/bisq/core/api/CoreApi.java b/core/src/main/java/bisq/core/api/CoreApi.java
+index 3db2a0e..c1bf2e1 100644
+--- a/core/src/main/java/bisq/core/api/CoreApi.java
++++ b/core/src/main/java/bisq/core/api/CoreApi.java
+@@ -288,6 +288,23 @@ public class CoreApi {
+                 tradeInstant);
+     }
+ 
++    // dexArbTrading: discrete-field SEPA account creation and delete (see CorePaymentAccountsService).
++    public PaymentAccount createSepaPaymentAccount(String accountName,
++                                                   String holderName,
++                                                   String iban,
++                                                   String bic,
++                                                   String countryCode) {
++        return paymentAccountsService.createSepaPaymentAccount(accountName,
++                holderName,
++                iban,
++                bic,
++                countryCode);
++    }
++
++    public void deletePaymentAccount(String paymentAccountId) {
++        paymentAccountsService.deletePaymentAccount(paymentAccountId);
++    }
++
+     public List<PaymentMethod> getCryptoCurrencyPaymentMethods() {
+         return paymentAccountsService.getCryptoCurrencyPaymentMethods();
+     }
+diff --git a/core/src/main/java/bisq/core/api/CorePaymentAccountsService.java b/core/src/main/java/bisq/core/api/CorePaymentAccountsService.java
+index 05e3485..d1673b6 100644
+--- a/core/src/main/java/bisq/core/api/CorePaymentAccountsService.java
++++ b/core/src/main/java/bisq/core/api/CorePaymentAccountsService.java
+@@ -19,12 +19,15 @@ package bisq.core.api;
+ 
+ import bisq.core.account.witness.AccountAgeWitnessService;
+ import bisq.core.api.model.PaymentAccountForm;
++import bisq.core.locale.Country;
++import bisq.core.locale.CountryUtil;
+ import bisq.core.locale.CryptoCurrency;
+ import bisq.core.payment.AssetAccount;
+ import bisq.core.payment.CryptoCurrencyAccount;
+ import bisq.core.payment.InstantCryptoCurrencyAccount;
+ import bisq.core.payment.PaymentAccount;
+ import bisq.core.payment.PaymentAccountFactory;
++import bisq.core.payment.SepaAccount;
+ import bisq.core.payment.payload.PaymentMethod;
+ import bisq.core.user.User;
+ 
+@@ -105,6 +108,46 @@ class CorePaymentAccountsService {
+         return paymentAccountForm.getPaymentAccountForm(paymentMethodId);
+     }
+ 
++    // dexArbTrading: SEPA accounts cannot be created via createPaymentAccount(jsonString) on
++    // this build — the form parser mishandles SEPA's acceptedCountryCodes collection field and
++    // the daemon returns an opaque "unexpected error". We build the SepaAccount directly from
++    // discrete fields, mirroring createCryptoCurrencyPaymentAccount below.
++    PaymentAccount createSepaPaymentAccount(String accountName,
++                                            String holderName,
++                                            String iban,
++                                            String bic,
++                                            String countryCode) {
++        Country country = CountryUtil.findCountryByCode(countryCode)
++                .orElseThrow(() -> new IllegalArgumentException(
++                        format("'%s' is an invalid country code.", countryCode)));
++        SepaAccount sepaAccount = (SepaAccount) PaymentAccountFactory.getPaymentAccount(PaymentMethod.SEPA);
++        sepaAccount.init();
++        sepaAccount.setAccountName(accountName);
++        sepaAccount.setHolderName(holderName);
++        sepaAccount.setIban(iban);
++        sepaAccount.setBic(bic);
++        sepaAccount.setCountry(country);
++        // EUR single trade currency and the default all-SEPA acceptedCountryCodes are set by
++        // the SepaAccount constructor / createPayload, so no further wiring is required.
++        verifyPaymentAccountHasRequiredFields(sepaAccount);
++        user.addPaymentAccountIfNotExists(sepaAccount);
++        accountAgeWitnessService.publishMyAccountAgeWitness(sepaAccount.getPaymentAccountPayload());
++        log.info("Saved SEPA payment account with id {} and payment method {}.",
++                sepaAccount.getId(),
++                sepaAccount.getPaymentAccountPayload().getPaymentMethodId());
++        return sepaAccount;
++    }
++
++    // dexArbTrading: delete a saved payment account by id (stock gRPC has no delete).
++    void deletePaymentAccount(String paymentAccountId) {
++        PaymentAccount paymentAccount = user.getPaymentAccount(paymentAccountId);
++        if (paymentAccount == null)
++            throw new IllegalArgumentException(
++                    format("payment account with id '%s' not found", paymentAccountId));
++        user.removePaymentAccount(paymentAccount);
++        log.info("Deleted payment account with id {}.", paymentAccountId);
++    }
++
+     // Crypto Currency Accounts
+ 
+     PaymentAccount createCryptoCurrencyPaymentAccount(String accountName,
+diff --git a/daemon/src/main/java/bisq/daemon/grpc/GrpcPaymentAccountsService.java b/daemon/src/main/java/bisq/daemon/grpc/GrpcPaymentAccountsService.java
+index 9ac400d..e5dfd9c 100644
+--- a/daemon/src/main/java/bisq/daemon/grpc/GrpcPaymentAccountsService.java
++++ b/daemon/src/main/java/bisq/daemon/grpc/GrpcPaymentAccountsService.java
+@@ -25,6 +25,10 @@ import bisq.proto.grpc.CreateCryptoCurrencyPaymentAccountReply;
+ import bisq.proto.grpc.CreateCryptoCurrencyPaymentAccountRequest;
+ import bisq.proto.grpc.CreatePaymentAccountReply;
+ import bisq.proto.grpc.CreatePaymentAccountRequest;
++import bisq.proto.grpc.CreateSepaPaymentAccountReply;
++import bisq.proto.grpc.CreateSepaPaymentAccountRequest;
++import bisq.proto.grpc.DeletePaymentAccountReply;
++import bisq.proto.grpc.DeletePaymentAccountRequest;
+ import bisq.proto.grpc.GetCryptoCurrencyPaymentMethodsReply;
+ import bisq.proto.grpc.GetCryptoCurrencyPaymentMethodsRequest;
+ import bisq.proto.grpc.GetPaymentAccountFormReply;
+@@ -147,6 +151,40 @@ class GrpcPaymentAccountsService extends PaymentAccountsImplBase {
+         }
+     }
+ 
++    // dexArbTrading: build a SEPA account server-side from discrete fields.
++    @Override
++    public void createSepaPaymentAccount(CreateSepaPaymentAccountRequest req,
++                                         StreamObserver<CreateSepaPaymentAccountReply> responseObserver) {
++        try {
++            PaymentAccount paymentAccount = coreApi.createSepaPaymentAccount(req.getAccountName(),
++                    req.getHolderName(),
++                    req.getIban(),
++                    req.getBic(),
++                    req.getCountryCode());
++            var reply = CreateSepaPaymentAccountReply.newBuilder()
++                    .setPaymentAccount(paymentAccount.toProtoMessage())
++                    .build();
++            responseObserver.onNext(reply);
++            responseObserver.onCompleted();
++        } catch (Throwable cause) {
++            exceptionHandler.handleException(log, cause, responseObserver);
++        }
++    }
++
++    // dexArbTrading: delete a saved payment account by id.
++    @Override
++    public void deletePaymentAccount(DeletePaymentAccountRequest req,
++                                     StreamObserver<DeletePaymentAccountReply> responseObserver) {
++        try {
++            coreApi.deletePaymentAccount(req.getPaymentAccountId());
++            var reply = DeletePaymentAccountReply.newBuilder().build();
++            responseObserver.onNext(reply);
++            responseObserver.onCompleted();
++        } catch (Throwable cause) {
++            exceptionHandler.handleException(log, cause, responseObserver);
++        }
++    }
++
+     @Override
+     public void getCryptoCurrencyPaymentMethods(GetCryptoCurrencyPaymentMethodsRequest req,
+                                                 StreamObserver<GetCryptoCurrencyPaymentMethodsReply> responseObserver) {
+@@ -175,6 +213,8 @@ class GrpcPaymentAccountsService extends PaymentAccountsImplBase {
+                         new HashMap<>() {{
+                             put(getCreatePaymentAccountMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
+                             put(getCreateCryptoCurrencyPaymentAccountMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
++                            put(getCreateSepaPaymentAccountMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
++                            put(getDeletePaymentAccountMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
+                             put(getGetPaymentAccountsMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
+                             put(getGetPaymentMethodsMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
+                             put(getGetPaymentAccountFormMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
+diff --git a/proto/src/main/proto/grpc.proto b/proto/src/main/proto/grpc.proto
+index be4e6c6..416d08a 100644
+--- a/proto/src/main/proto/grpc.proto
++++ b/proto/src/main/proto/grpc.proto
+@@ -375,6 +375,16 @@ service PaymentAccounts {
+     // Get list of all supported Bisq crypto currency (altcoin) payment methods.
+     rpc GetCryptoCurrencyPaymentMethods (GetCryptoCurrencyPaymentMethodsRequest) returns (GetCryptoCurrencyPaymentMethodsReply) {
+     }
++    // dexArbTrading: Create a SEPA fiat payment account from discrete fields, built
++    // server-side. The generic CreatePaymentAccount(json) path cannot round-trip SEPA on
++    // this build (its acceptedCountryCodes collection field is mishandled by the form
++    // parser), so we construct the SepaAccount directly like CreateCryptoCurrencyPaymentAccount.
++    rpc CreateSepaPaymentAccount (CreateSepaPaymentAccountRequest) returns (CreateSepaPaymentAccountReply) {
++    }
++    // dexArbTrading: Delete a saved payment account by id. Bisq's stock gRPC API exposes no
++    // delete; this surfaces the existing core User.removePaymentAccount capability.
++    rpc DeletePaymentAccount (DeletePaymentAccountRequest) returns (DeletePaymentAccountReply) {
++    }
+ }
+ 
+ message CreatePaymentAccountRequest {
+@@ -426,6 +436,27 @@ message GetCryptoCurrencyPaymentMethodsReply {
+     repeated PaymentMethod payment_methods = 1;  // Ids of all supported Bisq altcoin payment methods.
+ }
+ 
++// dexArbTrading: discrete-field SEPA account creation (see rpc CreateSepaPaymentAccount).
++message CreateSepaPaymentAccountRequest {
++    string account_name = 1;    // Human-readable name for the payment account.
++    string holder_name = 2;     // Account holder full name.
++    string iban = 3;            // IBAN.
++    string bic = 4;             // BIC / SWIFT.
++    string country_code = 5;    // ISO 3166-1 alpha-2 country of the bank (e.g. "DE").
++}
++
++message CreateSepaPaymentAccountReply {
++    PaymentAccount payment_account = 1;      // The new SEPA payment account.
++}
++
++// dexArbTrading: delete a saved payment account (see rpc DeletePaymentAccount).
++message DeletePaymentAccountRequest {
++    string payment_account_id = 1;   // Id of the payment account to remove.
++}
++
++message DeletePaymentAccountReply {
++}
++
+ service Price {
+     // Get the current market price for a crypto currency.
+     rpc GetMarketPrice (MarketPriceRequest) returns (MarketPriceReply) {
