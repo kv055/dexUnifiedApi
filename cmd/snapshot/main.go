@@ -389,50 +389,56 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 
 	var offers []offer
 	for _, o := range reply.Offers {
-		price, _ := strconv.ParseFloat(o.Price, 64)
-		btcMin := float64(o.MinAmount) / 1e8
-		btcMax := float64(o.Amount) / 1e8
-		fiatMin := int(parseFloatStr(o.MinVolume))
-		fiatMax := int(parseFloatStr(o.Volume))
-		pt := priceTypeFixed()
-		if o.UseMarketBasedPrice {
-			pt = priceTypeFloating()
-		}
-		// The taker plays the opposite side of the maker: on a "sell" offer
-		// (maker sells BTC) the taker buys, so they post the buyer deposit;
-		// on a "buy" offer the taker sells, so they post the seller deposit.
-		// Mirrors the isBid mapping in tradecost.computeCapitalRequirement.
-		depositSats := o.BuyerSecurityDeposit
-		if direction == "buy" {
-			depositSats = o.SellerSecurityDeposit
-		}
-		depositBTCPtr, depositPctPtr := securityDeposit(depositSats, btcMax)
-		newOffer := offer{
-			OfferID:            o.Id,
-			FiatCurrency:       "EUR",
-			Price:              price,
-			BTCMin:             &btcMin,
-			BTCMax:             &btcMax,
-			FiatMin:            &fiatMin,
-			FiatMax:            &fiatMax,
-			PaymentMethods:     []string{o.PaymentMethodShortName},
-			PriceType:          pt,
-			SecurityDepositBTC: depositBTCPtr,
-			SecurityDepositPct: depositPctPtr,
-		}
-		// Bisq v1's trust signal is its account-signing web of trust (sign-state
-		// tier + account age). Stock gRPC OfferInfo strips it (it lives in
-		// OfferPayload.extra_data); our bisq-patches/offerinfo-witness.patch adds
-		// the two fields below. An unpatched daemon sends "" for the sign-state,
-		// which NormalizeBisqAccountSigning maps to Unavailable() — so this stays
-		// safe before/during the patched-image rollout.
-		applyRating(&newOffer, sellerrating.NormalizeBisqAccountSigning(
-			o.GetAccountAgeWitnessSignState(), o.GetAccountAgeWitnessDate(), time.Now()))
-		offers = append(offers, newOffer)
+		offers = append(offers, mapBisqOffer(o, direction, time.Now()))
 	}
 
 	fmt.Printf("[Bisq] Found %d %s offers\n", len(offers), direction)
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+}
+
+// mapBisqOffer converts a bisq v1 gRPC OfferInfo into our offer struct.
+// Pure — no I/O — so the field mapping is unit-testable without a daemon.
+func mapBisqOffer(o *bisqgrpc.OfferInfo, direction string, now time.Time) offer {
+	price, _ := strconv.ParseFloat(o.Price, 64)
+	btcMin := float64(o.MinAmount) / 1e8
+	btcMax := float64(o.Amount) / 1e8
+	fiatMin := int(parseFloatStr(o.MinVolume))
+	fiatMax := int(parseFloatStr(o.Volume))
+	pt := priceTypeFixed()
+	if o.UseMarketBasedPrice {
+		pt = priceTypeFloating()
+	}
+	// The taker plays the opposite side of the maker: on a "sell" offer
+	// (maker sells BTC) the taker buys, so they post the buyer deposit;
+	// on a "buy" offer the taker sells, so they post the seller deposit.
+	// Mirrors the isBid mapping in tradecost.computeCapitalRequirement.
+	depositSats := o.BuyerSecurityDeposit
+	if direction == "buy" {
+		depositSats = o.SellerSecurityDeposit
+	}
+	depositBTCPtr, depositPctPtr := securityDeposit(depositSats, btcMax)
+	newOffer := offer{
+		OfferID:            o.Id,
+		FiatCurrency:       "EUR",
+		Price:              price,
+		BTCMin:             &btcMin,
+		BTCMax:             &btcMax,
+		FiatMin:            &fiatMin,
+		FiatMax:            &fiatMax,
+		PaymentMethods:     []string{o.PaymentMethodShortName},
+		PriceType:          pt,
+		SecurityDepositBTC: depositBTCPtr,
+		SecurityDepositPct: depositPctPtr,
+	}
+	// Bisq v1's trust signal is its account-signing web of trust (sign-state
+	// tier + account age). Stock gRPC OfferInfo strips it (it lives in
+	// OfferPayload.extra_data); our bisq-patches/offerinfo-witness.patch adds
+	// the two fields below. An unpatched daemon sends "" for the sign-state,
+	// which NormalizeBisqAccountSigning maps to Unavailable() — so this stays
+	// safe before/during the patched-image rollout.
+	applyRating(&newOffer, sellerrating.NormalizeBisqAccountSigning(
+		o.GetAccountAgeWitnessSignState(), o.GetAccountAgeWitnessDate(), now))
+	return newOffer
 }
 
 func fetchBisq2(direction string, btcPrice int) *fetchResult {
@@ -1259,7 +1265,7 @@ func offlineExchangeNames(fetchers []exchFetcher, exchangeData exchangeSnapshotD
 	return names
 }
 
-func buildSnapshotLogPayload(exchangeData exchangeSnapshotData) ([]byte, int, error) {
+func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string) ([]byte, int, error) {
 	exchanges := make(map[string]any)
 	total := 0
 	for ex, ids := range exchangeData {
@@ -1274,12 +1280,25 @@ func buildSnapshotLogPayload(exchangeData exchangeSnapshotData) ([]byte, int, er
 		}
 		total += len(ids)
 	}
+	// Hard-failed fetchers must stay present with count 0: dbmetrics derives
+	// dex_exchange_up from this payload, and a missing key makes the series
+	// disappear entirely — the down-alert then evaluates to NoData and stays
+	// green instead of firing for the dead exchange.
+	for _, ex := range offline {
+		if _, ok := exchanges[ex]; !ok {
+			exchanges[ex] = map[string]any{
+				"count":   0,
+				"ids":     []string{},
+				"offline": true,
+			}
+		}
+	}
 	jsonBytes, err := json.Marshal(exchanges)
 	return jsonBytes, total, err
 }
 
-func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData) {
-	jsonBytes, total, err := buildSnapshotLogPayload(exchangeData)
+func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData, offline []string) {
+	jsonBytes, total, err := buildSnapshotLogPayload(exchangeData, offline)
 	if err != nil {
 		fmt.Printf("[SnapshotLog] encode error: %v\n", err)
 		return
@@ -1435,7 +1454,8 @@ func main() {
 	}
 
 	// Explicitly close offers from any exchange that failed entirely this run
-	for _, name := range offlineExchangeNames(fetchers, exchangeData) {
+	offline := offlineExchangeNames(fetchers, exchangeData)
+	for _, name := range offline {
 		res, _ := sdb.Exec(`UPDATE offers SET
 				is_live = FALSE,
 				duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
@@ -1465,7 +1485,7 @@ func main() {
 	stage(ctx, "snapshot.settle_closed_offers", func() { settleClosedOffers(sdb) })
 	stage(ctx, "snapshot.analyze_closed_offers", func() { analyzeClosedOffers(sdb) })
 
-	writeSnapshotLog(sdb, exchangeData)
+	writeSnapshotLog(sdb, exchangeData, offline)
 	total := 0
 	names := make([]string, 0, len(exchangeData))
 	for name, ids := range exchangeData {

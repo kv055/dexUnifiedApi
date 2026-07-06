@@ -106,7 +106,7 @@ func TestRecordFetchResultTracksZeroOfferExchange(t *testing.T) {
 		t.Fatalf("bisq ids len = %d, want 0", len(ids))
 	}
 
-	payload, total, err := buildSnapshotLogPayload(exchangeData)
+	payload, total, err := buildSnapshotLogPayload(exchangeData, nil)
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}
@@ -154,6 +154,57 @@ func TestRecordFetchResultTreatsNilAsOffline(t *testing.T) {
 	}
 }
 
+// A fetcher that fails hard (nil result: daemon unreachable, gRPC error, no
+// reference price) must still appear in the snapshot log with count 0.
+// dbmetrics derives dex_exchange_up from this payload; if the exchange key is
+// missing the Prometheus series vanishes and the down-alert sees NoData
+// instead of 0 — the exact blind spot that hid a dead bisq feed.
+func TestSnapshotLogKeepsHardFailedExchangeAtZero(t *testing.T) {
+	exchangeData := make(exchangeSnapshotData)
+	fetchers := []exchFetcher{
+		{name: "bisq"},
+		{name: "hodlhodl"},
+	}
+
+	// bisq fails hard, hodlhodl succeeds with offers.
+	recordFetchResult(exchangeData, "bisq", nil)
+	recordFetchResult(exchangeData, "hodlhodl", &fetchResult{Offers: []offer{{OfferID: "h1"}}})
+
+	offline := offlineExchangeNames(fetchers, exchangeData)
+	payload, total, err := buildSnapshotLogPayload(exchangeData, offline)
+	if err != nil {
+		t.Fatalf("buildSnapshotLogPayload: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1", total)
+	}
+
+	var got map[string]struct {
+		Count   int      `json:"count"`
+		IDs     []string `json:"ids"`
+		Offline bool     `json:"offline"`
+	}
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	bisq, ok := got["bisq"]
+	if !ok {
+		t.Fatal("bisq missing from snapshot log payload — dex_exchange_up series would vanish")
+	}
+	if bisq.Count != 0 {
+		t.Fatalf("bisq count = %d, want 0", bisq.Count)
+	}
+	if !bisq.Offline {
+		t.Fatal("bisq offline flag = false, want true")
+	}
+	if bisq.IDs == nil || len(bisq.IDs) != 0 {
+		t.Fatalf("bisq ids = %#v, want empty JSON array", bisq.IDs)
+	}
+	if got["hodlhodl"].Count != 1 || got["hodlhodl"].Offline {
+		t.Fatalf("hodlhodl = %+v, want count 1 online", got["hodlhodl"])
+	}
+}
+
 func TestRecordFetchResultTracksOfferIDs(t *testing.T) {
 	exchangeData := make(exchangeSnapshotData)
 	result := &fetchResult{Offers: []offer{
@@ -165,7 +216,7 @@ func TestRecordFetchResultTracksOfferIDs(t *testing.T) {
 	if ok := recordFetchResult(exchangeData, "bisq", result); !ok {
 		t.Fatal("recordFetchResult returned false for successful result")
 	}
-	payload, total, err := buildSnapshotLogPayload(exchangeData)
+	payload, total, err := buildSnapshotLogPayload(exchangeData, nil)
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}
