@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM eclipse-temurin:21-jdk-jammy AS bisq-builder
 
 ARG BISQ_VERSION=1.10.2
@@ -29,7 +31,11 @@ RUN git apply --3way /tmp/offerinfo-witness.patch
 COPY bisq-patches/payment-accounts-sepa-delete.patch /tmp/payment-accounts-sepa-delete.patch
 RUN git apply --3way /tmp/payment-accounts-sepa-delete.patch
 
-RUN ./gradlew --no-daemon :daemon:installDist -x test
+# Cache mount keeps gradle's dependency + wrapper caches across builds; without
+# it every patch/version change re-downloads all deps and compiles cold (the
+# dominant cost since the switch to building the daemon from source).
+RUN --mount=type=cache,target=/root/.gradle \
+    ./gradlew --no-daemon :daemon:installDist -x test
 
 RUN if [ -d daemon/build/install/daemon/lib ]; then \
       src=daemon/build/install/daemon/lib; \
