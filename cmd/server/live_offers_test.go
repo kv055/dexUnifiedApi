@@ -9,7 +9,10 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 func assertFloat(t *testing.T, got, want float64) {
@@ -361,6 +364,64 @@ func TestInternalLiveOffersRequiresSecret(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("correct secret + bad body: status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
+}
+
+// TestInternalLiveOffersWSGate covers the secret-gated service-to-service WS
+// route. The browser-facing /ws/live_offers stays session-gated; internal
+// callers (e.g. mm-controller's premium-offer watcher) authenticate with
+// X-Internal-Secret instead.
+func TestInternalLiveOffersWSGate(t *testing.T) {
+	oldSecret := internalAPISecret
+	oldHub := hub
+	internalAPISecret = "topsecret"
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	t.Cleanup(func() {
+		internalAPISecret = oldSecret
+		hub = oldHub
+	})
+
+	handler := internalSecretGate(http.HandlerFunc(handleLiveOffersWS))
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/internal/ws/live_offers"
+
+	// Missing header → 401 before the WS upgrade.
+	dialer := websocket.Dialer{}
+	_, resp, err := dialer.Dial(wsURL, nil)
+	if err == nil {
+		t.Fatalf("missing secret: dial succeeded, want failure")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing secret: status = %v, want %d", respStatus(resp), http.StatusUnauthorized)
+	}
+	resp.Body.Close()
+
+	// Wrong header → 401.
+	_, resp, err = dialer.Dial(wsURL, http.Header{"X-Internal-Secret": {"wrong"}})
+	if err == nil {
+		t.Fatalf("wrong secret: dial succeeded, want failure")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong secret: status = %v, want %d", respStatus(resp), http.StatusUnauthorized)
+	}
+	resp.Body.Close()
+
+	// Correct header → upgrade completes (HTTP 101) and the connection is live.
+	conn, resp, err := dialer.Dial(wsURL, http.Header{"X-Internal-Secret": {"topsecret"}})
+	if err != nil {
+		t.Fatalf("correct secret: dial failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("correct secret: status = %d, want %d", resp.StatusCode, http.StatusSwitchingProtocols)
+	}
+	conn.Close()
+}
+
+func respStatus(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }
 
 func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {

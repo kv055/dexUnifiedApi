@@ -328,6 +328,12 @@ func main() {
 	// Internal: snapshot tool pushes live offer data after each run
 	mux.HandleFunc("POST /internal/live_offers", handleInternalLiveOffers)
 	mux.HandleFunc("POST /internal/payment_notifications", handleInternalPaymentNotifications)
+	// Internal: service-to-service live-offers WS (e.g. mm-controller's
+	// premium-offer watcher). Browser clients use the session-gated
+	// /ws/live_offers above; internal callers carry no session cookie, so this
+	// route is secret-gated via X-Internal-Secret (same convention as the POST
+	// ingest endpoints) and reuses the same WS handler.
+	mux.Handle("GET /internal/ws/live_offers", internalSecretGate(http.HandlerFunc(handleLiveOffersWS)))
 
 	mux.Handle("GET /metrics", metricsReg.Handler())
 
@@ -477,6 +483,21 @@ func internalSecretAuthorized(provided, expected string) bool {
 		return allowInsecureInternal
 	}
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+// internalSecretGate wraps a handler with the X-Internal-Secret check used by
+// the internal ingest endpoints. It lets a service-to-service caller (no
+// session cookie) reach a handler that would otherwise be behind the browser
+// session gate. An empty configured secret fails closed unless
+// allowInsecureInternal is set (dev/tests), matching internalSecretAuthorized.
+func internalSecretGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !internalSecretAuthorized(r.Header.Get("X-Internal-Secret"), internalAPISecret) {
+			http.Error(w, "unauthorized internal secret", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
