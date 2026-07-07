@@ -106,7 +106,7 @@ func TestRecordFetchResultTracksZeroOfferExchange(t *testing.T) {
 		t.Fatalf("bisq ids len = %d, want 0", len(ids))
 	}
 
-	payload, total, err := buildSnapshotLogPayload(exchangeData, nil)
+	payload, total, err := buildSnapshotLogPayload(exchangeData, nil, newFetchTimings())
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestSnapshotLogKeepsHardFailedExchangeAtZero(t *testing.T) {
 	recordFetchResult(exchangeData, "hodlhodl", &fetchResult{Offers: []offer{{OfferID: "h1"}}})
 
 	offline := offlineExchangeNames(fetchers, exchangeData)
-	payload, total, err := buildSnapshotLogPayload(exchangeData, offline)
+	payload, total, err := buildSnapshotLogPayload(exchangeData, offline, newFetchTimings())
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestRecordFetchResultTracksOfferIDs(t *testing.T) {
 	if ok := recordFetchResult(exchangeData, "bisq", result); !ok {
 		t.Fatal("recordFetchResult returned false for successful result")
 	}
-	payload, total, err := buildSnapshotLogPayload(exchangeData, nil)
+	payload, total, err := buildSnapshotLogPayload(exchangeData, nil, newFetchTimings())
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}

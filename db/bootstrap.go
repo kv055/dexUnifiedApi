@@ -10,6 +10,7 @@ const (
 	roleMonitor        = "dex_monitor"
 	roleMMController   = "dex_mm_controller"
 	roleFiatController = "dex_fiat_controller"
+	roleGrafanaRO      = "dex_grafana_ro"
 )
 
 // RoleBootstrapConfig represents a role bootstrap config.
@@ -24,6 +25,10 @@ type RoleBootstrapConfig struct {
 	MMControllerPassword string
 	// FiatControllerPassword is a fiat-denominated fiat controller password value.
 	FiatControllerPassword string
+	// GrafanaROPassword is the password for the read-only Grafana datasource
+	// role. Optional: when empty the role is skipped entirely, so deploys work
+	// before the secret is provisioned.
+	GrafanaROPassword string
 }
 
 // EnsureAppRoles ensures the required state exists.
@@ -76,6 +81,32 @@ func EnsureAppRoles(admin *DB, cfg RoleBootstrapConfig) error {
 		}
 	}
 
+	return ensureGrafanaRORole(admin, cfg)
+}
+
+// ensureGrafanaRORole creates/updates the SELECT-only role Grafana's Postgres
+// datasource logs in with. Unlike the app roles it is optional — skipped
+// without error while POSTGRES_GRAFANA_RO_PASSWORD is unprovisioned.
+func ensureGrafanaRORole(admin *DB, cfg RoleBootstrapConfig) error {
+	if strings.TrimSpace(cfg.GrafanaROPassword) == "" {
+		return nil
+	}
+	if err := ensureRole(admin, roleGrafanaRO, cfg.GrafanaROPassword); err != nil {
+		return err
+	}
+
+	statements := []string{
+		fmt.Sprintf(`GRANT CONNECT ON DATABASE "%s" TO %s`, cfg.DatabaseName, roleGrafanaRO),
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, roleGrafanaRO),
+		fmt.Sprintf(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO %s`, roleGrafanaRO),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT ON TABLES TO %s`,
+			roleUnifiedAPI, roleGrafanaRO),
+	}
+	for _, stmt := range statements {
+		if _, err := admin.DB.Exec(stmt); err != nil {
+			return fmt.Errorf("bootstrap grafana read-only role with %q: %w", stmt, err)
+		}
+	}
 	return nil
 }
 

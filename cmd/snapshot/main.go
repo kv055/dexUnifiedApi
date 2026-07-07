@@ -1265,7 +1265,20 @@ func offlineExchangeNames(fetchers []exchFetcher, exchangeData exchangeSnapshotD
 	return names
 }
 
-func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string) ([]byte, int, error) {
+// fetchTimings accumulates per-exchange fetch effort across both directions of
+// one run: total wall time and how many direction-fetches came back nil. The
+// worker exits after each run, so these land in snapshot_log and are exposed
+// as gauges by unified-api's dbmetrics collector instead of local counters.
+type fetchTimings struct {
+	durationMS map[string]int64
+	failures   map[string]int
+}
+
+func newFetchTimings() *fetchTimings {
+	return &fetchTimings{durationMS: make(map[string]int64), failures: make(map[string]int)}
+}
+
+func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string, timings *fetchTimings) ([]byte, int, error) {
 	exchanges := make(map[string]any)
 	total := 0
 	for ex, ids := range exchangeData {
@@ -1275,8 +1288,9 @@ func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string
 		}
 		sort.Strings(idList)
 		exchanges[ex] = map[string]any{
-			"count": len(ids),
-			"ids":   idList,
+			"count":       len(ids),
+			"ids":         idList,
+			"duration_ms": timings.durationMS[ex],
 		}
 		total += len(ids)
 	}
@@ -1287,28 +1301,36 @@ func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string
 	for _, ex := range offline {
 		if _, ok := exchanges[ex]; !ok {
 			exchanges[ex] = map[string]any{
-				"count":   0,
-				"ids":     []string{},
-				"offline": true,
+				"count":       0,
+				"ids":         []string{},
+				"offline":     true,
+				"duration_ms": timings.durationMS[ex],
 			}
+		}
+	}
+	for ex, fails := range timings.failures {
+		if entry, ok := exchanges[ex].(map[string]any); ok {
+			entry["failed_fetches"] = fails
 		}
 	}
 	jsonBytes, err := json.Marshal(exchanges)
 	return jsonBytes, total, err
 }
 
-func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData, offline []string) {
-	jsonBytes, total, err := buildSnapshotLogPayload(exchangeData, offline)
+func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData, offline []string, timings *fetchTimings, cycle time.Duration) {
+	jsonBytes, total, err := buildSnapshotLogPayload(exchangeData, offline, timings)
 	if err != nil {
-		fmt.Printf("[SnapshotLog] encode error: %v\n", err)
+		slog.Error("snapshot log encode error", "err", err)
 		return
 	}
-	sdb.Exec("INSERT INTO snapshot_log (exchanges, offers_count) VALUES (?::jsonb, ?)", string(jsonBytes), total)
+	sdb.Exec("INSERT INTO snapshot_log (exchanges, offers_count, cycle_ms) VALUES (?::jsonb, ?, ?)",
+		string(jsonBytes), total, cycle.Milliseconds())
 }
 
 // --- Main ---
 
 func main() {
+	cycleStart := time.Now()
 	logging.Init(serviceName)
 	tpShutdown, err := tracing.Init(context.Background(), serviceName)
 	if err != nil {
@@ -1347,6 +1369,7 @@ func main() {
 		MonitorPassword:        config.RequireEnv("POSTGRES_MONITOR_PASSWORD"),
 		MMControllerPassword:   config.RequireEnv("POSTGRES_MM_CONTROLLER_PASSWORD"),
 		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
+		GrafanaROPassword:      config.EnvOrDefault("POSTGRES_GRAFANA_RO_PASSWORD", ""),
 	}); err != nil {
 		slog.ErrorContext(ctx, "database admin setup error", "err", err)
 		os.Exit(1)
@@ -1401,13 +1424,17 @@ func main() {
 
 	exchangeData := make(exchangeSnapshotData)
 	liveOffers := make([]livePayload, 0)
+	timings := newFetchTimings()
 
 	stage(ctx, "snapshot.fetch_offers", func() {
 		for _, direction := range []string{"sell", "buy"} {
 			slog.InfoContext(ctx, "fetching offers", "direction", direction)
 			for _, f := range fetchers {
+				fetchStart := time.Now()
 				result := f.fn(direction, refPrice)
+				timings.durationMS[f.name] += time.Since(fetchStart).Milliseconds()
 				if result == nil {
+					timings.failures[f.name]++
 					continue
 				}
 				before := len(result.Offers)
@@ -1485,7 +1512,7 @@ func main() {
 	stage(ctx, "snapshot.settle_closed_offers", func() { settleClosedOffers(sdb) })
 	stage(ctx, "snapshot.analyze_closed_offers", func() { analyzeClosedOffers(sdb) })
 
-	writeSnapshotLog(sdb, exchangeData, offline)
+	writeSnapshotLog(sdb, exchangeData, offline, timings, time.Since(cycleStart))
 	total := 0
 	names := make([]string, 0, len(exchangeData))
 	for name, ids := range exchangeData {

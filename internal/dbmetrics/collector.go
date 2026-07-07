@@ -56,6 +56,9 @@ type Collector struct {
 	lifecycleRows  *prometheus.Desc
 	accountHealthy *prometheus.Desc
 	accountAge     *prometheus.Desc
+	fetchDuration  *prometheus.Desc
+	fetchFailures  *prometheus.Desc
+	cycleDuration  *prometheus.Desc
 }
 
 // NewCollector builds a collector over db. Register it on the service registry.
@@ -90,6 +93,12 @@ func NewCollector(db *dbutil.DB) *Collector {
 			"Account health (1 healthy, 0 unhealthy) by provider and category.", []string{"provider", "category"}, nil),
 		accountAge: prometheus.NewDesc("dex_account_health_age_seconds",
 			"Seconds since the account was last health-checked.", []string{"provider"}, nil),
+		fetchDuration: prometheus.NewDesc("dex_exchange_fetch_duration_seconds",
+			"Wall time the latest snapshot run spent fetching each exchange (both directions).", []string{"exchange"}, nil),
+		fetchFailures: prometheus.NewDesc("dex_exchange_fetch_failures",
+			"Failed direction-fetches per exchange in the latest snapshot run.", []string{"exchange"}, nil),
+		cycleDuration: prometheus.NewDesc("dex_snapshot_cycle_duration_seconds",
+			"Total wall time of the latest snapshot worker run.", nil, nil),
 	}
 }
 
@@ -109,6 +118,9 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.lifecycleRows
 	ch <- c.accountHealthy
 	ch <- c.accountAge
+	ch <- c.fetchDuration
+	ch <- c.fetchFailures
+	ch <- c.cycleDuration
 }
 
 // Collect implements prometheus.Collector.
@@ -160,6 +172,15 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.accountAge, prometheus.GaugeValue, a.age.value, a.provider)
 		}
 	}
+	for _, v := range data.fetchDurations {
+		ch <- prometheus.MustNewConstMetric(c.fetchDuration, prometheus.GaugeValue, v.value, v.l1)
+	}
+	for _, v := range data.fetchFailures {
+		ch <- prometheus.MustNewConstMetric(c.fetchFailures, prometheus.GaugeValue, v.value, v.l1)
+	}
+	if data.cycleDuration.valid {
+		ch <- prometheus.MustNewConstMetric(c.cycleDuration, prometheus.GaugeValue, data.cycleDuration.value)
+	}
 }
 
 // fetch returns cached data when fresh, otherwise re-queries the DB.
@@ -209,6 +230,9 @@ type snapshot struct {
 	offersTotal    []labeledVal
 	lifecycleRows  nullFloat
 	accounts       []accountStat
+	fetchDurations []labeledVal
+	fetchFailures  []labeledVal
+	cycleDuration  nullFloat
 }
 
 // query runs every aggregate. A failing section logs and is left empty so one
@@ -307,9 +331,18 @@ func (c *Collector) scanSnapshotLog(ctx context.Context, s *snapshot) {
 		SELECT EXTRACT(EPOCH FROM (now() - MAX(timestamp)))::float8, MAX(offers_count)::float8
 		FROM snapshot_log`).Scan(scanNull(&s.snapshotAge), scanNull(&s.snapshotOffers))
 
-	// Per-exchange counts from the latest run's JSONB payload.
+	// Run duration of the most recent cycle (cycle_ms is NULL on rows written
+	// by workers predating the column).
+	c.db.QueryRowContext(ctx, `
+		SELECT cycle_ms::float8 / 1000.0
+		FROM snapshot_log WHERE cycle_ms IS NOT NULL
+		ORDER BY timestamp DESC LIMIT 1`).Scan(scanNull(&s.cycleDuration))
+
+	// Per-exchange counts + fetch timings from the latest run's JSONB payload.
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT key, (value->>'count')::float8
+		SELECT key, (value->>'count')::float8,
+		       COALESCE((value->>'duration_ms')::float8, -1),
+		       COALESCE((value->>'failed_fetches')::float8, -1)
 		FROM snapshot_log, jsonb_each(exchanges)
 		WHERE id = (SELECT id FROM snapshot_log ORDER BY timestamp DESC LIMIT 1)`)
 	if err != nil {
@@ -319,12 +352,18 @@ func (c *Collector) scanSnapshotLog(ctx context.Context, s *snapshot) {
 	defer rows.Close()
 	for rows.Next() {
 		var exchange string
-		var count float64
-		if err := rows.Scan(&exchange, &count); err != nil {
+		var count, durationMS, failures float64
+		if err := rows.Scan(&exchange, &count, &durationMS, &failures); err != nil {
 			logErr("snapshot_log scan", err)
 			return
 		}
 		s.exchangeOffers = append(s.exchangeOffers, labeledVal{l1: exchange, value: count})
+		if durationMS >= 0 {
+			s.fetchDurations = append(s.fetchDurations, labeledVal{l1: exchange, value: durationMS / 1000.0})
+		}
+		if failures >= 0 {
+			s.fetchFailures = append(s.fetchFailures, labeledVal{l1: exchange, value: failures})
+		}
 	}
 }
 

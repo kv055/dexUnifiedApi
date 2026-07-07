@@ -198,6 +198,7 @@ func main() {
 		MonitorPassword:        config.RequireEnv("POSTGRES_MONITOR_PASSWORD"),
 		MMControllerPassword:   config.RequireEnv("POSTGRES_MM_CONTROLLER_PASSWORD"),
 		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
+		GrafanaROPassword:      config.EnvOrDefault("POSTGRES_GRAFANA_RO_PASSWORD", ""),
 	}); err != nil {
 		slog.Error("database admin setup error", "err", err)
 		os.Exit(1)
