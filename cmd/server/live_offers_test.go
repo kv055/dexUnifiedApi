@@ -292,6 +292,129 @@ func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	assertFloat(t, offer.Analysis.CappedVolume.AbortCost.Total.Pct, 0.9)
 }
 
+func TestHandleLiveOffersRESTIncludesMinVolumeScenario(t *testing.T) {
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	oldHubOffers := hub.getOffers()
+	oldKrakenPrice := getCexPrice("kraken")
+	defer func() {
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+		setCexPrice("kraken", oldKrakenPrice)
+		hub.setOffers(oldHubOffers)
+	}()
+
+	setCexPrice("kraken", 100)
+
+	est := tradecost.NewFixedEstimatorForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.02
+	btcMax := 0.1
+	hub.setOffers([]LiveOffer{{
+		ID:        1,
+		Exchange:  "bisq",
+		Direction: "buy",
+		Price:     102.5,
+		BTCMin:    &btcMin,
+		BTCMax:    &btcMax,
+		FirstSeen: "2026-04-01 12:00:00",
+		LastSeen:  "2026-04-01 12:00:00",
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
+	rec := httptest.NewRecorder()
+
+	handleLiveOffersREST(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var offers []liveOfferAPI
+	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offer count = %d, want 1", len(offers))
+	}
+
+	offer := offers[0]
+	if offer.Analysis.MinVolume == nil {
+		t.Fatal("expected min-volume scenario")
+	}
+	if offer.Analysis.MinVolume.CapFiat != nil {
+		t.Fatalf("min volume cap_fiat = %v, want nil", *offer.Analysis.MinVolume.CapFiat)
+	}
+	assertFloat(t, offer.Analysis.MinVolume.TradeSizeBTC, 0.02)
+	assertFloat(t, offer.Analysis.MinVolume.TradeSizeFiat, 2)
+	// Fixed per-trade fees weigh more at the min size: withdrawal 0.00015 BTC
+	// (0.75%) + network 0.00005 BTC (0.25%) + taker 0.25% + dex 0.1% = 1.35%.
+	assertFloat(t, offer.Analysis.MinVolume.Premium.TradeCostPercent, 1.35)
+	assertFloat(t, offer.Analysis.MinVolume.Premium.NetPercent, 1.15)
+	assertFloat(t, offer.Analysis.MinVolume.Profit.BTC, 0.00023)
+	assertFloat(t, offer.Analysis.MinVolume.Profit.Fiat, 0.02)
+
+	// The full-size scenario stays untouched, and no fiat cap was requested.
+	assertFloat(t, offer.Analysis.FullVolume.TradeSizeBTC, 0.1)
+	if offer.Analysis.CappedVolume != nil {
+		t.Fatal("expected no capped scenario without a max fiat limit")
+	}
+}
+
+func TestHandleLiveOffersRESTOmitsMinVolumeWhenMinEqualsFullSize(t *testing.T) {
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	oldHubOffers := hub.getOffers()
+	oldKrakenPrice := getCexPrice("kraken")
+	defer func() {
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+		setCexPrice("kraken", oldKrakenPrice)
+		hub.setOffers(oldHubOffers)
+	}()
+
+	setCexPrice("kraken", 100)
+
+	est := tradecost.NewFixedEstimatorForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.1
+	btcMax := 0.1
+	hub.setOffers([]LiveOffer{{
+		ID:        1,
+		Exchange:  "bisq",
+		Direction: "buy",
+		Price:     102.5,
+		BTCMin:    &btcMin,
+		BTCMax:    &btcMax,
+		FirstSeen: "2026-04-01 12:00:00",
+		LastSeen:  "2026-04-01 12:00:00",
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
+	rec := httptest.NewRecorder()
+
+	handleLiveOffersREST(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var offers []liveOfferAPI
+	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offer count = %d, want 1", len(offers))
+	}
+	if offers[0].Analysis.MinVolume != nil {
+		t.Fatal("expected no min-volume scenario when the min equals the full size")
+	}
+}
+
 func TestHandleLiveOfferLifecycleRESTReturnsLifecyclePoints(t *testing.T) {
 	oldLifecycle := hub.lifecycle
 	defer func() {

@@ -174,6 +174,7 @@ type liveOfferScenario struct {
 type liveOfferAnalysis struct {
 	FullVolume   liveOfferScenario  `json:"full_volume"`
 	CappedVolume *liveOfferScenario `json:"capped_volume,omitempty"`
+	MinVolume    *liveOfferScenario `json:"min_volume,omitempty"`
 }
 
 type liveOfferAPI struct {
@@ -214,6 +215,9 @@ type liveOutOffer struct {
 	NetPremiumPctCapped       *float64                      `json:"net_premium_percent_capped,omitempty"`
 	EstimatedProfitBTCCapped  *float64                      `json:"estimated_profit_btc_capped,omitempty"`  // estimated BTC profit at the max fiat cap
 	EstimatedProfitFiatCapped *float64                      `json:"estimated_profit_fiat_capped,omitempty"` // estimated fiat profit at the max fiat cap
+	CostBreakdownMin          *tradecost.CostBreakdown      `json:"cost_breakdown_min,omitempty"`           // at the offer's min amount (only set when min < full size)
+	TradeCostPctMin           *float64                      `json:"trade_cost_percent_min,omitempty"`
+	NetPremiumPctMin          *float64                      `json:"net_premium_percent_min,omitempty"`
 	BTCMin                    *float64                      `json:"btc_min"`
 	BTCMax                    *float64                      `json:"btc_max"`
 	FiatMin                   *int64                        `json:"fiat_min"`
@@ -353,6 +357,9 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 	if o.CostBreakdownCapped != nil && o.TradeCostPctCapped != nil && o.NetPremiumPctCapped != nil {
 		capFiat := tradecost.Round2(o.CostBreakdownCapped.BTCAmount * o.RefPrice)
 		api.Analysis.CappedVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownCapped, o.RefPrice, &capFiat, *o.TradeCostPctCapped, *o.NetPremiumPctCapped))
+	}
+	if o.CostBreakdownMin != nil && o.TradeCostPctMin != nil && o.NetPremiumPctMin != nil {
+		api.Analysis.MinVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownMin, o.RefPrice, nil, *o.TradeCostPctMin, *o.NetPremiumPctMin))
 	}
 	return api
 }
@@ -558,6 +565,17 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			}
 		}
 
+		// If the offer has a minimum amount below its full size, compute a third
+		// breakdown at that minimum so the frontend can show the smallest viable trade.
+		var bdMin *tradecost.CostBreakdown
+		var tcMin, npMin *float64
+		if o.BTCMin != nil && *o.BTCMin > 0 && *o.BTCMin < btcSize {
+			tc3, np3, bd3 := computeNetPremiumFieldsFull(pct, *o.BTCMin, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+			bdMin = &bd3
+			tcMin = &tc3
+			npMin = &np3
+		}
+
 		result = append(result, liveOutOffer{
 			ID:                        o.ID,
 			Exchange:                  o.Exchange,
@@ -579,6 +597,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			NetPremiumPctCapped:       npCapped,
 			EstimatedProfitBTCCapped:  profitBTCCapped,
 			EstimatedProfitFiatCapped: profitFiatCapped,
+			CostBreakdownMin:          bdMin,
+			TradeCostPctMin:           tcMin,
+			NetPremiumPctMin:          npMin,
 			BTCMin:                    o.BTCMin,
 			BTCMax:                    o.BTCMax,
 			FiatMin:                   o.FiatMin,
