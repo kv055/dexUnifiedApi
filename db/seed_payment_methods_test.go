@@ -25,9 +25,9 @@ func TestSeedPaymentMethodsIdempotent(t *testing.T) {
 		t.Fatalf("seeded rows = %d, want %d", before, want)
 	}
 
-	// Panel-style edit: recategorize and activate SEPA.
+	// Panel-style edit: recategorize, activate, and add manual aliases to SEPA.
 	if _, err := db.ExecContext(ctx,
-		`UPDATE payment_methods SET priority = 42, is_active = TRUE WHERE name = 'SEPA'`); err != nil {
+		`UPDATE payment_methods SET priority = 42, is_active = TRUE, alias_list = ARRAY['National Bank'] WHERE name = 'SEPA'`); err != nil {
 		t.Fatalf("edit row: %v", err)
 	}
 
@@ -37,18 +37,22 @@ func TestSeedPaymentMethodsIdempotent(t *testing.T) {
 
 	var after, priority int
 	var isActive bool
+	var aliasList paymentmethods.TextArray
 	if err := db.QueryRow(`SELECT count(*) FROM payment_methods`).Scan(&after); err != nil {
 		t.Fatalf("count after re-seed: %v", err)
 	}
 	if after != before {
 		t.Errorf("row count changed on re-seed: %d -> %d", before, after)
 	}
-	if err := db.QueryRow(`SELECT priority, is_active FROM payment_methods WHERE name = 'SEPA'`).
-		Scan(&priority, &isActive); err != nil {
+	if err := db.QueryRow(`SELECT priority, is_active, alias_list FROM payment_methods WHERE name = 'SEPA'`).
+		Scan(&priority, &isActive, &aliasList); err != nil {
 		t.Fatalf("reload edited row: %v", err)
 	}
 	if priority != 42 || !isActive {
 		t.Errorf("re-seed overwrote panel edit: priority=%d is_active=%v", priority, isActive)
+	}
+	if len(aliasList) != 1 || aliasList[0] != "National Bank" {
+		t.Errorf("re-seed overwrote alias_list: %v", aliasList)
 	}
 }
 
@@ -98,5 +102,17 @@ func TestSeedPaymentMethodsLinksTransmitters(t *testing.T) {
 	}
 	if len(reg.Warnings()) != 0 {
 		t.Errorf("unexpected registry warnings from seeded rows: %v", reg.Warnings())
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE payment_methods SET alias_list = ARRAY['Revoult Manual'] WHERE name = 'Revolut'`); err != nil {
+		t.Fatalf("update alias_list: %v", err)
+	}
+	rows, err = paymentmethods.LoadRows(ctx, db.DB)
+	if err != nil {
+		t.Fatalf("LoadRows after alias update: %v", err)
+	}
+	reg = paymentmethods.NewRegistry(rows)
+	if got := reg.Canonicalize("revoult_manual"); len(got) != 1 || got[0] != "Revolut" {
+		t.Errorf("Canonicalize alias via DB rows = %v, want [Revolut]", got)
 	}
 }
