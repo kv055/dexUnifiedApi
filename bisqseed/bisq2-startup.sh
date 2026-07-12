@@ -52,6 +52,11 @@ ensure_account_row_in_database
 #   --networkServiceConfig.torSocksHost=${BISQ2_TOR_SOCKS_HOST:-tor}
 #   --networkServiceConfig.torSocksPort=${BISQ2_TOR_SOCKS_PORT:-9050}
 
+# authorizationRequired=false is deliberate: in v2.1.11 that flag enables the
+# device-pairing clientId permission model (Headers.CLIENT_ID + AccessApi
+# pairing), NOT a static password — our Go clients cannot satisfy it. The
+# security boundary is the Docker bridge network plus the loopback-only 8090
+# publish in docker-compose.yml; bind.host=0.0.0.0 below is container-internal.
 su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -Xmx2g \
   -XX:MaxMetaspaceSize=256m \

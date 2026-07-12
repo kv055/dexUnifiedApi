@@ -172,6 +172,14 @@ if [ -d "$DB_DIR" ]; then
   echo "[startup] Done. DB size: $(du -sh "$DB_DIR" | cut -f1)"
 fi
 
+# Require gRPC credentials on :9998. All Go clients (unified-api, snapshot,
+# dexmonitor, mm-controller) send BISQ_API_PASSWORD as the gRPC "password"
+# call credential; an empty value would leave the trading API open to any
+# container on the bridge network, so warn loudly when unset.
+if [ -z "${BISQ_API_PASSWORD:-}" ]; then
+  echo "[startup] WARNING: BISQ_API_PASSWORD is empty — the gRPC API on :9998 accepts unauthenticated calls" >&2
+fi
+
 su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -Xmx2400m \
   -XX:MaxMetaspaceSize=256m \
@@ -181,7 +189,7 @@ su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -cp '/opt/bisq/bisq-daemon/daemon.jar:/opt/bisq/bisq-daemon/lib/*:/usr/share/java/javafx-base.jar:/usr/share/java/javafx-graphics.jar' \
   bisq.daemon.app.BisqDaemonMain \
   --apiPort=9998 \
-  --apiPassword= \
+  --apiPassword='${BISQ_API_PASSWORD:-}' \
   --appDataDir=/home/appuser/.local/share/Bisq \
   --nodePort=9999" &
 
