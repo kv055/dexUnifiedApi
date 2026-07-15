@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     phone TEXT,
     last_health_check TIMESTAMPTZ,
     is_healthy BOOLEAN NOT NULL DEFAULT FALSE,
+    payment_priority INTEGER,
     category TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

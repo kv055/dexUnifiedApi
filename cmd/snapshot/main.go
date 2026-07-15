@@ -1068,9 +1068,23 @@ func flushUnknownPaymentMethods(ctx context.Context, sdb *dbutil.DB) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		res, err := sdb.Exec(`INSERT INTO payment_methods (name, category)
-			VALUES (?, 'Others')
-			ON CONFLICT (name) DO NOTHING`, name)
+		// Re-check the live catalog at flush time. The registry is loaded once
+		// per snapshot, so an alias added while offers are being fetched must
+		// still win over auto-registering the raw name as a new Others row.
+		res, err := sdb.Exec(`
+			INSERT INTO payment_methods (name, category)
+			SELECT ?, 'Others'
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM payment_methods pm
+				WHERE lower(trim(replace(pm.name, '_', ' '))) = lower(trim(replace(?, '_', ' ')))
+				   OR EXISTS (
+					SELECT 1
+					FROM unnest(pm.alias_list) AS existing_alias
+					WHERE lower(trim(replace(existing_alias, '_', ' '))) = lower(trim(replace(?, '_', ' ')))
+				   )
+			)
+			ON CONFLICT (name) DO NOTHING`, name, name, name)
 		if err != nil {
 			slog.ErrorContext(ctx, "failed to register unknown payment method", "name", name, "err", err)
 			continue
