@@ -58,6 +58,9 @@ type Record struct {
 	NetPremiumPct float64
 	// CostBreakdown is the cost breakdown value for the record.
 	CostBreakdown tradecost.CostBreakdown
+	// MinCostBreakdown is the independently calculated cost at the offer's
+	// minimum executable amount. It is nil when min and full size are equal.
+	MinCostBreakdown *tradecost.CostBreakdown
 }
 
 // Repository represents a repository.
@@ -217,7 +220,12 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 			btc_amount      = ?,
 			hedge_notional_eur = ?,
 			leverage_used = ?,
-			recommended_collateral_eur = ?
+			recommended_collateral_eur = ?,
+			min_trade_cost_pct = ?,
+			min_trade_cost_btc = ?,
+			min_net_premium_pct = ?,
+			min_net_premium_btc = ?,
+			min_btc_amount = ?
 		WHERE id = ?
 	`)
 	if err != nil {
@@ -271,6 +279,15 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 					leverageUsed = tradecost.Round4(pos.LeverageUsed)
 					recommendedCollateralEUR = tradecost.Round2(pos.RecommendedCollateralEUR)
 				}
+				var minTradeCostPct, minTradeCostBTC, minNetPremiumPct, minNetPremiumBTC, minBTCAmount any
+				if minBD := o.MinCostBreakdown; minBD != nil && minBD.BTCAmount > 0 {
+					minNet := tradecost.Round4(storedPremium - minBD.TotalCostPct)
+					minTradeCostPct = tradecost.Round4(minBD.TotalCostPct)
+					minTradeCostBTC = tradecost.Round8(minBD.TotalCostBTC)
+					minNetPremiumPct = minNet
+					minNetPremiumBTC = tradecost.Round8(minBD.BTCAmount * minNet / 100)
+					minBTCAmount = tradecost.Round8(minBD.BTCAmount)
+				}
 				if _, err := enrichStmt.ExecContext(ctx,
 					tradecost.Round4(bd.TotalCostPct),
 					tradecost.Round8(bd.TotalCostBTC),
@@ -278,6 +295,7 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 					netBTC,
 					tradecost.Round8(bd.BTCAmount),
 					hedgeNotionalEUR, leverageUsed, recommendedCollateralEUR,
+					minTradeCostPct, minTradeCostBTC, minNetPremiumPct, minNetPremiumBTC, minBTCAmount,
 					rowID,
 				); err != nil {
 					return fmt.Errorf("enrich lifecycle for offer %d: %w", o.ID, err)

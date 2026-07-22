@@ -168,6 +168,49 @@ func TestIgnoredClosedOfferWithProfitableLifecycleIsAnalyzed(t *testing.T) {
 	assertAnalysisFloat(t, avgHedgeFee, 0.0006)
 }
 
+func TestClosedOfferAnalysisPersistsProfitableMinimumVolumeAverages(t *testing.T) {
+	db := openClosedOfferAnalysisDB(t)
+	offerID := insertClosedOffer(t, db, nil)
+	insertLifecycleRow(t, db, offerID, 5, 1, 4, 0.004, 0.1)
+	insertLifecycleRow(t, db, offerID, 4, 1, 3, 0.003, 0.1)
+	if _, err := db.Exec(`
+		UPDATE order_lifecycle SET
+			min_trade_cost_pct = CASE WHEN premium_pct = 5 THEN 2 ELSE 5 END,
+			min_trade_cost_btc = CASE WHEN premium_pct = 5 THEN 0.0004 ELSE 0.001 END,
+			min_net_premium_pct = CASE WHEN premium_pct = 5 THEN 3 ELSE -1 END,
+			min_net_premium_btc = CASE WHEN premium_pct = 5 THEN 0.0006 ELSE -0.0002 END,
+			min_btc_amount = 0.02
+		WHERE offer_db_id = ?
+	`, offerID); err != nil {
+		t.Fatalf("seed minimum lifecycle values: %v", err)
+	}
+
+	status, removed := analyzeSingleClosedOffer(db, closedOfferRecord{id: offerID})
+	if removed || status != "analyzed" {
+		t.Fatalf("analysis = (%q, removed=%v), want analyzed", status, removed)
+	}
+
+	var analyzed bool
+	var tradeCostPct, tradeCostBTC, netPct, profitBTC, profitFiat, btcAmount float64
+	if err := db.QueryRow(`
+		SELECT min_volume_analyzed, avg_min_trade_cost_pct, avg_min_trade_cost_btc,
+		       avg_min_net_premium_pct, avg_min_estimated_profit_btc,
+		       avg_min_estimated_profit_fiat, avg_min_btc_amount
+		FROM offers WHERE id = ?
+	`, offerID).Scan(&analyzed, &tradeCostPct, &tradeCostBTC, &netPct, &profitBTC, &profitFiat, &btcAmount); err != nil {
+		t.Fatalf("select minimum analysis: %v", err)
+	}
+	if !analyzed {
+		t.Fatal("minimum volume analysis was not marked complete")
+	}
+	assertAnalysisFloat(t, tradeCostPct, 2)
+	assertAnalysisFloat(t, tradeCostBTC, 0.0004)
+	assertAnalysisFloat(t, netPct, 3)
+	assertAnalysisFloat(t, profitBTC, 0.0006)
+	assertAnalysisFloat(t, profitFiat, 0.06)
+	assertAnalysisFloat(t, btcAmount, 0.02)
+}
+
 func TestClosedOfferWithNonProfitableLifecycleBecomesNonPremium(t *testing.T) {
 	db := openClosedOfferAnalysisDB(t)
 	offerID := insertClosedOffer(t, db, "ignored_no_lifecycle")

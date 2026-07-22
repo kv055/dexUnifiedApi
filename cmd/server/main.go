@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/fiat"
 	"commons/logging"
 	"commons/metrics"
 	"commons/prices"
@@ -402,6 +403,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
 	sub := liveSubscription{
 		cex:                   queryCex(r),
+		fiat:                  queryFiat(r),
 		requiredConfirmations: queryConfirmations(r),
 		excludedCEXes:         strings.Join(queryExcludedCEXes(r), ","),
 		feeTier:               queryFeeTier(r),
@@ -456,12 +458,13 @@ func writeLifecycleEntries(ctx context.Context, offers []liveOutOffer) {
 	records := make([]lifecycle.Record, 0, len(offers))
 	for _, o := range offers {
 		records = append(records, lifecycle.Record{
-			ID:            o.ID,
-			Price:         o.Price,
-			RefPrice:      o.RefPrice,
-			PriceDiffPct:  o.PriceDiffPct,
-			NetPremiumPct: o.NetPremiumPct,
-			CostBreakdown: o.CostBreakdown,
+			ID:               o.ID,
+			Price:            o.Price,
+			RefPrice:         o.RefPrice,
+			PriceDiffPct:     o.PriceDiffPct,
+			NetPremiumPct:    o.NetPremiumPct,
+			CostBreakdown:    o.CostBreakdown,
+			MinCostBreakdown: o.CostBreakdownMin,
 		})
 	}
 	if err := lifecycleRepo.PersistSnapshot(ctx, records); err != nil {
@@ -633,6 +636,14 @@ func queryCex(r *http.Request) string {
 		return cex
 	}
 	return defaultCEX
+}
+
+func queryFiat(r *http.Request) string {
+	currency, ok := fiat.Normalize(r.URL.Query().Get("fiat"))
+	if !ok {
+		return "EUR"
+	}
+	return currency
 }
 
 func queryInt(r *http.Request, key string, defaultVal int) int {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/fiat"
 	"commons/logging"
 	"commons/paymentmethods"
 	"commons/tracing"
@@ -163,7 +164,7 @@ type fetchResult struct {
 
 type exchFetcher struct {
 	name string
-	fn   func(string, int) *fetchResult
+	fn   func(string, string, int) *fetchResult
 }
 
 type exchangeSnapshotData map[string]map[string]bool
@@ -174,6 +175,7 @@ type livePayload struct {
 	FiatCurrency       string   `json:"fiat_currency"`
 	Direction          string   `json:"direction"`
 	Price              float64  `json:"price"`
+	ReferencePrice     float64  `json:"reference_price"`
 	BTCMin             *float64 `json:"btc_min"`
 	BTCMax             *float64 `json:"btc_max"`
 	FiatMin            *int64   `json:"fiat_min"`
@@ -358,6 +360,10 @@ func fetchReferencePrice(fiat string) int {
 // --- Exchange fetchers ---
 
 func fetchBisq(direction string, btcPrice int) *fetchResult {
+	return fetchBisqCurrency(direction, "EUR", btcPrice)
+}
+
+func fetchBisqCurrency(direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[Bisq] Could not get reference price")
 		return nil
@@ -380,7 +386,7 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 	stub := bisqgrpc.NewOffersClient(conn)
 	reply, err := stub.GetOffers(ctx, &bisqgrpc.GetOffersRequest{
 		Direction:    strings.ToUpper(direction),
-		CurrencyCode: "EUR",
+		CurrencyCode: currency,
 	})
 	if err != nil {
 		fmt.Printf("[Bisq] Error getting %s offers: %v\n", direction, err)
@@ -389,7 +395,9 @@ func fetchBisq(direction string, btcPrice int) *fetchResult {
 
 	var offers []offer
 	for _, o := range reply.Offers {
-		offers = append(offers, mapBisqOffer(o, direction, time.Now()))
+		mapped := mapBisqOffer(o, direction, time.Now())
+		mapped.FiatCurrency = currency
+		offers = append(offers, mapped)
 	}
 
 	fmt.Printf("[Bisq] Found %d %s offers\n", len(offers), direction)
@@ -442,6 +450,10 @@ func mapBisqOffer(o *bisqgrpc.OfferInfo, direction string, now time.Time) offer 
 }
 
 func fetchBisq2(direction string, btcPrice int) *fetchResult {
+	return fetchBisq2Currency(direction, "EUR", btcPrice)
+}
+
+func fetchBisq2Currency(direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[Bisq2] Could not get reference price")
 		return nil
@@ -453,7 +465,7 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	reqURL := fmt.Sprintf("http://%s/api/v1/offerbook/markets/EUR/offers", bisq2RESTHost)
+	reqURL := fmt.Sprintf("http://%s/api/v1/offerbook/markets/%s/offers", bisq2RESTHost, url.PathEscape(currency))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		fmt.Printf("[Bisq2] Build request error: %v\n", err)
@@ -572,7 +584,7 @@ func fetchBisq2(direction string, btcPrice int) *fetchResult {
 
 		newOffer := offer{
 			OfferID:        o.ID,
-			FiatCurrency:   "EUR",
+			FiatCurrency:   currency,
 			Price:          price,
 			BTCMin:         &btcMin,
 			BTCMax:         &btcMax,
@@ -644,7 +656,11 @@ func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
 }
 
 func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
-	reqURL := fmt.Sprintf("https://hodlhodl.com/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=EUR&filters[only_working_now]=true&sort[by]=price", direction)
+	return fetchHodlHodlCurrency(direction, "EUR", btcPrice)
+}
+
+func fetchHodlHodlCurrency(direction, currency string, btcPrice int) *fetchResult {
+	reqURL := fmt.Sprintf("https://hodlhodl.com/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", direction, url.QueryEscape(currency))
 	resp, err := clearnetClient().Get(reqURL)
 	if err != nil {
 		fmt.Printf("[HodlHodl] Error: %v\n", err)
@@ -700,7 +716,7 @@ func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
 		btcMax := round8(float64(fiatMax) / price)
 		newOffer := offer{
 			OfferID:        o.ID,
-			FiatCurrency:   "EUR",
+			FiatCurrency:   currency,
 			Price:          price,
 			BTCMin:         &btcMin,
 			BTCMax:         &btcMax,
@@ -774,8 +790,12 @@ func normalizeAllPeachMethods(raw []string) []string {
 // [min, max] with min == max (buy). For sells, prices.EUR is the total fiat volume
 // of the trade, not EUR/BTC.
 func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
-	methods, hasEUR := o.MeansOfPayment["EUR"]
-	if !hasEUR || len(methods) == 0 {
+	return mapPeachOfferCurrency(o, direction, "EUR", btcPrice)
+}
+
+func mapPeachOfferCurrency(o peachOffer, direction, currency string, btcPrice int) (offer, bool) {
+	methods, hasCurrency := o.MeansOfPayment[currency]
+	if !hasCurrency || len(methods) == 0 {
 		return offer{}, false
 	}
 
@@ -805,13 +825,13 @@ func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
 
 	switch direction {
 	case "sell":
-		eurFiat, ok := o.Prices["EUR"]
-		if !ok || eurFiat <= 0 {
+		currencyFiat, ok := o.Prices[currency]
+		if !ok || currencyFiat <= 0 {
 			return offer{}, false
 		}
-		fiatMin = int(math.Round(eurFiat))
+		fiatMin = int(math.Round(currencyFiat))
 		fiatMax = fiatMin
-		price = eurFiat / btcMax
+		price = currencyFiat / btcMax
 	default: // buy
 		if btcPrice <= 0 {
 			return offer{}, false
@@ -824,7 +844,7 @@ func mapPeachOffer(o peachOffer, direction string, btcPrice int) (offer, bool) {
 
 	result := offer{
 		OfferID:        o.ID,
-		FiatCurrency:   "EUR",
+		FiatCurrency:   currency,
 		Price:          price,
 		BTCMin:         &btcMin,
 		BTCMax:         &btcMax,
@@ -853,6 +873,10 @@ type peachOffer struct {
 }
 
 func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
+	return fetchPeachBitcoinCurrency(direction, "EUR", btcPrice)
+}
+
+func fetchPeachBitcoinCurrency(direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[PeachBitcoin] Could not get reference price")
 		return nil
@@ -904,7 +928,7 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 
 	var offers []offer
 	for _, o := range allOffers {
-		mapped, ok := mapPeachOffer(o, direction, btcPrice)
+		mapped, ok := mapPeachOfferCurrency(o, direction, currency, btcPrice)
 		if !ok {
 			continue
 		}
@@ -916,6 +940,14 @@ func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
 }
 
 func fetchRobosats(direction string, btcPrice int) *fetchResult {
+	return fetchRobosatsCurrency(direction, "EUR", btcPrice)
+}
+
+func fetchRobosatsCurrency(direction, currency string, btcPrice int) *fetchResult {
+	currencyID := fiat.RoboSatsCurrencyID(currency)
+	if currencyID == 0 {
+		return nil
+	}
 	offerType := 1 // sell
 	if direction == "buy" {
 		offerType = 0
@@ -923,7 +955,7 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 
 	client := torClient()
 	for _, onion := range robosatsOnions {
-		reqURL := fmt.Sprintf("%s/api/book/?currency=2&type=%d", onion, offerType)
+		reqURL := fmt.Sprintf("%s/api/book/?currency=%d&type=%d", onion, currencyID, offerType)
 		resp, err := client.Get(reqURL)
 		if err != nil {
 			fmt.Printf("[Robosats] %s failed: %v, trying next...\n", onion, err)
@@ -1002,7 +1034,7 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 
 			newOffer := offer{
 				OfferID:            line.ID.String(),
-				FiatCurrency:       "EUR",
+				FiatCurrency:       currency,
 				Price:              price,
 				BTCMin:             &btcMin,
 				BTCMax:             &btcMax,
@@ -1135,7 +1167,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		// order_lifecycle rows and pushing N duplicate hub entries — the bloat that
 		// OOM-killed the server (offer #989 got 83 rows every snapshot).
 		if o.OfferID != "" {
-			err := tx.QueryRow("SELECT id FROM offers WHERE offer_id = ?", o.OfferID).Scan(&existingID)
+			err := tx.QueryRow("SELECT id FROM offers WHERE exchange = ? AND fiat_currency = ? AND offer_id = ?", exchange, fiat, o.OfferID).Scan(&existingID)
 			found = err == nil
 		} else {
 			err := tx.QueryRow(`SELECT id FROM offers
@@ -1157,6 +1189,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 			FiatCurrency:           fiat,
 			Direction:              direction,
 			Price:                  o.Price,
+			ReferencePrice:         btcPrice,
 			BTCMin:                 o.BTCMin,
 			BTCMax:                 o.BTCMax,
 			PriceType:              o.PriceType,
@@ -1359,12 +1392,19 @@ func main() {
 
 	slog.InfoContext(ctx, "starting orderbook snapshot")
 
-	refPrice := fetchReferencePrice("eur")
-	if refPrice == 0 {
-		slog.ErrorContext(ctx, "could not get reference price, aborting")
+	refPrices := make(map[string]int, len(fiat.Enabled))
+	for _, currency := range fiat.Enabled {
+		if price := fetchReferencePrice(strings.ToLower(currency)); price > 0 {
+			refPrices[currency] = price
+			slog.InfoContext(ctx, "reference price", "fiat", currency, "price", price)
+		} else {
+			slog.WarnContext(ctx, "could not get reference price; skipping currency", "fiat", currency)
+		}
+	}
+	if len(refPrices) == 0 {
+		slog.ErrorContext(ctx, "could not get any reference price, aborting")
 		os.Exit(1)
 	}
-	slog.InfoContext(ctx, "reference price", "eur", refPrice)
 
 	adminDB, err := dbutil.Open(adminDatabaseURL)
 	if err != nil {
@@ -1422,49 +1462,76 @@ func main() {
 	}
 	paymentmethods.SetDefault(pmRegistry)
 
-	// Fetch and store Kraken OHLC candles before settlement
-	stage(ctx, "snapshot.fetch_ohlc", func() { fetchAndStoreKrakenOHLC(sdb) })
+	// Fetch matching-currency Kraken candles before settlement. A missing market
+	// only leaves that currency without historical settlement; it never reuses
+	// EUR candles for a non-EUR offer.
+	stage(ctx, "snapshot.fetch_ohlc", func() {
+		for _, currency := range fiat.Enabled {
+			if _, ok := refPrices[currency]; ok {
+				fetchAndStoreKrakenOHLC(sdb, currency)
+			}
+		}
+	})
 
 	// Record start time; used after the run to mark which offers were seen
 	snapshotStart := time.Now().UTC()
 
 	fetchers := []exchFetcher{
-		{"bisq", fetchBisq},
-		{"bisq2", fetchBisq2},
-		{"hodlhodl", fetchHodlHodl},
-		{"robosats", fetchRobosats},
-		{"peachbitcoin", fetchPeachBitcoin},
+		{"bisq", fetchBisqCurrency},
+		{"bisq2", fetchBisq2Currency},
+		{"hodlhodl", fetchHodlHodlCurrency},
+		{"robosats", fetchRobosatsCurrency},
+		{"peachbitcoin", fetchPeachBitcoinCurrency},
 	}
 
 	exchangeData := make(exchangeSnapshotData)
 	liveOffers := make([]livePayload, 0)
 	timings := newFetchTimings()
+	serverURL := os.Getenv("SERVER_INTERNAL_URL")
+	if serverURL == "" {
+		serverURL = "http://localhost:5010"
+	}
 
 	stage(ctx, "snapshot.fetch_offers", func() {
-		for _, direction := range []string{"sell", "buy"} {
-			slog.InfoContext(ctx, "fetching offers", "direction", direction)
-			for _, f := range fetchers {
-				fetchStart := time.Now()
-				result := f.fn(direction, refPrice)
-				timings.durationMS[f.name] += time.Since(fetchStart).Milliseconds()
-				if result == nil {
-					timings.failures[f.name]++
-					continue
-				}
-				before := len(result.Offers)
-				result.Offers = filterDustOffers(result.Offers)
-				if dropped := before - len(result.Offers); dropped > 0 {
-					slog.InfoContext(ctx, "dust offers filtered", "exchange", f.name, "direction", direction, "dropped", dropped)
-				}
-				if !recordFetchResult(exchangeData, f.name, result) || len(result.Offers) == 0 {
-					continue
-				}
-				price := result.BTCPrice
-				if price == 0 {
-					price = float64(refPrice)
-				}
-				liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, "EUR", direction, price, result.Offers)...)
+		for _, currency := range fiat.Enabled {
+			refPrice, ok := refPrices[currency]
+			if !ok {
+				continue
 			}
+			for _, direction := range []string{"sell", "buy"} {
+				slog.InfoContext(ctx, "fetching offers", "direction", direction, "fiat", currency)
+				for _, f := range fetchers {
+					if !fiat.SupportsDEX(f.name, currency) {
+						continue
+					}
+					fetchStart := time.Now()
+					result := f.fn(direction, currency, refPrice)
+					timings.durationMS[f.name] += time.Since(fetchStart).Milliseconds()
+					if result == nil {
+						timings.failures[f.name]++
+						continue
+					}
+					before := len(result.Offers)
+					result.Offers = filterDustOffers(result.Offers)
+					if dropped := before - len(result.Offers); dropped > 0 {
+						slog.InfoContext(ctx, "dust offers filtered", "exchange", f.name, "direction", direction, "dropped", dropped)
+					}
+					if !recordFetchResult(exchangeData, f.name, result) || len(result.Offers) == 0 {
+						continue
+					}
+					price := result.BTCPrice
+					if price == 0 {
+						price = float64(refPrice)
+					}
+					liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, currency, direction, price, result.Offers)...)
+				}
+			}
+
+			// A complete multi-fiat scrape can take several minutes when a source
+			// is slow. Publish each completed currency immediately so its live
+			// offers and reference price are available without waiting for later
+			// currencies to finish.
+			pushLiveOffersToServer(ctx, liveOffers, serverURL)
 		}
 	})
 
@@ -1485,10 +1552,18 @@ func main() {
 		avg_net_premium_pct        = CASE WHEN last_seen >= ? THEN NULL ELSE avg_net_premium_pct END,
 		avg_estimated_profit_btc   = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_btc END,
 		avg_estimated_profit_fiat  = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_fiat END,
-		avg_btc_amount             = CASE WHEN last_seen >= ? THEN NULL ELSE avg_btc_amount END`,
+		avg_btc_amount             = CASE WHEN last_seen >= ? THEN NULL ELSE avg_btc_amount END,
+		avg_min_trade_cost_pct      = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_trade_cost_pct END,
+		avg_min_trade_cost_btc      = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_trade_cost_btc END,
+		avg_min_net_premium_pct     = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_net_premium_pct END,
+		avg_min_estimated_profit_btc = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_estimated_profit_btc END,
+		avg_min_estimated_profit_fiat = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_estimated_profit_fiat END,
+		avg_min_btc_amount          = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_btc_amount END,
+		min_volume_analyzed         = CASE WHEN last_seen >= ? THEN FALSE ELSE min_volume_analyzed END`,
 		snapshotStart, snapshotStart,
 		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
-		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart); err != nil {
+		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
+		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart); err != nil {
 		// Don't ignore this: on failure closed offers stay is_live=true and mislead
 		// the hub/analytics until a later cycle happens to succeed.
 		slog.ErrorContext(ctx, "failed to update is_live/duration for offers", "err", err)
@@ -1510,14 +1585,10 @@ func main() {
 	// DB, before the push. This guarantees a price-path point for each live offer
 	// even when the server is down/unreachable; the server enriches these rows
 	// with cost fields when it processes the push below.
-	stage(ctx, "snapshot.write_baseline_lifecycle", func() { writeBaselineLifecycle(sdb, liveOffers, refPrice) })
+	stage(ctx, "snapshot.write_baseline_lifecycle", func() { writeBaselineLifecycle(sdb, liveOffers, refPrices) })
 
 	// Push live offers directly to the server's in-memory hub. ctx carries the
 	// trace context so the POST continues this run's trace into unified-api.
-	serverURL := os.Getenv("SERVER_INTERNAL_URL")
-	if serverURL == "" {
-		serverURL = "http://localhost:5010"
-	}
 	pushLiveOffersToServer(ctx, liveOffers, serverURL)
 
 	// Settle closed offers: compute avg_ref_price from historical OHLC.
@@ -1537,8 +1608,9 @@ func main() {
 }
 
 // fetchAndStoreKrakenOHLC fetches 1-min Kraken OHLC candles and upserts them into ohlc.
-func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
-	resp, err := clearnetClient().Get("https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval=1")
+func fetchAndStoreKrakenOHLC(sdb *dbutil.DB, currency string) {
+	currency = strings.ToUpper(currency)
+	resp, err := clearnetClient().Get("https://api.kraken.com/0/public/OHLC?pair=XBT" + url.QueryEscape(currency) + "&interval=1")
 	if err != nil {
 		fmt.Printf("[OHLC] fetch error: %v\n", err)
 		return
@@ -1582,9 +1654,10 @@ func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
 			json.Unmarshal(c[3], &low)
 			json.Unmarshal(c[4], &cls)
 			t := time.Unix(int64(ts), 0).UTC().Format("2006-01-02 15:04:05")
-			tx.Exec(`INSERT INTO ohlc (time, open, high, low, close) VALUES (?, ?, ?, ?, ?)
-				ON CONFLICT(time) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close`,
+			tx.Exec(`INSERT INTO ohlc (time, fiat_currency, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT(time, fiat_currency) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close`,
 				t,
+				currency,
 				parseFloatStr(open), parseFloatStr(high), parseFloatStr(low), parseFloatStr(cls),
 			)
 			n++
@@ -1602,7 +1675,7 @@ func fetchAndStoreKrakenOHLC(sdb *dbutil.DB) {
 // not have a settled historical reference price yet.
 func settleClosedOffers(sdb *dbutil.DB) {
 	rows, err := sdb.Query(`
-		SELECT id,
+		SELECT id, fiat_currency,
 		       to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 		       to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 		FROM offers
@@ -1616,13 +1689,14 @@ func settleClosedOffers(sdb *dbutil.DB) {
 
 	type toSettle struct {
 		id        int64
+		currency  string
 		firstSeen string
 		lastSeen  string
 	}
 	var batch []toSettle
 	for rows.Next() {
 		var o toSettle
-		if err := rows.Scan(&o.id, &o.firstSeen, &o.lastSeen); err != nil {
+		if err := rows.Scan(&o.id, &o.currency, &o.firstSeen, &o.lastSeen); err != nil {
 			continue
 		}
 		batch = append(batch, o)
@@ -1634,19 +1708,19 @@ func settleClosedOffers(sdb *dbutil.DB) {
 		var avgClose float64
 		sdb.QueryRow(`
 			SELECT AVG(close) FROM ohlc
-			WHERE time >= ? AND time <= ?
-		`, o.firstSeen, o.lastSeen).Scan(&avgClose)
+			WHERE fiat_currency = ? AND time >= ? AND time <= ?
+		`, o.currency, o.firstSeen, o.lastSeen).Scan(&avgClose)
 
 		// No candles in range — offer's lifetime may predate our cached OHLC window.
 		// Fetch historical data from Kraken using the offer's first_seen as the
 		// since parameter, upsert into ohlc, then retry.
 		if avgClose == 0 {
 			if firstSeenUnix := parseDBTimeUnix(o.firstSeen); firstSeenUnix > 0 {
-				fetchAndStoreKrakenOHLCSince(sdb, firstSeenUnix)
+				fetchAndStoreKrakenOHLCSince(sdb, o.currency, firstSeenUnix)
 				sdb.QueryRow(`
 					SELECT AVG(close) FROM ohlc
-					WHERE time >= ? AND time <= ?
-				`, o.firstSeen, o.lastSeen).Scan(&avgClose)
+					WHERE fiat_currency = ? AND time >= ? AND time <= ?
+				`, o.currency, o.firstSeen, o.lastSeen).Scan(&avgClose)
 			}
 		}
 
@@ -1654,9 +1728,10 @@ func settleClosedOffers(sdb *dbutil.DB) {
 		if avgClose == 0 {
 			sdb.QueryRow(`
 				SELECT close FROM ohlc
+				WHERE fiat_currency = ?
 				ORDER BY ABS(EXTRACT(EPOCH FROM (time - ?::timestamptz)))
 				LIMIT 1
-			`, o.lastSeen).Scan(&avgClose)
+			`, o.currency, o.lastSeen).Scan(&avgClose)
 		}
 
 		if avgClose == 0 {
@@ -1678,13 +1753,17 @@ func settleClosedOffers(sdb *dbutil.DB) {
 // decouples price-path capture from server availability: a live offer always
 // gets a lifecycle point even if the server is down, unreachable, or rejects the
 // push.
-func writeBaselineLifecycle(sdb *dbutil.DB, offers []livePayload, refPrice int) {
+func writeBaselineLifecycle(sdb *dbutil.DB, offers []livePayload, refPrices map[string]int) {
 	if len(offers) == 0 {
 		return
 	}
 	repo := lifecycle.NewRepository(sdb)
 	baselines := make([]lifecycle.Baseline, 0, len(offers))
 	for _, o := range offers {
+		refPrice := refPrices[strings.ToUpper(o.FiatCurrency)]
+		if refPrice <= 0 {
+			continue
+		}
 		baselines = append(baselines, lifecycle.Baseline{
 			OfferID:    o.ID,
 			Price:      o.Price,
@@ -1742,8 +1821,9 @@ func pushLiveOffersToServer(ctx context.Context, offers []livePayload, serverURL
 // fetchAndStoreKrakenOHLCSince fetches 1-min candles starting from sinceUnix
 // and upserts them into ohlc. Used to backfill history for offers whose
 // lifetime predates the standard OHLC cache window (~7.5 days).
-func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64) {
-	url := fmt.Sprintf("https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval=1&since=%d", sinceUnix)
+func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, currency string, sinceUnix int64) {
+	currency = strings.ToUpper(currency)
+	url := fmt.Sprintf("https://api.kraken.com/0/public/OHLC?pair=XBT%s&interval=1&since=%d", url.QueryEscape(currency), sinceUnix)
 	resp, err := clearnetClient().Get(url)
 	if err != nil {
 		fmt.Printf("[OHLCSince] fetch error: %v\n", err)
@@ -1788,9 +1868,10 @@ func fetchAndStoreKrakenOHLCSince(sdb *dbutil.DB, sinceUnix int64) {
 			json.Unmarshal(c[3], &low)
 			json.Unmarshal(c[4], &cls)
 			t := time.Unix(int64(ts), 0).UTC().Format("2006-01-02 15:04:05")
-			tx.Exec(`INSERT INTO ohlc (time, open, high, low, close) VALUES (?, ?, ?, ?, ?)
-				ON CONFLICT(time) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close`,
+			tx.Exec(`INSERT INTO ohlc (time, fiat_currency, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT(time, fiat_currency) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close`,
 				t,
+				currency,
 				parseFloatStr(open), parseFloatStr(high), parseFloatStr(low), parseFloatStr(cls),
 			)
 			n++

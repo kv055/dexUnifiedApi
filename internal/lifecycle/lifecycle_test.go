@@ -81,6 +81,9 @@ func TestPersistSnapshotEnrichesBaselineAndStoresStaticCostsOnOffer(t *testing.T
 				},
 			},
 		},
+		MinCostBreakdown: &tradecost.CostBreakdown{
+			BTCAmount: 0.02, TotalCostPct: 3, TotalCostBTC: 0.0006,
+		},
 	}})
 	if err != nil {
 		t.Fatalf("PersistSnapshot: %v", err)
@@ -113,6 +116,20 @@ func TestPersistSnapshotEnrichesBaselineAndStoresStaticCostsOnOffer(t *testing.T
 	assertFloat(t, netPct, 4)
 	assertFloat(t, netBTC, 0.004)
 	assertFloat(t, btcAmount, 0.1)
+
+	var minTradeCostPct, minTradeCostBTC, minNetPct, minNetBTC, minBTCAmount float64
+	if err := db.QueryRow(`
+		SELECT min_trade_cost_pct, min_trade_cost_btc, min_net_premium_pct,
+		       min_net_premium_btc, min_btc_amount
+		FROM order_lifecycle WHERE offer_db_id = ?
+	`, offerID).Scan(&minTradeCostPct, &minTradeCostBTC, &minNetPct, &minNetBTC, &minBTCAmount); err != nil {
+		t.Fatalf("select minimum lifecycle values: %v", err)
+	}
+	assertFloat(t, minTradeCostPct, 3)
+	assertFloat(t, minTradeCostBTC, 0.0006)
+	assertFloat(t, minNetPct, 2)
+	assertFloat(t, minNetBTC, 0.0004)
+	assertFloat(t, minBTCAmount, 0.02)
 
 	var hedgeNotionalEUR, leverageUsed, recommendedCollateralEUR float64
 	if err := db.QueryRow(`

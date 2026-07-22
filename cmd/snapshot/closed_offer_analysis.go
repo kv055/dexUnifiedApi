@@ -117,6 +117,11 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 	var profAvgNetPremiumPct sql.NullFloat64
 	var profAvgNetPremiumBTC sql.NullFloat64
 	var profAvgBTCAmount sql.NullFloat64
+	var minAvgTradeCostPct sql.NullFloat64
+	var minAvgTradeCostBTC sql.NullFloat64
+	var minAvgNetPremiumPct sql.NullFloat64
+	var minAvgNetPremiumBTC sql.NullFloat64
+	var minAvgBTCAmount sql.NullFloat64
 
 	err := sdb.QueryRow(`
 		SELECT
@@ -131,7 +136,12 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 			AVG(CASE WHEN net_premium_pct > 0 THEN net_premium_pct END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN net_premium_btc END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN btc_amount     END),
-			COUNT(CASE WHEN premium_pct > 0 THEN 1 END)
+			COUNT(CASE WHEN premium_pct > 0 THEN 1 END),
+			AVG(CASE WHEN min_net_premium_pct > 0 THEN min_trade_cost_pct END),
+			AVG(CASE WHEN min_net_premium_pct > 0 THEN min_trade_cost_btc END),
+			AVG(CASE WHEN min_net_premium_pct > 0 THEN min_net_premium_pct END),
+			AVG(CASE WHEN min_net_premium_pct > 0 THEN min_net_premium_btc END),
+			AVG(CASE WHEN min_net_premium_pct > 0 THEN min_btc_amount END)
 		FROM order_lifecycle
 		WHERE offer_db_id = ?
 	`, offer.id).Scan(
@@ -147,6 +157,11 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		&profAvgNetPremiumBTC,
 		&profAvgBTCAmount,
 		&rawPositiveCount,
+		&minAvgTradeCostPct,
+		&minAvgTradeCostBTC,
+		&minAvgNetPremiumPct,
+		&minAvgNetPremiumBTC,
+		&minAvgBTCAmount,
 	)
 	if err != nil {
 		fmt.Printf("[ClosedAnalysis] aggregate query error for offer %d: %v\n", offer.id, err)
@@ -217,6 +232,7 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 	)
 
 	profitFiat := profAvgNetPremiumBTC.Float64 * avgRefPrice.Float64
+	minProfitFiat := minAvgNetPremiumBTC.Float64 * avgRefPrice.Float64
 
 	_, _ = sdb.Exec(`
 		UPDATE offers SET
@@ -241,6 +257,13 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 			avg_estimated_profit_btc   = ?,
 			avg_estimated_profit_fiat  = ?,
 			avg_btc_amount             = ?,
+			avg_min_trade_cost_pct      = ?,
+			avg_min_trade_cost_btc      = ?,
+			avg_min_net_premium_pct     = ?,
+			avg_min_estimated_profit_btc  = ?,
+			avg_min_estimated_profit_fiat = ?,
+			avg_min_btc_amount          = ?,
+			min_volume_analyzed         = TRUE,
 			best_route_cex             = ?,
 			best_route_method          = ?
 		WHERE id = ?
@@ -266,6 +289,12 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		historicalRound8(profAvgNetPremiumBTC.Float64),
 		historicalRound4(profitFiat),
 		historicalRound8(profAvgBTCAmount.Float64),
+		nullHistoricalRound4(minAvgTradeCostPct),
+		nullHistoricalRound8(minAvgTradeCostBTC),
+		nullHistoricalRound4(minAvgNetPremiumPct),
+		nullHistoricalRound8(minAvgNetPremiumBTC),
+		nullHistoricalRound4IfValid(minAvgNetPremiumBTC, minProfitFiat),
+		nullHistoricalRound8(minAvgBTCAmount),
 		bestRouteCEX.String,
 		bestRouteMethod.String,
 		offer.id,
@@ -286,6 +315,20 @@ func nullHistoricalRound8(v sql.NullFloat64) any {
 		return nil
 	}
 	return historicalRound8(v.Float64)
+}
+
+func nullHistoricalRound4(v sql.NullFloat64) any {
+	if !v.Valid {
+		return nil
+	}
+	return historicalRound4(v.Float64)
+}
+
+func nullHistoricalRound4IfValid(valid sql.NullFloat64, value float64) any {
+	if !valid.Valid {
+		return nil
+	}
+	return historicalRound4(value)
 }
 
 func nullHistoricalString(v sql.NullString) any {

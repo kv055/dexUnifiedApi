@@ -26,7 +26,7 @@ RUN adduser -D appuser && chown -R appuser:appuser /app
 
 USER appuser
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=12m --retries=3 \
     CMD sh -ec 'test -f /tmp/unified-snapshot-last-success && last_success="$(cat /tmp/unified-snapshot-last-success)" && now="$(date +%s)" && max_age="${SNAPSHOT_HEALTH_MAX_AGE_SEC:-180}" && [ $((now - last_success)) -le "$max_age" ]'
 
 CMD ["sh", "-ec", "interval_minutes=\"${SNAPSHOT_INTERVAL_MIN:-1}\"; while true; do if /app/snapshot; then date +%s >/tmp/unified-snapshot-last-success; fi; sleep $((interval_minutes * 60)); done"]

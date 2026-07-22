@@ -49,6 +49,9 @@ type LiveOffer struct {
 	Direction string `json:"direction"`
 	// Price is the price value used by the live offer.
 	Price float64 `json:"price"`
+	// ReferencePrice is the same-currency BTC reference captured by the snapshot
+	// worker. It is used for non-EUR offers until live CEX feeds are currency-aware.
+	ReferencePrice float64 `json:"reference_price"`
 	// BTCMin is a BTC-denominated btcmin value.
 	BTCMin *float64 `json:"btc_min"`
 	// BTCMax is a BTC-denominated btcmax value.
@@ -411,6 +414,7 @@ type LiveHub struct {
 
 type liveSubscription struct {
 	cex                   string
+	fiat                  string
 	requiredConfirmations int
 	excludedCEXes         string // comma-joined for map key comparability
 	feeTier               string
@@ -539,9 +543,23 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 	excludedCEXes := parseExcludedCEXes(sub.excludedCEXes)
 	result := make([]liveOutOffer, 0, len(offers))
 	for _, o := range offers {
-		pct := computeDirectionalPremiumPct(o.Direction, o.Price, price)
+		offerFiat := o.FiatCurrency
+		if offerFiat == "" {
+			offerFiat = "EUR" // compatibility with pre-multi-fiat snapshot payloads
+		}
+		if sub.fiat != "" && !strings.EqualFold(offerFiat, sub.fiat) {
+			continue
+		}
+		offerPrice := price
+		if !strings.EqualFold(offerFiat, "EUR") && o.ReferencePrice > 0 {
+			offerPrice = o.ReferencePrice
+		}
+		if offerPrice <= 0 {
+			continue
+		}
+		pct := computeDirectionalPremiumPct(o.Direction, o.Price, offerPrice)
 		btcSize := selectBTCTradeSize(o.BTCMax, o.BTCMin)
-		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 
 		// If a max fiat limit is set and the offer's full size exceeds it, compute a second
 		// breakdown capped to that fiat amount so the frontend can show both side by side.
@@ -549,17 +567,17 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		var abortCapped *tradecost.AbortCostBreakdown
 		var tcCapped, npCapped *float64
 		var profitBTCCapped, profitFiatCapped *float64
-		if sub.maxFiatLimitEUR > 0 && price > 0 {
-			btcCap := sub.maxFiatLimitEUR / price
+		if sub.maxFiatLimitEUR > 0 && offerPrice > 0 {
+			btcCap := sub.maxFiatLimitEUR / offerPrice
 			if btcSize > btcCap {
-				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 				bdCapped = &bd2
 				abort2 := tradecost.AbortCostFromBreakdown(bd2)
 				abortCapped = &abort2
 				tcCapped = &tc2
 				npCapped = &np2
 				profitBTC := bd2.EstimatedProfitBTC
-				profitFiat := tradecost.Round2(profitBTC * price)
+				profitFiat := tradecost.Round2(profitBTC * offerPrice)
 				profitBTCCapped = &profitBTC
 				profitFiatCapped = &profitFiat
 			}
@@ -570,7 +588,7 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		var bdMin *tradecost.CostBreakdown
 		var tcMin, npMin *float64
 		if o.BTCMin != nil && *o.BTCMin > 0 && *o.BTCMin < btcSize {
-			tc3, np3, bd3 := computeNetPremiumFieldsFull(pct, *o.BTCMin, price, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+			tc3, np3, bd3 := computeNetPremiumFieldsFull(pct, *o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 			bdMin = &bd3
 			tcMin = &tc3
 			npMin = &np3
@@ -584,11 +602,11 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			Price:                     o.Price,
 			RawPremiumPct:             pct,
 			PriceDiffPct:              pct,
-			RefPrice:                  price,
+			RefPrice:                  offerPrice,
 			TradeCostPct:              tradeCostPct,
 			NetPremiumPct:             netPremium,
 			EstimatedProfitBTC:        bd.EstimatedProfitBTC,
-			EstimatedProfitFiat:       tradecost.Round2(bd.EstimatedProfitBTC * price),
+			EstimatedProfitFiat:       tradecost.Round2(bd.EstimatedProfitBTC * offerPrice),
 			CostBreakdown:             bd,
 			CostBreakdownCapped:       bdCapped,
 			AbortCost:                 tradecost.AbortCostFromBreakdown(bd),
@@ -667,6 +685,7 @@ func handleLiveOfferLifecycleREST(w http.ResponseWriter, r *http.Request) {
 func handleLiveOffersWS(w http.ResponseWriter, r *http.Request) {
 	sub := liveSubscription{
 		cex:                   queryCex(r),
+		fiat:                  queryFiat(r),
 		requiredConfirmations: queryConfirmations(r),
 		excludedCEXes:         strings.Join(queryExcludedCEXes(r), ","),
 		feeTier:               queryFeeTier(r),
