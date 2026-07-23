@@ -68,9 +68,14 @@ func EnsureAppRoles(admin *DB, cfg RoleBootstrapConfig) error {
 		fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, roleList),
 		fmt.Sprintf(`GRANT CREATE ON SCHEMA public TO %s`, roleUnifiedAPI),
 		fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s`, roleList),
+		// Schema creation includes foreign keys to existing tables. PostgreSQL
+		// requires REFERENCES separately from the ordinary DML privileges.
+		fmt.Sprintf(`GRANT REFERENCES ON ALL TABLES IN SCHEMA public TO %s`, roleUnifiedAPI),
 		fmt.Sprintf(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s`, roleList),
 		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`,
 			roleUnifiedAPI, roleList),
+		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT REFERENCES ON TABLES TO %s`,
+			roleUnifiedAPI, roleUnifiedAPI),
 		fmt.Sprintf(`ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s`,
 			roleUnifiedAPI, roleList),
 	}
