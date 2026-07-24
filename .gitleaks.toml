@@ -1,0 +1,11 @@
+title = "dexArbTrading Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Encrypted dotenv files and non-secret dotenv templates"
+paths = [
+  '''(^|/)\.env(?:\..*)?\.enc$''',
+  '''(^|/)\.env(?:\..*)?\.example$''',
+]

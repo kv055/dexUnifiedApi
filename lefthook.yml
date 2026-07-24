@@ -1,3 +1,8 @@
+pre-commit:
+  scripts:
+    "protect-secrets.sh":
+      runner: bash
+
 post-commit:
   scripts:
     "encrypt-env.sh":
