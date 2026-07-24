@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/exchangecredentials"
 	"commons/fiat"
 	"commons/logging"
 	"commons/metrics"
@@ -225,7 +226,8 @@ func main() {
 	// One orchestrator serves every CEX: it picks the cheapest non-excluded CEX
 	// internally via the cextrading engine. The map is kept (the shared instance
 	// under each CEX key) only for CEX-name validation and optimizer adoption.
-	orchestrator := tradecost.NewTradeCostEstimator()
+	credentialStore := exchangecredentials.NewStore(db.DB)
+	orchestrator := tradecost.NewTradeCostEstimatorWithCredentials(credentialStore.Resolve)
 	tradeCostEstimators = make(map[string]*tradecost.TradeCostEstimator, len(supportedCEXes))
 	for _, c := range supportedCEXes {
 		tradeCostEstimators[c] = orchestrator
