@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     permissions JSONB,
     permissions_checked_at TIMESTAMPTZ,
+    permission_check_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
