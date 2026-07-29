@@ -164,15 +164,16 @@ type liveOfferScenarioCosts struct {
 }
 
 type liveOfferScenario struct {
-	CapFiat       *float64                     `json:"cap_fiat,omitempty"`
-	TradeSizeBTC  float64                      `json:"trade_size_btc"`
-	TradeSizeFiat float64                      `json:"trade_size_fiat"`
-	Route         liveOfferRoute               `json:"route"`
-	Premium       liveOfferPremium             `json:"premium"`
-	Profit        liveOfferProfit              `json:"profit"`
-	Costs         liveOfferScenarioCosts       `json:"costs"`
-	AbortCost     tradecost.AbortCostBreakdown `json:"abort_cost"`
-	Capital       tradecost.CapitalRequirement `json:"capital"` // capital to commit for this scenario's trade size
+	CapFiat            *float64                     `json:"cap_fiat,omitempty"`
+	TradeSizeBTC       float64                      `json:"trade_size_btc"`
+	TradeSizeFiat      float64                      `json:"trade_size_fiat"`
+	Route              liveOfferRoute               `json:"route"`
+	Premium            liveOfferPremium             `json:"premium"`
+	Profit             liveOfferProfit              `json:"profit"`
+	Costs              liveOfferScenarioCosts       `json:"costs"`
+	AbortCost          tradecost.AbortCostBreakdown `json:"abort_cost"`
+	Capital            tradecost.CapitalRequirement `json:"capital"` // capital to commit for this scenario's trade size
+	ManualRouteOptions tradecost.ManualRouteOptions `json:"manual_route_options"`
 }
 
 type liveOfferAnalysis struct {
@@ -220,6 +221,9 @@ type liveOutOffer struct {
 	EstimatedProfitBTCCapped  *float64                      `json:"estimated_profit_btc_capped,omitempty"`  // estimated BTC profit at the max fiat cap
 	EstimatedProfitFiatCapped *float64                      `json:"estimated_profit_fiat_capped,omitempty"` // estimated fiat profit at the max fiat cap
 	CostBreakdownMin          *tradecost.CostBreakdown      `json:"cost_breakdown_min,omitempty"`           // at the offer's min amount (only set when min < full size)
+	ManualRouteOptions        tradecost.ManualRouteOptions  `json:"-"`
+	ManualRouteOptionsCapped  *tradecost.ManualRouteOptions `json:"-"`
+	ManualRouteOptionsMin     *tradecost.ManualRouteOptions `json:"-"`
 	TradeCostPctMin           *float64                      `json:"trade_cost_percent_min,omitempty"`
 	NetPremiumPctMin          *float64                      `json:"net_premium_percent_min,omitempty"`
 	BTCMin                    *float64                      `json:"btc_min"`
@@ -259,7 +263,7 @@ func derefStringOrEmpty(v *string) string {
 	return *v
 }
 
-func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, capFiat *float64, tradeCostPct float64, netPremiumPct float64) liveOfferScenario {
+func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, capFiat *float64, tradeCostPct float64, netPremiumPct float64, manualOptions tradecost.ManualRouteOptions) liveOfferScenario {
 	return liveOfferScenario{
 		CapFiat:       capFiat,
 		TradeSizeBTC:  bd.BTCAmount,
@@ -299,8 +303,9 @@ func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, ca
 				BTC: bd.TotalCostBTC,
 			},
 		},
-		AbortCost: tradecost.AbortCostFromBreakdown(bd),
-		Capital:   bd.Capital,
+		AbortCost:          tradecost.AbortCostFromBreakdown(bd),
+		Capital:            bd.Capital,
+		ManualRouteOptions: manualOptions,
 	}
 }
 
@@ -352,7 +357,7 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 		},
 		BTCNetworkFee: buildBTCLiveNetworkFee(o.CostBreakdown, requiredConfirmations),
 		Analysis: liveOfferAnalysis{
-			FullVolume: buildScenarioFromBreakdown(o.CostBreakdown, o.RefPrice, nil, o.TradeCostPct, o.NetPremiumPct),
+			FullVolume: buildScenarioFromBreakdown(o.CostBreakdown, o.RefPrice, nil, o.TradeCostPct, o.NetPremiumPct, o.ManualRouteOptions),
 		},
 		SellerRatingScore:      o.SellerRatingScore,
 		SellerRatingConfidence: o.SellerRatingConfidence,
@@ -360,10 +365,18 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 	}
 	if o.CostBreakdownCapped != nil && o.TradeCostPctCapped != nil && o.NetPremiumPctCapped != nil {
 		capFiat := tradecost.Round2(o.CostBreakdownCapped.BTCAmount * o.RefPrice)
-		api.Analysis.CappedVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownCapped, o.RefPrice, &capFiat, *o.TradeCostPctCapped, *o.NetPremiumPctCapped))
+		manualOptions := tradecost.ManualRouteOptions{}
+		if o.ManualRouteOptionsCapped != nil {
+			manualOptions = *o.ManualRouteOptionsCapped
+		}
+		api.Analysis.CappedVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownCapped, o.RefPrice, &capFiat, *o.TradeCostPctCapped, *o.NetPremiumPctCapped, manualOptions))
 	}
 	if o.CostBreakdownMin != nil && o.TradeCostPctMin != nil && o.NetPremiumPctMin != nil {
-		api.Analysis.MinVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownMin, o.RefPrice, nil, *o.TradeCostPctMin, *o.NetPremiumPctMin))
+		manualOptions := tradecost.ManualRouteOptions{}
+		if o.ManualRouteOptionsMin != nil {
+			manualOptions = *o.ManualRouteOptionsMin
+		}
+		api.Analysis.MinVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownMin, o.RefPrice, nil, *o.TradeCostPctMin, *o.NetPremiumPctMin, manualOptions))
 	}
 	return api
 }
@@ -400,6 +413,13 @@ func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEU
 	bd.EstimatedProfitPct = netPremium
 	bd.EstimatedProfitBTC = math.Round((bd.BTCAmount*(netPremium/100))*1e8) / 1e8
 	return bd.TotalCostPct, netPremium, bd
+}
+
+func computeManualRouteOptions(btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedCEXes []string, feeTier string) tradecost.ManualRouteOptions {
+	if tradeRouteOptimizer == nil || btcSize <= 0 {
+		return tradecost.ManualRouteOptions{}
+	}
+	return tradeRouteOptimizer.ManualRouteOptionsForTrade(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedCEXes, feeTier)
 }
 
 // LiveHub holds live offers in memory and broadcasts to WebSocket subscribers
@@ -592,10 +612,12 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		pct := computeDirectionalPremiumPct(o.Direction, o.Price, offerPrice)
 		btcSize := selectBTCTradeSize(o.BTCMax, o.BTCMin)
 		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+		manualOptions := computeManualRouteOptions(btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier)
 
 		// If a max fiat limit is set and the offer's full size exceeds it, compute a second
 		// breakdown capped to that fiat amount so the frontend can show both side by side.
 		var bdCapped *tradecost.CostBreakdown
+		var manualOptionsCapped *tradecost.ManualRouteOptions
 		var abortCapped *tradecost.AbortCostBreakdown
 		var tcCapped, npCapped *float64
 		var profitBTCCapped, profitFiatCapped *float64
@@ -604,6 +626,8 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			if btcSize > btcCap {
 				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 				bdCapped = &bd2
+				options := computeManualRouteOptions(btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier)
+				manualOptionsCapped = &options
 				abort2 := tradecost.AbortCostFromBreakdown(bd2)
 				abortCapped = &abort2
 				tcCapped = &tc2
@@ -618,10 +642,13 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		// If the offer has a minimum amount below its full size, compute a third
 		// breakdown at that minimum so the frontend can show the smallest viable trade.
 		var bdMin *tradecost.CostBreakdown
+		var manualOptionsMin *tradecost.ManualRouteOptions
 		var tcMin, npMin *float64
 		if o.BTCMin != nil && *o.BTCMin > 0 && *o.BTCMin < btcSize {
 			tc3, np3, bd3 := computeNetPremiumFieldsFull(pct, *o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 			bdMin = &bd3
+			options := computeManualRouteOptions(*o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier)
+			manualOptionsMin = &options
 			tcMin = &tc3
 			npMin = &np3
 		}
@@ -648,6 +675,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			EstimatedProfitBTCCapped:  profitBTCCapped,
 			EstimatedProfitFiatCapped: profitFiatCapped,
 			CostBreakdownMin:          bdMin,
+			ManualRouteOptions:        manualOptions,
+			ManualRouteOptionsCapped:  manualOptionsCapped,
+			ManualRouteOptionsMin:     manualOptionsMin,
 			TradeCostPctMin:           tcMin,
 			NetPremiumPctMin:          npMin,
 			BTCMin:                    o.BTCMin,
