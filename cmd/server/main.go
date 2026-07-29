@@ -313,8 +313,13 @@ func main() {
 		})),
 	)
 
-	// The hub starts empty and is seeded by the next snapshot push; live offers
-	// are intentionally not reconstructed from persisted DB rows on startup.
+	// Seed the cache before any REST or WebSocket traffic is served. PostgreSQL
+	// remains authoritative; refresh failures later retain this complete book.
+	startupRefreshCtx, cancelStartupRefresh := context.WithTimeout(ctx, 30*time.Second)
+	if err := refreshLiveHub(startupRefreshCtx, nil); err != nil {
+		slog.Error("initial live book hydration failed", "err", err)
+	}
+	cancelStartupRefresh()
 
 	priceManager.Start(ctx)
 
@@ -403,6 +408,9 @@ func corsMiddleware(next http.Handler) http.Handler {
 // --- Handlers ---
 
 func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
+	if err := refreshLiveHub(r.Context(), nil); err != nil {
+		slog.WarnContext(r.Context(), "live book refresh failed; serving cached book", "err", err)
+	}
 	sub := liveSubscription{
 		cex:                   queryCex(r),
 		fiat:                  queryFiat(r),
@@ -526,15 +534,20 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	// hub here. That unbounded bulk load (all order_lifecycle rows for all live offers)
 	// is what OOM-killed this service; the per-offer lifecycle endpoint lazy-loads on
 	// demand instead.
-	hub.setOffers(offers)
+	if err := refreshLiveHub(ctx, offers); err != nil {
+		slog.WarnContext(ctx, "live book refresh failed; retaining cached book", "err", err)
+		http.Error(w, "live book refresh failed", http.StatusServiceUnavailable)
+		return
+	}
+	refreshedOffers := hub.getOffers()
 	price := getCexPrice(defaultCEX)
 	outOffers := hub.computeOutOffers(price, liveSubscription{cex: defaultCEX})
 	writeLifecycleEntries(ctx, outOffers)
 	// Look up Peach seller ratings only for net-profitable offers, in the
 	// background — Peach's per-maker API is slow/rate-limited and must not block
 	// the snapshot's push (which has its own short deadline).
-	go resolveAndApplyPeachRatings(context.Background(), offers, outOffers)
-	fmt.Printf("[LiveHub] updated with %d live offers from snapshot\n", len(offers))
+	go resolveAndApplyPeachRatings(context.Background(), refreshedOffers, outOffers)
+	fmt.Printf("[LiveHub] refreshed with %d live offers from PostgreSQL\n", len(refreshedOffers))
 	w.WriteHeader(http.StatusNoContent)
 }
 

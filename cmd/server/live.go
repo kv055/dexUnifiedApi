@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -412,6 +413,8 @@ type LiveHub struct {
 	subscribers map[chan []byte]liveSubscription
 }
 
+var liveRefreshMu sync.Mutex
+
 type liveSubscription struct {
 	cex                   string
 	fiat                  string
@@ -434,6 +437,35 @@ func (h *LiveHub) setOffers(offers []LiveOffer) {
 	h.offersMu.Unlock()
 	appMetrics.setOffersInHub(len(offers))
 	h.broadcastAll()
+}
+
+// refreshLiveHub atomically replaces the cached book only after PostgreSQL has
+// returned a complete result. A failed refresh deliberately leaves the previous
+// book visible.
+func refreshLiveHub(ctx context.Context, pushed []LiveOffer) error {
+	if db == nil {
+		return nil
+	}
+	liveRefreshMu.Lock()
+	defer liveRefreshMu.Unlock()
+
+	offers, err := newLiveOfferRepository(db).Load(ctx)
+	if err != nil {
+		return err
+	}
+	if len(pushed) > 0 {
+		makers := make(map[int64]string, len(pushed))
+		for _, offer := range pushed {
+			if offer.MakerID != "" {
+				makers[offer.ID] = offer.MakerID
+			}
+		}
+		for i := range offers {
+			offers[i].MakerID = makers[offers[i].ID]
+		}
+	}
+	hub.setOffers(offers)
+	return nil
 }
 
 func (h *LiveHub) getOffers() []LiveOffer {
@@ -683,6 +715,9 @@ func handleLiveOfferLifecycleREST(w http.ResponseWriter, r *http.Request) {
 // immediately on connect, then streams every subsequent broadcast.
 // Accepts optional ?cex=, ?fee_tier=, ?exclude_cexes= query params.
 func handleLiveOffersWS(w http.ResponseWriter, r *http.Request) {
+	if err := refreshLiveHub(r.Context(), nil); err != nil {
+		fmt.Printf("[LiveWS] live book refresh failed; serving cached book: %v\n", err)
+	}
 	sub := liveSubscription{
 		cex:                   queryCex(r),
 		fiat:                  queryFiat(r),

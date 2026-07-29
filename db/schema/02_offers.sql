@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS offers (
 CREATE INDEX IF NOT EXISTS idx_offers_exchange ON offers(exchange);
 CREATE INDEX IF NOT EXISTS idx_offers_direction ON offers(direction);
 CREATE INDEX IF NOT EXISTS idx_offers_last_seen ON offers(last_seen);
+CREATE INDEX IF NOT EXISTS idx_offers_live_fiat
+    ON offers(fiat_currency, id) WHERE is_live = TRUE;
 CREATE INDEX IF NOT EXISTS idx_offers_fingerprint
     ON offers(exchange, fiat_currency, direction, btc_min, btc_max);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_offer_id

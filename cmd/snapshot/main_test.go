@@ -371,6 +371,78 @@ func TestMapHodlHodlTrader(t *testing.T) {
 	}
 }
 
+func TestHodlHodlTraderRatingDecoding(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		ratingJSON      string
+		wantRating      *float64
+		wantUnavailable bool
+	}{
+		{name: "number", ratingJSON: `0.96`, wantRating: floatPtr(0.96)},
+		{name: "numeric string", ratingJSON: `"0.91"`, wantRating: floatPtr(0.91)},
+		{name: "null", ratingJSON: `null`, wantRating: nil},
+		{name: "malformed", ratingJSON: `{"bad":true}`, wantUnavailable: true},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var trader hodlHodlTrader
+			payload := []byte(`{"trades_count":12,"rating":` + tc.ratingJSON + `,"strong_hodler":false}`)
+			if err := json.Unmarshal(payload, &trader); err != nil {
+				t.Fatalf("unmarshal trader: %v", err)
+			}
+			if tc.wantRating == nil {
+				if trader.Rating != nil {
+					t.Fatalf("rating = %v, want nil", *trader.Rating)
+				}
+			} else if trader.Rating == nil || *trader.Rating != *tc.wantRating {
+				t.Fatalf("rating = %v, want %v", trader.Rating, *tc.wantRating)
+			}
+			score := mapHodlHodlTrader(trader)
+			if tc.wantUnavailable && score.Confidence != sellerrating.ConfidenceUnavailable {
+				t.Fatalf("confidence = %q, want unavailable", score.Confidence)
+			}
+			if !tc.wantUnavailable && score.Confidence == sellerrating.ConfidenceUnavailable {
+				t.Fatal("valid rating unexpectedly unavailable")
+			}
+		})
+	}
+}
+
+func TestDecodeRobosatsBookShapes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		body     string
+		wantLen  int
+		wantType string
+		wantErr  bool
+	}{
+		{name: "populated array", body: `[{"id":1}]`, wantLen: 1, wantType: "array"},
+		{name: "empty array", body: `[]`, wantLen: 0, wantType: "array"},
+		{name: "not found object", body: `{"not_found":"No orders found"}`, wantLen: 0, wantType: "not_found"},
+		{name: "unknown error object", body: `{"detail":"coordinator failed"}`, wantType: "error_object", wantErr: true},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			offers, responseType, err := decodeRobosatsBook([]byte(tc.body))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if responseType != tc.wantType {
+				t.Fatalf("response type = %q, want %q", responseType, tc.wantType)
+			}
+			if !tc.wantErr && len(offers) != tc.wantLen {
+				t.Fatalf("offers = %d, want %d", len(offers), tc.wantLen)
+			}
+		})
+	}
+}
+
 func TestSaveSnapshotPersistsSellerRating(t *testing.T) {
 	db := testdb.Open(t)
 	btcMin := 0.01

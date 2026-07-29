@@ -612,9 +612,49 @@ func fetchBisq2Currency(direction, currency string, btcPrice int) *fetchResult {
 // so it MUST stay a pointer — a bare float64 would decode null to 0.0,
 // indistinguishable from a genuinely terrible rating.
 type hodlHodlTrader struct {
-	TradesCount  int      `json:"trades_count"`
-	Rating       *float64 `json:"rating"`
-	StrongHodler bool     `json:"strong_hodler"`
+	TradesCount     int      `json:"trades_count"`
+	Rating          *float64 `json:"rating"`
+	StrongHodler    bool     `json:"strong_hodler"`
+	ratingMalformed bool
+}
+
+// UnmarshalJSON accepts the rating variants observed in HodlHodl's book:
+// number, numeric string, and null. An invalid rating is isolated to that
+// maker's reputation instead of rejecting the entire order book.
+func (t *hodlHodlTrader) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		TradesCount  int             `json:"trades_count"`
+		Rating       json.RawMessage `json:"rating"`
+		StrongHodler bool            `json:"strong_hodler"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	t.TradesCount = raw.TradesCount
+	t.StrongHodler = raw.StrongHodler
+	t.Rating = nil
+	t.ratingMalformed = false
+	if len(raw.Rating) == 0 || string(raw.Rating) == "null" {
+		return nil
+	}
+	var number float64
+	if err := json.Unmarshal(raw.Rating, &number); err == nil {
+		if !math.IsNaN(number) && !math.IsInf(number, 0) && number >= 0 && number <= 1 {
+			t.Rating = &number
+			return nil
+		}
+	}
+	var numericString string
+	if err := json.Unmarshal(raw.Rating, &numericString); err == nil {
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(numericString), 64); err == nil {
+			if !math.IsNaN(parsed) && !math.IsInf(parsed, 0) && parsed >= 0 && parsed <= 1 {
+				t.Rating = &parsed
+				return nil
+			}
+		}
+	}
+	t.ratingMalformed = true
+	return nil
 }
 
 const (
@@ -640,6 +680,9 @@ func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
 		"trades_count":  t.TradesCount,
 		"strong_hodler": t.StrongHodler,
 	})
+	if t.ratingMalformed {
+		return sellerrating.Unavailable()
+	}
 	s := sellerrating.NormalizeFeedbackRating(
 		t.Rating, t.TradesCount,
 		hodlHodlRatingPriorMean, hodlHodlRatingPriorWeight, hodlHodlVerifiedThreshold,
@@ -944,6 +987,31 @@ func fetchRobosats(direction string, btcPrice int) *fetchResult {
 }
 
 func fetchRobosatsCurrency(direction, currency string, btcPrice int) *fetchResult {
+	return fetchRobosatsCurrencyFrom(direction, currency, btcPrice, torClient(), robosatsOnions)
+}
+
+func decodeRobosatsBook(body []byte) ([]json.RawMessage, string, error) {
+	var rawOffers []json.RawMessage
+	if err := json.Unmarshal(body, &rawOffers); err == nil {
+		return rawOffers, "array", nil
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(body, &object); err != nil {
+		return nil, "invalid", err
+	}
+	if _, ok := object["not_found"]; ok {
+		return []json.RawMessage{}, "not_found", nil
+	}
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return nil, "error_object", fmt.Errorf("unknown response object keys: %s", strings.Join(keys, ","))
+}
+
+func fetchRobosatsCurrencyFrom(direction, currency string, btcPrice int, client *http.Client, coordinators []string) *fetchResult {
 	currencyID := fiat.RoboSatsCurrencyID(currency)
 	if currencyID == 0 {
 		return nil
@@ -953,20 +1021,27 @@ func fetchRobosatsCurrency(direction, currency string, btcPrice int) *fetchResul
 		offerType = 0
 	}
 
-	client := torClient()
-	for _, onion := range robosatsOnions {
+	for _, onion := range coordinators {
 		reqURL := fmt.Sprintf("%s/api/book/?currency=%d&type=%d", onion, currencyID, offerType)
 		resp, err := client.Get(reqURL)
 		if err != nil {
-			fmt.Printf("[Robosats] %s failed: %v, trying next...\n", onion, err)
+			fmt.Printf("[Robosats] coordinator=%s request failed: %v, trying next...\n", onion, err)
 			continue
 		}
-		body, _ := readAllLimited(resp.Body)
+		body, readErr := readAllLimited(resp.Body)
 		resp.Body.Close()
+		if readErr != nil {
+			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=read_error: %v, trying next...\n", onion, resp.StatusCode, readErr)
+			continue
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=http_error, trying next...\n", onion, resp.StatusCode)
+			continue
+		}
 
-		var rawOffers []json.RawMessage
-		if err := json.Unmarshal(body, &rawOffers); err != nil {
-			fmt.Printf("[Robosats] Parse error: %v, trying next...\n", err)
+		rawOffers, responseType, err := decodeRobosatsBook(body)
+		if err != nil {
+			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=%s: %v, trying next...\n", onion, resp.StatusCode, responseType, err)
 			continue
 		}
 
@@ -1054,7 +1129,7 @@ func fetchRobosatsCurrency(direction, currency string, btcPrice int) *fetchResul
 			offers = append(offers, newOffer)
 		}
 
-		fmt.Printf("[Robosats] Found %d %s offers\n", len(offers), direction)
+		fmt.Printf("[Robosats] Found %d %s offers (coordinator=%s status=%d response_type=%s)\n", len(offers), direction, onion, resp.StatusCode, responseType)
 		return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
 	}
 
@@ -1527,11 +1602,6 @@ func main() {
 				}
 			}
 
-			// A complete multi-fiat scrape can take several minutes when a source
-			// is slow. Publish each completed currency immediately so its live
-			// offers and reference price are available without waiting for later
-			// currencies to finish.
-			pushLiveOffersToServer(ctx, liveOffers, serverURL)
 		}
 	})
 

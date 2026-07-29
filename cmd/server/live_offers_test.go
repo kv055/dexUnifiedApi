@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"commons/tradecost"
+	"context"
 	"database/sql"
 	"dexunifiedapi/internal/testdb"
 	"encoding/json"
@@ -14,6 +15,93 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestRefreshLiveHubLoadsCompleteMultiFiatBookAndRetainsItOnFailure(t *testing.T) {
+	oldDB := db
+	oldHub := hub
+	t.Cleanup(func() {
+		db = oldDB
+		hub = oldHub
+	})
+
+	testDB := testdb.Open(t)
+	if _, err := testDB.Exec(`
+		INSERT INTO offers (
+			id, exchange, fiat_currency, direction, price, payment_methods,
+			offer_id, is_live, security_deposit_pct, seller_rating_score,
+			seller_rating_confidence, seller_rating_raw
+		) VALUES
+			(1, 'bisq', 'EUR', 'buy', 61000, ARRAY['SEPA'], 'eur-1', TRUE, 0.15, 91, 'feedback_verified', '{"rating":0.95}'::jsonb),
+			(2, 'hodlhodl', 'USD', 'sell', 67000, ARRAY['Wise'], 'usd-1', TRUE, NULL, 88, 'feedback_verified', '{"rating":0.9}'::jsonb),
+			(3, 'bisq', 'GBP', 'buy', 52000, ARRAY['Faster Payments'], 'closed-1', FALSE, NULL, NULL, NULL, NULL)
+	`); err != nil {
+		t.Fatalf("insert offers: %v", err)
+	}
+	if _, err := testDB.Exec(`
+		INSERT INTO order_lifecycle (offer_db_id, price, ref_price, premium_pct, snapshot_time)
+		VALUES
+			(1, 61000, 60000, 1.67, CURRENT_TIMESTAMP - INTERVAL '1 minute'),
+			(1, 61000, 60500, 0.83, CURRENT_TIMESTAMP),
+			(2, 67000, 66500, 0.75, CURRENT_TIMESTAMP)
+	`); err != nil {
+		t.Fatalf("insert lifecycle: %v", err)
+	}
+
+	db = testDB
+	hub = &LiveHub{
+		lifecycle:   make(map[int64][]LifecyclePoint),
+		subscribers: make(map[chan []byte]liveSubscription),
+	}
+	if err := refreshLiveHub(context.Background(), nil); err != nil {
+		t.Fatalf("refresh live hub: %v", err)
+	}
+	offers := hub.getOffers()
+	if len(offers) != 2 {
+		t.Fatalf("offers = %d, want 2 live offers", len(offers))
+	}
+	if offers[0].FiatCurrency != "EUR" || offers[0].ReferencePrice != 60500 {
+		t.Fatalf("EUR offer = %#v, want latest EUR lifecycle reference", offers[0])
+	}
+	if offers[1].FiatCurrency != "USD" || offers[1].ReferencePrice != 66500 {
+		t.Fatalf("USD offer = %#v, want USD lifecycle reference", offers[1])
+	}
+
+	if err := testDB.Close(); err != nil {
+		t.Fatalf("close test database: %v", err)
+	}
+	if err := refreshLiveHub(context.Background(), nil); err == nil {
+		t.Fatal("refresh after database close returned nil error")
+	}
+	if got := hub.getOffers(); len(got) != 2 || got[0].OfferID == nil || *got[0].OfferID != "eur-1" {
+		t.Fatalf("cached offers changed after failed refresh: %#v", got)
+	}
+}
+
+func TestLiveHubFiltersSubscriptionsByFiatAndUsesStoredReferencePrice(t *testing.T) {
+	oldHub := hub
+	oldPrices := cexPrices
+	t.Cleanup(func() {
+		hub = oldHub
+		cexPrices = oldPrices
+	})
+	hub = &LiveHub{
+		offers: []LiveOffer{
+			{ID: 1, Exchange: "bisq", FiatCurrency: "EUR", Direction: "buy", Price: 61000, ReferencePrice: 60000},
+			{ID: 2, Exchange: "hodlhodl", FiatCurrency: "USD", Direction: "sell", Price: 67000, ReferencePrice: 66500},
+		},
+		lifecycle:   make(map[int64][]LifecyclePoint),
+		subscribers: make(map[chan []byte]liveSubscription),
+	}
+	cexPrices = map[string]float64{"kraken": 60000}
+
+	offers := hub.computeOutOffers(60000, liveSubscription{cex: "kraken", fiat: "USD"})
+	if len(offers) != 1 || offers[0].ID != 2 {
+		t.Fatalf("USD subscription offers = %#v, want only offer 2", offers)
+	}
+	if offers[0].RefPrice != 66500 {
+		t.Fatalf("USD reference price = %v, want 66500", offers[0].RefPrice)
+	}
+}
 
 func assertFloat(t *testing.T, got, want float64) {
 	t.Helper()
@@ -563,8 +651,8 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 
 	testDB := testdb.Open(t)
 	if _, err := testDB.Exec(`
-		INSERT INTO offers (id, exchange, fiat_currency, direction, price)
-		VALUES (1, 'bisq', 'EUR', 'buy', 102.5)
+		INSERT INTO offers (id, exchange, fiat_currency, direction, price, btc_min, btc_max, is_live)
+		VALUES (1, 'bisq', 'EUR', 'buy', 102.5, 0.01, 0.1, TRUE)
 	`); err != nil {
 		t.Fatalf("insert offer: %v", err)
 	}
