@@ -1,5 +1,5 @@
 diff --git a/core/src/main/java/bisq/core/api/CoreApi.java b/core/src/main/java/bisq/core/api/CoreApi.java
-index 3db2a0e..c1bf2e1 100644
+index f8ae4cc..88d2dc5 100644
 --- a/core/src/main/java/bisq/core/api/CoreApi.java
 +++ b/core/src/main/java/bisq/core/api/CoreApi.java
 @@ -288,6 +288,23 @@ public class CoreApi {
@@ -158,11 +158,11 @@ index 9ac400d..e5dfd9c 100644
                              put(getGetPaymentAccountsMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
                              put(getGetPaymentMethodsMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
                              put(getGetPaymentAccountFormMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
-diff --git a/proto/src/main/proto/grpc.proto b/proto/src/main/proto/grpc.proto
-index be4e6c6..416d08a 100644
---- a/proto/src/main/proto/grpc.proto
-+++ b/proto/src/main/proto/grpc.proto
-@@ -375,6 +375,16 @@ service PaymentAccounts {
+diff --git a/proto-grpc/src/main/proto/grpc_services.proto b/proto-grpc/src/main/proto/grpc_services.proto
+index c564386..6314649 100644
+--- a/proto-grpc/src/main/proto/grpc_services.proto
++++ b/proto-grpc/src/main/proto/grpc_services.proto
+@@ -106,6 +106,16 @@ service PaymentAccounts {
      // Get list of all supported Bisq crypto currency (altcoin) payment methods.
      rpc GetCryptoCurrencyPaymentMethods (GetCryptoCurrencyPaymentMethodsRequest) returns (GetCryptoCurrencyPaymentMethodsReply) {
      }
@@ -178,11 +178,12 @@ index be4e6c6..416d08a 100644
 +    }
  }
  
- message CreatePaymentAccountRequest {
-@@ -426,6 +436,27 @@ message GetCryptoCurrencyPaymentMethodsReply {
-     repeated PaymentMethod payment_methods = 1;  // Ids of all supported Bisq altcoin payment methods.
- }
- 
+ service Price {
+diff --git a/proto/src/main/proto/grpc.proto b/proto/src/main/proto/grpc.proto
+index f487965..6b1b470 100644
+--- a/proto/src/main/proto/grpc.proto
++++ b/proto/src/main/proto/grpc.proto
+@@ -345,0 +346,20 @@ message GetCryptoCurrencyPaymentMethodsReply {
 +// dexArbTrading: discrete-field SEPA account creation (see rpc CreateSepaPaymentAccount).
 +message CreateSepaPaymentAccountRequest {
 +    string account_name = 1;    // Human-readable name for the payment account.
@@ -203,7 +204,3 @@ index be4e6c6..416d08a 100644
 +
 +message DeletePaymentAccountReply {
 +}
-+
- service Price {
-     // Get the current market price for a crypto currency.
-     rpc GetMarketPrice (MarketPriceRequest) returns (MarketPriceReply) {

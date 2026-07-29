@@ -2,7 +2,7 @@
 
 FROM eclipse-temurin:21-jdk-jammy AS bisq-builder
 
-ARG BISQ_VERSION=1.10.2
+ARG BISQ_VERSION=1.10.4
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,7 +54,7 @@ FROM eclipse-temurin:21-jre-jammy AS java-runtime
 
 FROM eclipse-temurin:21-jdk-jammy AS bisq-seed-helper-build
 
-ARG BISQ_VERSION=1.10.2
+ARG BISQ_VERSION=1.10.4
 
 COPY bisqseed/ExtractBisqSeed.java /src/ExtractBisqSeed.java
 COPY --from=bisq-builder /opt/bisq /opt/bisq
@@ -67,7 +67,7 @@ RUN mkdir -p /build && \
 
 FROM debian:bookworm-slim
 
-ARG BISQ_VERSION=1.10.2
+ARG BISQ_VERSION=1.10.4
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BISQ_VERSION=${BISQ_VERSION}
 ENV MALLOC_ARENA_MAX=4
