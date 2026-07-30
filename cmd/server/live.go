@@ -399,13 +399,13 @@ func selectBTCTradeSize(btcMax, btcMin *float64) float64 {
 	return tradecost.DefaultBTCTradeSize()
 }
 
-func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedCEXes []string, feeTier string, coupledHedge bool, realDepositPct *float64) (float64, float64, tradecost.CostBreakdown) {
+func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedSpotCEXes, excludedHedgeCEXes []string, feeTier string, coupledHedge bool, realDepositPct *float64) (float64, float64, tradecost.CostBreakdown) {
 	if tradeRouteOptimizer == nil || premiumPct <= 0 {
 		return 0, 0, tradecost.CostBreakdown{}
 	}
 
 	requiredConfirmations = tradecost.ResolveRequiredConfirmations(direction, requiredConfirmations)
-	bd := tradeRouteOptimizer.BestBreakdownFull(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedCEXes, feeTier, coupledHedge, realDepositPct)
+	bd := tradeRouteOptimizer.BestBreakdownFullWithExclusions(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, feeTier, coupledHedge, realDepositPct)
 	if bd.RouteCEX == "" {
 		return 0, 0, tradecost.CostBreakdown{}
 	}
@@ -415,11 +415,11 @@ func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEU
 	return bd.TotalCostPct, netPremium, bd
 }
 
-func computeManualRouteOptions(btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedCEXes []string, feeTier string) tradecost.ManualRouteOptions {
+func computeManualRouteOptions(btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedSpotCEXes, excludedHedgeCEXes []string, feeTier string) tradecost.ManualRouteOptions {
 	if tradeRouteOptimizer == nil || btcSize <= 0 {
 		return tradecost.ManualRouteOptions{}
 	}
-	return tradeRouteOptimizer.ManualRouteOptionsForTrade(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedCEXes, feeTier)
+	return tradeRouteOptimizer.ManualRouteOptionsForTradeWithExclusions(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, feeTier)
 }
 
 // LiveHub holds live offers in memory and broadcasts to WebSocket subscribers
@@ -439,7 +439,8 @@ type liveSubscription struct {
 	cex                   string
 	fiat                  string
 	requiredConfirmations int
-	excludedCEXes         string // comma-joined for map key comparability
+	excludedSpotCEXes     string // comma-joined for map key comparability
+	excludedHedgeCEXes    string
 	feeTier               string
 	coupledHedge          bool
 	maxFiatLimitEUR       float64 // 0 = disabled
@@ -592,7 +593,8 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 	h.offersMu.RLock()
 	lc := h.lifecycle
 	h.offersMu.RUnlock()
-	excludedCEXes := parseExcludedCEXes(sub.excludedCEXes)
+	excludedSpotCEXes := parseExcludedCEXes(sub.excludedSpotCEXes)
+	excludedHedgeCEXes := parseExcludedCEXes(sub.excludedHedgeCEXes)
 	result := make([]liveOutOffer, 0, len(offers))
 	for _, o := range offers {
 		offerFiat := o.FiatCurrency
@@ -611,8 +613,8 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		}
 		pct := computeDirectionalPremiumPct(o.Direction, o.Price, offerPrice)
 		btcSize := selectBTCTradeSize(o.BTCMax, o.BTCMin)
-		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
-		manualOptions := computeManualRouteOptions(btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier)
+		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+		manualOptions := computeManualRouteOptions(btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier)
 
 		// If a max fiat limit is set and the offer's full size exceeds it, compute a second
 		// breakdown capped to that fiat amount so the frontend can show both side by side.
@@ -624,9 +626,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		if sub.maxFiatLimitEUR > 0 && offerPrice > 0 {
 			btcCap := sub.maxFiatLimitEUR / offerPrice
 			if btcSize > btcCap {
-				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 				bdCapped = &bd2
-				options := computeManualRouteOptions(btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier)
+				options := computeManualRouteOptions(btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier)
 				manualOptionsCapped = &options
 				abort2 := tradecost.AbortCostFromBreakdown(bd2)
 				abortCapped = &abort2
@@ -645,9 +647,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		var manualOptionsMin *tradecost.ManualRouteOptions
 		var tcMin, npMin *float64
 		if o.BTCMin != nil && *o.BTCMin > 0 && *o.BTCMin < btcSize {
-			tc3, np3, bd3 := computeNetPremiumFieldsFull(pct, *o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+			tc3, np3, bd3 := computeNetPremiumFieldsFull(pct, *o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 			bdMin = &bd3
-			options := computeManualRouteOptions(*o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedCEXes, sub.feeTier)
+			options := computeManualRouteOptions(*o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier)
 			manualOptionsMin = &options
 			tcMin = &tc3
 			npMin = &np3
@@ -752,7 +754,8 @@ func handleLiveOffersWS(w http.ResponseWriter, r *http.Request) {
 		cex:                   queryCex(r),
 		fiat:                  queryFiat(r),
 		requiredConfirmations: queryConfirmations(r),
-		excludedCEXes:         strings.Join(queryExcludedCEXes(r), ","),
+		excludedSpotCEXes:     strings.Join(queryExcludedSpotCEXes(r), ","),
+		excludedHedgeCEXes:    strings.Join(queryExcludedHedgeCEXes(r), ","),
 		feeTier:               queryFeeTier(r),
 		coupledHedge:          queryCoupledHedge(r),
 		maxFiatLimitEUR:       queryMaxFiatLimitEUR(r),

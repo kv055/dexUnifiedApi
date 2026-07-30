@@ -13,6 +13,7 @@ import (
 	"crypto/subtle"
 	"dexunifiedapi/db"
 	"dexunifiedapi/internal/accounthealth"
+	"dexunifiedapi/internal/cexpermissions"
 	"dexunifiedapi/internal/config"
 	"dexunifiedapi/internal/dbmetrics"
 	"dexunifiedapi/internal/lifecycle"
@@ -42,6 +43,7 @@ const serviceName = "unified-api"
 // (the /internal/payment_notifications webhook ingest is separate, secret-gated).
 func sessionProtected(path string) bool {
 	return strings.HasPrefix(path, "/api/live_offers") ||
+		strings.HasPrefix(path, "/api/cex_permissions") ||
 		strings.HasPrefix(path, "/api/trade_cost_config") ||
 		strings.HasPrefix(path, "/api/payment_notifications") ||
 		strings.HasPrefix(path, "/ws/live_offers")
@@ -331,12 +333,14 @@ func main() {
 	mux.HandleFunc("GET /api/payment_notifications", handlePaymentNotifications)
 	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)
 	mux.HandleFunc("GET /api/trade_cost_config", handleTradeCostConfig)
+	mux.HandleFunc("GET /api/cex_permissions", handleCEXPermissions)
 	mux.HandleFunc("POST /api/accounts/health_check", handleAccountHealthCheck)
 	mux.HandleFunc("GET /health", handleHealth)
 
 	// Internal: snapshot tool pushes live offer data after each run
 	mux.HandleFunc("POST /internal/live_offers", handleInternalLiveOffers)
 	mux.HandleFunc("POST /internal/payment_notifications", handleInternalPaymentNotifications)
+	mux.Handle("GET /internal/cex_permissions", internalSecretGate(http.HandlerFunc(handleCEXPermissions)))
 	// Internal: service-to-service live-offers WS (e.g. mm-controller's
 	// premium-offer watcher). Browser clients use the session-gated
 	// /ws/live_offers above; internal callers carry no session cookie, so this
@@ -415,7 +419,8 @@ func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
 		cex:                   queryCex(r),
 		fiat:                  queryFiat(r),
 		requiredConfirmations: queryConfirmations(r),
-		excludedCEXes:         strings.Join(queryExcludedCEXes(r), ","),
+		excludedSpotCEXes:     strings.Join(queryExcludedSpotCEXes(r), ","),
+		excludedHedgeCEXes:    strings.Join(queryExcludedHedgeCEXes(r), ","),
 		feeTier:               queryFeeTier(r),
 		coupledHedge:          queryCoupledHedge(r),
 		maxFiatLimitEUR:       queryMaxFiatLimitEUR(r),
@@ -576,6 +581,15 @@ func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleCEXPermissions(w http.ResponseWriter, r *http.Request) {
+	response, err := cexpermissions.NewService(db).Get(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, response)
+}
+
 type accountHealthResponse struct {
 	Provider  string `json:"provider"`
 	Status    string `json:"status"`
@@ -700,7 +714,19 @@ func queryFeeTier(r *http.Request) string {
 }
 
 func queryExcludedCEXes(r *http.Request) []string {
-	values := append([]string{}, r.URL.Query()["exclude_cexes"]...)
+	return queryCEXList(r, "exclude_cexes")
+}
+
+func queryExcludedSpotCEXes(r *http.Request) []string {
+	return mergeCEXLists(queryExcludedCEXes(r), queryCEXList(r, "exclude_spot_cexes"))
+}
+
+func queryExcludedHedgeCEXes(r *http.Request) []string {
+	return mergeCEXLists(queryExcludedCEXes(r), queryCEXList(r, "exclude_hedge_cexes"))
+}
+
+func queryCEXList(r *http.Request, key string) []string {
+	values := append([]string{}, r.URL.Query()[key]...)
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
 	for _, raw := range values {
@@ -709,6 +735,21 @@ func queryExcludedCEXes(r *http.Request) []string {
 			if cex == "" {
 				continue
 			}
+			if _, ok := seen[cex]; ok {
+				continue
+			}
+			seen[cex] = struct{}{}
+			result = append(result, cex)
+		}
+	}
+	return result
+}
+
+func mergeCEXLists(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	for _, list := range lists {
+		for _, cex := range list {
 			if _, ok := seen[cex]; ok {
 				continue
 			}
