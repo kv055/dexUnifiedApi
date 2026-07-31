@@ -163,17 +163,28 @@ type liveOfferScenarioCosts struct {
 	Total      liveOfferCostComponent        `json:"total"`
 }
 
+// liveOfferModeVariant is the economics for an alternate trade mode on the
+// same spot route (currently Hedgeless Double Collateral).
+type liveOfferModeVariant struct {
+	Premium   liveOfferPremium             `json:"premium"`
+	Profit    liveOfferProfit              `json:"profit"`
+	Costs     liveOfferScenarioCosts       `json:"costs"`
+	AbortCost tradecost.AbortCostBreakdown `json:"abort_cost"`
+	Capital   tradecost.CapitalRequirement `json:"capital"`
+}
+
 type liveOfferScenario struct {
-	CapFiat            *float64                     `json:"cap_fiat,omitempty"`
-	TradeSizeBTC       float64                      `json:"trade_size_btc"`
-	TradeSizeFiat      float64                      `json:"trade_size_fiat"`
-	Route              liveOfferRoute               `json:"route"`
-	Premium            liveOfferPremium             `json:"premium"`
-	Profit             liveOfferProfit              `json:"profit"`
-	Costs              liveOfferScenarioCosts       `json:"costs"`
-	AbortCost          tradecost.AbortCostBreakdown `json:"abort_cost"`
-	Capital            tradecost.CapitalRequirement `json:"capital"` // capital to commit for this scenario's trade size
-	ManualRouteOptions tradecost.ManualRouteOptions `json:"manual_route_options"`
+	CapFiat                   *float64                     `json:"cap_fiat,omitempty"`
+	TradeSizeBTC              float64                      `json:"trade_size_btc"`
+	TradeSizeFiat             float64                      `json:"trade_size_fiat"`
+	Route                     liveOfferRoute               `json:"route"`
+	Premium                   liveOfferPremium             `json:"premium"`
+	Profit                    liveOfferProfit              `json:"profit"`
+	Costs                     liveOfferScenarioCosts       `json:"costs"`
+	AbortCost                 tradecost.AbortCostBreakdown `json:"abort_cost"`
+	Capital                   tradecost.CapitalRequirement `json:"capital"` // hedgefull single-collateral capital
+	ManualRouteOptions        tradecost.ManualRouteOptions `json:"manual_route_options"`
+	HedgelessDoubleCollateral *liveOfferModeVariant        `json:"hedgeless_double_collateral,omitempty"`
 }
 
 type liveOfferAnalysis struct {
@@ -263,8 +274,50 @@ func derefStringOrEmpty(v *string) string {
 	return *v
 }
 
+func scenarioCostsFromBreakdown(bd tradecost.CostBreakdown) liveOfferScenarioCosts {
+	return liveOfferScenarioCosts{
+		CexTaker: liveOfferCostComponent{
+			Pct: bd.CexTakerFeePct,
+			BTC: bd.CexTakerFeeBTC,
+		},
+		Withdrawal: liveOfferCostComponent{
+			Pct: bd.WithdrawalFeePct,
+			BTC: bd.WithdrawalFeeBTC,
+		},
+		DexFee: liveOfferCostComponent{
+			Pct: bd.DexFeePct,
+			BTC: bd.DexFeeBTC,
+		},
+		Network: liveOfferNetworkCost{
+			Pct: bd.NetworkFeePct,
+		},
+		Conversion: bd.Conversion,
+		Hedge:      bd.Hedge,
+		Total: liveOfferCostComponent{
+			Pct: bd.TotalCostPct,
+			BTC: bd.TotalCostBTC,
+		},
+	}
+}
+
+func buildModeVariantFromBreakdown(bd tradecost.CostBreakdown, refPrice float64) liveOfferModeVariant {
+	return liveOfferModeVariant{
+		Premium: liveOfferPremium{
+			TradeCostPercent: bd.TotalCostPct,
+			NetPercent:       bd.EstimatedProfitPct,
+		},
+		Profit: liveOfferProfit{
+			BTC:  bd.EstimatedProfitBTC,
+			Fiat: tradecost.Round2(bd.EstimatedProfitBTC * refPrice),
+		},
+		Costs:     scenarioCostsFromBreakdown(bd),
+		AbortCost: tradecost.AbortCostFromBreakdown(bd),
+		Capital:   bd.Capital,
+	}
+}
+
 func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, capFiat *float64, tradeCostPct float64, netPremiumPct float64, manualOptions tradecost.ManualRouteOptions) liveOfferScenario {
-	return liveOfferScenario{
+	scenario := liveOfferScenario{
 		CapFiat:       capFiat,
 		TradeSizeBTC:  bd.BTCAmount,
 		TradeSizeFiat: tradecost.Round2(bd.BTCAmount * refPrice),
@@ -280,33 +333,16 @@ func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, ca
 			BTC:  bd.EstimatedProfitBTC,
 			Fiat: tradecost.Round2(bd.EstimatedProfitBTC * refPrice),
 		},
-		Costs: liveOfferScenarioCosts{
-			CexTaker: liveOfferCostComponent{
-				Pct: bd.CexTakerFeePct,
-				BTC: bd.CexTakerFeeBTC,
-			},
-			Withdrawal: liveOfferCostComponent{
-				Pct: bd.WithdrawalFeePct,
-				BTC: bd.WithdrawalFeeBTC,
-			},
-			DexFee: liveOfferCostComponent{
-				Pct: bd.DexFeePct,
-				BTC: bd.DexFeeBTC,
-			},
-			Network: liveOfferNetworkCost{
-				Pct: bd.NetworkFeePct,
-			},
-			Conversion: bd.Conversion,
-			Hedge:      bd.Hedge,
-			Total: liveOfferCostComponent{
-				Pct: bd.TotalCostPct,
-				BTC: bd.TotalCostBTC,
-			},
-		},
+		Costs:              scenarioCostsFromBreakdown(bd),
 		AbortCost:          tradecost.AbortCostFromBreakdown(bd),
 		Capital:            bd.Capital,
 		ManualRouteOptions: manualOptions,
 	}
+	if hedgeless := tradecost.DeriveHedgelessDoubleCollateral(bd); hedgeless.RouteCEX != "" {
+		variant := buildModeVariantFromBreakdown(hedgeless, refPrice)
+		scenario.HedgelessDoubleCollateral = &variant
+	}
+	return scenario
 }
 
 func buildBTCLiveNetworkFee(bd tradecost.CostBreakdown, requiredConfirmations int) liveOfferBTCNetworkFee {

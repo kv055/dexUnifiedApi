@@ -312,6 +312,78 @@ func TestLiveOffersRESTUsesRealSecurityDepositFromOffer(t *testing.T) {
 	}
 }
 
+func TestLiveOffersRESTIncludesHedgelessDoubleCollateral(t *testing.T) {
+	oldHub := hub
+	oldPrices := cexPrices
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	defer func() {
+		hub = oldHub
+		cexPrices = oldPrices
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+	}()
+
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	cexPrices = map[string]float64{"kraken": 100}
+
+	const hedgeFeeBTC = 0.0002
+	est := tradecost.NewFixedEstimatorWithHedgeForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005, hedgeFeeBTC)
+	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.01
+	btcMax := 0.1
+	realDepositPct := 0.18
+	hub.offers = []LiveOffer{{
+		ID:                 1,
+		Exchange:           "bisq",
+		Direction:          "buy",
+		Price:              102.5,
+		BTCMin:             &btcMin,
+		BTCMax:             &btcMax,
+		FirstSeen:          "2026-04-01 12:00:00",
+		LastSeen:           "2026-04-01 12:00:00",
+		SecurityDepositPct: &realDepositPct,
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
+	rec := httptest.NewRecorder()
+	handleLiveOffersREST(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var offers []liveOfferAPI
+	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offer count = %d, want 1", len(offers))
+	}
+
+	full := offers[0].Analysis.FullVolume
+	if full.HedgelessDoubleCollateral == nil {
+		t.Fatal("hedgeless_double_collateral missing from full_volume")
+	}
+	hl := full.HedgelessDoubleCollateral
+
+	assertFloat(t, hl.Costs.Total.BTC, full.Costs.Total.BTC-hedgeFeeBTC)
+	assertFloat(t, hl.Costs.Hedge.FeeSumBTC, 0)
+	if hl.Capital.TradeMode != tradecost.TradeModeHedgelessDoubleCollateral {
+		t.Fatalf("hedgeless trade_mode = %q", hl.Capital.TradeMode)
+	}
+	assertFloat(t, hl.Capital.HedgeCollateralEUR, 0)
+	assertFloat(t, hl.Capital.BTCLiquidityBTC, 0.118) // 0.1 + 0.018
+	assertFloat(t, hl.Capital.FiatCollateralEUR, 10)   // position × 100
+	// total = (pos+deposit)*price + pos*price = 11.8 + 10 = 21.8
+	assertFloat(t, hl.Capital.TotalEUR, 21.8)
+	assertFloat(t, hl.Capital.TotalEUR, 2*hl.Capital.SpotNotionalEUR+hl.Capital.SecurityDepositEUR)
+	if full.Capital.TradeMode != tradecost.TradeModeHedgefullSingleCollateral {
+		t.Fatalf("hedgefull trade_mode = %q", full.Capital.TradeMode)
+	}
+}
+
 func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	oldOptimizer := tradeRouteOptimizer
 	oldEstimators := tradeCostEstimators
