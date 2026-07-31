@@ -306,7 +306,7 @@ func TestLiveOffersRESTUsesRealSecurityDepositFromOffer(t *testing.T) {
 	cap := offers[0].Analysis.FullVolume.Capital
 	assertFloat(t, cap.SecurityDepositPct, 0.18)
 	assertFloat(t, cap.SecurityDepositBTC, 0.018) // 0.1 * 0.18
-	assertFloat(t, cap.SecurityDepositEUR, 1.8)   // 0.018 * 100
+	assertFloat(t, cap.SecurityDepositFiat, 1.8)   // 0.018 * 100
 	if cap.DepositEstimated {
 		t.Fatal("DepositEstimated = true, want false for a real measured deposit")
 	}
@@ -373,12 +373,12 @@ func TestLiveOffersRESTIncludesHedgelessDoubleCollateral(t *testing.T) {
 	if hl.Capital.TradeMode != tradecost.TradeModeHedgelessDoubleCollateral {
 		t.Fatalf("hedgeless trade_mode = %q", hl.Capital.TradeMode)
 	}
-	assertFloat(t, hl.Capital.HedgeCollateralEUR, 0)
+	assertFloat(t, hl.Capital.HedgeCollateral, 0)
 	assertFloat(t, hl.Capital.BTCLiquidityBTC, 0.118) // 0.1 + 0.018
-	assertFloat(t, hl.Capital.FiatCollateralEUR, 10)   // position × 100
+	assertFloat(t, hl.Capital.FiatCollateral, 10)   // position × 100
 	// total = (pos+deposit)*price + pos*price = 11.8 + 10 = 21.8
-	assertFloat(t, hl.Capital.TotalEUR, 21.8)
-	assertFloat(t, hl.Capital.TotalEUR, 2*hl.Capital.SpotNotionalEUR+hl.Capital.SecurityDepositEUR)
+	assertFloat(t, hl.Capital.TotalFiat, 21.8)
+	assertFloat(t, hl.Capital.TotalFiat, 2*hl.Capital.SpotNotional+hl.Capital.SecurityDepositFiat)
 	if full.Capital.TradeMode != tradecost.TradeModeHedgefullSingleCollateral {
 		t.Fatalf("hedgefull trade_mode = %q", full.Capital.TradeMode)
 	}

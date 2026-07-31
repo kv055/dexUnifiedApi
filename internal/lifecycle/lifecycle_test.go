@@ -77,7 +77,7 @@ func TestPersistSnapshotEnrichesBaselineAndStoresStaticCostsOnOffer(t *testing.T
 				Position: &tradecost.HedgePositionDetail{
 					HedgeNotionalEUR:         10.5,
 					LeverageUsed:             5,
-					RecommendedCollateralEUR: 3.25,
+					RecommendedCollateral: 3.25,
 				},
 			},
 		},

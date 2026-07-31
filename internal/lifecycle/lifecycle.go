@@ -277,7 +277,7 @@ func (r Repository) PersistSnapshot(ctx context.Context, offers []Record) error 
 				if pos := bd.Hedge.Position; pos != nil {
 					hedgeNotionalEUR = tradecost.Round2(pos.HedgeNotionalEUR)
 					leverageUsed = tradecost.Round4(pos.LeverageUsed)
-					recommendedCollateralEUR = tradecost.Round2(pos.RecommendedCollateralEUR)
+					recommendedCollateralEUR = tradecost.Round2(pos.RecommendedCollateral)
 				}
 				var minTradeCostPct, minTradeCostBTC, minNetPremiumPct, minNetPremiumBTC, minBTCAmount any
 				if minBD := o.MinCostBreakdown; minBD != nil && minBD.BTCAmount > 0 {
