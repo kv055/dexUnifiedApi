@@ -198,6 +198,66 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	assertFloat(t, offer.Analysis.FullVolume.AbortCost.Total.Pct, 0.7)
 }
 
+// Non-positive premium skips cost routing, but trade_size must still reflect the
+// offer's volume_limits — otherwise the live Size column renders 0€.
+func TestLiveOffersRESTPreservesTradeSizeWhenPremiumNonPositive(t *testing.T) {
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	oldHubOffers := hub.getOffers()
+	oldKrakenPrice := getCexPrice("kraken")
+	defer func() {
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+		setCexPrice("kraken", oldKrakenPrice)
+		hub.setOffers(oldHubOffers)
+	}()
+
+	setCexPrice("kraken", 100)
+	est := tradecost.NewFixedEstimatorForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.01
+	btcMax := 0.1
+	fiatMax := int64(10)
+	hub.setOffers([]LiveOffer{{
+		ID:        1,
+		Exchange:  "bisq",
+		Direction: "buy",
+		Price:     98, // below ref → negative premium → no cost route
+		BTCMin:    &btcMin,
+		BTCMax:    &btcMax,
+		FiatMax:   &fiatMax,
+		FirstSeen: "2026-04-01 12:00:00",
+		LastSeen:  "2026-04-01 12:00:00",
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
+	rec := httptest.NewRecorder()
+	handleLiveOffersREST(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var offers []liveOfferAPI
+	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offer count = %d, want 1", len(offers))
+	}
+	offer := offers[0]
+	if offer.Pricing.RawPremiumPercent > 0 {
+		t.Fatalf("raw premium = %v, want <= 0", offer.Pricing.RawPremiumPercent)
+	}
+	assertFloat(t, offer.Analysis.FullVolume.TradeSizeBTC, 0.1)
+	assertFloat(t, offer.Analysis.FullVolume.TradeSizeFiat, 10)
+	if offer.Analysis.FullVolume.Route.CEX != "" {
+		t.Fatalf("route cex = %q, want empty when premium non-positive", offer.Analysis.FullVolume.Route.CEX)
+	}
+	assertFloat(t, offer.Analysis.FullVolume.Premium.NetPercent, 0)
+}
+
 func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
 	oldHub := hub
 	oldPrices := cexPrices

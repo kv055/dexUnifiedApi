@@ -436,14 +436,19 @@ func selectBTCTradeSize(btcMax, btcMin *float64) float64 {
 }
 
 func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedSpotCEXes, excludedHedgeCEXes []string, feeTier string, coupledHedge bool, realDepositPct *float64) (float64, float64, tradecost.CostBreakdown) {
+	// Always preserve the offer's executable trade size on the breakdown, even when
+	// we skip cost routing (non-positive premium / no optimizer / no route). Otherwise
+	// analysis.full_volume.trade_size_* becomes 0 and the live Size column shows 0€
+	// despite volume_limits still carrying a real btc_max/fiat_max.
+	emptySize := tradecost.CostBreakdown{BTCAmount: btcSize}
 	if tradeRouteOptimizer == nil || premiumPct <= 0 {
-		return 0, 0, tradecost.CostBreakdown{}
+		return 0, 0, emptySize
 	}
 
 	requiredConfirmations = tradecost.ResolveRequiredConfirmations(direction, requiredConfirmations)
 	bd := tradeRouteOptimizer.BestBreakdownFullWithExclusions(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, feeTier, coupledHedge, realDepositPct)
 	if bd.RouteCEX == "" {
-		return 0, 0, tradecost.CostBreakdown{}
+		return 0, 0, emptySize
 	}
 	netPremium := math.Round((premiumPct-bd.TotalCostPct)*100) / 100
 	bd.EstimatedProfitPct = netPremium
