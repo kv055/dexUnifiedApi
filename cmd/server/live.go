@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -472,6 +473,10 @@ type LiveHub struct {
 
 	subsMu      sync.Mutex
 	subscribers map[chan []byte]liveSubscription
+
+	capabilitiesMu     sync.RWMutex
+	excludedSpotCEXes  string
+	excludedHedgeCEXes string
 }
 
 var liveRefreshMu sync.Mutex
@@ -536,6 +541,28 @@ func (h *LiveHub) getOffers() []LiveOffer {
 	cp := make([]LiveOffer, len(h.offers))
 	copy(cp, h.offers)
 	return cp
+}
+
+// setCapabilityExclusions updates the server-authoritative routing overlay.
+// Keeping it separate from subscription preferences means policy and credential
+// changes also affect clients that already have a WebSocket connection open.
+func (h *LiveHub) setCapabilityExclusions(spot, hedge []string) {
+	spotJoined := strings.Join(spot, ",")
+	hedgeJoined := strings.Join(hedge, ",")
+	h.capabilitiesMu.Lock()
+	changed := h.excludedSpotCEXes != spotJoined || h.excludedHedgeCEXes != hedgeJoined
+	h.excludedSpotCEXes = spotJoined
+	h.excludedHedgeCEXes = hedgeJoined
+	h.capabilitiesMu.Unlock()
+	if changed {
+		h.broadcastAll()
+	}
+}
+
+func (h *LiveHub) capabilityExclusions() (spot, hedge []string) {
+	h.capabilitiesMu.RLock()
+	defer h.capabilitiesMu.RUnlock()
+	return parseExcludedCEXes(h.excludedSpotCEXes), parseExcludedCEXes(h.excludedHedgeCEXes)
 }
 
 // subscribe registers a new WebSocket client with a CEX preference.
@@ -634,8 +661,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 	h.offersMu.RLock()
 	lc := h.lifecycle
 	h.offersMu.RUnlock()
-	excludedSpotCEXes := parseExcludedCEXes(sub.excludedSpotCEXes)
-	excludedHedgeCEXes := parseExcludedCEXes(sub.excludedHedgeCEXes)
+	policySpotCEXes, policyHedgeCEXes := h.capabilityExclusions()
+	excludedSpotCEXes := mergeCEXLists(parseExcludedCEXes(sub.excludedSpotCEXes), policySpotCEXes)
+	excludedHedgeCEXes := mergeCEXLists(parseExcludedCEXes(sub.excludedHedgeCEXes), policyHedgeCEXes)
 	result := make([]liveOutOffer, 0, len(offers))
 	for _, o := range offers {
 		offerFiat := o.FiatCurrency
@@ -791,12 +819,17 @@ func handleLiveOffersWS(w http.ResponseWriter, r *http.Request) {
 	if err := refreshLiveHub(r.Context(), nil); err != nil {
 		fmt.Printf("[LiveWS] live book refresh failed; serving cached book: %v\n", err)
 	}
+	if err := refreshLiveCapabilityPolicy(r.Context()); err != nil {
+		slog.ErrorContext(r.Context(), "refresh MM CEX policy; routing fail-closed", "err", err)
+	}
+	spotExclusions := queryExcludedSpotCEXes(r)
+	hedgeExclusions := queryExcludedHedgeCEXes(r)
 	sub := liveSubscription{
 		cex:                   queryCex(r),
 		fiat:                  queryFiat(r),
 		requiredConfirmations: queryConfirmations(r),
-		excludedSpotCEXes:     strings.Join(queryExcludedSpotCEXes(r), ","),
-		excludedHedgeCEXes:    strings.Join(queryExcludedHedgeCEXes(r), ","),
+		excludedSpotCEXes:     strings.Join(spotExclusions, ","),
+		excludedHedgeCEXes:    strings.Join(hedgeExclusions, ","),
 		feeTier:               queryFeeTier(r),
 		coupledHedge:          queryCoupledHedge(r),
 		maxFiatLimitEUR:       queryMaxFiatLimitEUR(r),

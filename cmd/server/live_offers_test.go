@@ -103,6 +103,28 @@ func TestLiveHubFiltersSubscriptionsByFiatAndUsesStoredReferencePrice(t *testing
 	}
 }
 
+func TestLiveHubCapabilityExclusionsAreIndependentFromSubscription(t *testing.T) {
+	h := &LiveHub{subscribers: make(map[chan []byte]liveSubscription)}
+	h.setCapabilityExclusions([]string{"kraken"}, []string{"coinbase"})
+
+	spot, hedge := h.capabilityExclusions()
+	if strings.Join(spot, ",") != "kraken" || strings.Join(hedge, ",") != "coinbase" {
+		t.Fatalf("capability exclusions = spot %v hedge %v", spot, hedge)
+	}
+	sub := liveSubscription{excludedSpotCEXes: "binance"}
+	mergedSpot := mergeCEXLists(parseExcludedCEXes(sub.excludedSpotCEXes), spot)
+	if strings.Join(mergedSpot, ",") != "binance,kraken" {
+		t.Fatalf("merged spot exclusions = %v", mergedSpot)
+	}
+
+	// Re-enabling a provider updates the overlay without reconnecting the client.
+	h.setCapabilityExclusions(nil, nil)
+	spot, hedge = h.capabilityExclusions()
+	if len(spot) != 0 || len(hedge) != 0 {
+		t.Fatalf("cleared capability exclusions = spot %v hedge %v", spot, hedge)
+	}
+}
+
 func assertFloat(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-9 {

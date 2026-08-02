@@ -5,6 +5,7 @@ import (
 	"commons/fiat"
 	"commons/logging"
 	"commons/metrics"
+	"commons/mmcapabilities"
 	"commons/prices"
 	"commons/session"
 	"commons/tracing"
@@ -13,7 +14,6 @@ import (
 	"crypto/subtle"
 	"dexunifiedapi/db"
 	"dexunifiedapi/internal/accounthealth"
-	"dexunifiedapi/internal/cexpermissions"
 	"dexunifiedapi/internal/config"
 	"dexunifiedapi/internal/dbmetrics"
 	"dexunifiedapi/internal/lifecycle"
@@ -65,7 +65,9 @@ var (
 	bisq2RESTHost         string
 	bisq2APIPassword      string
 	accountHealthInterval time.Duration
+	capabilityMaxAge      time.Duration
 	db                    *dbutil.DB
+	capabilityStore       *mmcapabilities.Store
 	priceManager          *prices.Manager
 	lifecycleRepo         lifecycle.Repository
 	paymentNotifications  *paymentnotifications.Service
@@ -169,6 +171,7 @@ func init() {
 	bisq2RESTHost = strings.TrimSpace(os.Getenv("BISQ2_REST_HOST"))
 	bisq2APIPassword = os.Getenv("BISQ2_API_PASSWORD")
 	accountHealthInterval = accounthealth.ParseInterval(os.Getenv("ACCOUNT_HEALTH_INTERVAL"))
+	capabilityMaxAge = mmcapabilities.ParseMaxAge(os.Getenv("MM_CEX_CAPABILITY_MAX_AGE"))
 
 }
 
@@ -272,6 +275,24 @@ func main() {
 	metricsReg.Registry.MustRegister(dbmetrics.NewCollector(db))
 	priceManager.SetMetrics(prices.NewMetrics(metricsReg.Registry))
 
+	if err := refreshLiveCapabilityPolicy(ctx); err != nil {
+		slog.Error("initial MM CEX policy refresh failed; routing fail-closed", "err", err)
+	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := refreshLiveCapabilityPolicy(ctx); err != nil {
+					slog.Error("periodic MM CEX policy refresh failed; routing fail-closed", "err", err)
+				}
+			}
+		}
+	}()
+
 	recorder := accounthealth.NewDBRecorder(db)
 
 	go accounthealth.RunPeriodicAccountHealthCheck(
@@ -334,6 +355,7 @@ func main() {
 	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)
 	mux.HandleFunc("GET /api/trade_cost_config", handleTradeCostConfig)
 	mux.HandleFunc("GET /api/cex_permissions", handleCEXPermissions)
+	mux.HandleFunc("PUT /api/cex_permissions/{provider}", handleCEXPermissions)
 	mux.HandleFunc("POST /api/accounts/health_check", handleAccountHealthCheck)
 	mux.HandleFunc("GET /health", handleHealth)
 
@@ -399,7 +421,7 @@ func main() {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -415,12 +437,17 @@ func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
 	if err := refreshLiveHub(r.Context(), nil); err != nil {
 		slog.WarnContext(r.Context(), "live book refresh failed; serving cached book", "err", err)
 	}
+	if err := refreshLiveCapabilityPolicy(r.Context()); err != nil {
+		slog.ErrorContext(r.Context(), "refresh MM CEX policy; routing fail-closed", "err", err)
+	}
+	spotExclusions := queryExcludedSpotCEXes(r)
+	hedgeExclusions := queryExcludedHedgeCEXes(r)
 	sub := liveSubscription{
 		cex:                   queryCex(r),
 		fiat:                  queryFiat(r),
 		requiredConfirmations: queryConfirmations(r),
-		excludedSpotCEXes:     strings.Join(queryExcludedSpotCEXes(r), ","),
-		excludedHedgeCEXes:    strings.Join(queryExcludedHedgeCEXes(r), ","),
+		excludedSpotCEXes:     strings.Join(spotExclusions, ","),
+		excludedHedgeCEXes:    strings.Join(hedgeExclusions, ","),
 		feeTier:               queryFeeTier(r),
 		coupledHedge:          queryCoupledHedge(r),
 		maxFiatLimitEUR:       queryMaxFiatLimitEUR(r),
@@ -581,13 +608,79 @@ func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type cexCapabilitiesResponse struct {
+	Exchanges []mmcapabilities.ProviderState `json:"exchanges"`
+	MaxAgeSec int64                          `json:"max_age_seconds"`
+}
+
+func currentCapabilityStore() *mmcapabilities.Store {
+	if capabilityStore == nil && db != nil {
+		capabilityStore = mmcapabilities.NewStore(db, capabilityMaxAge)
+	}
+	return capabilityStore
+}
+
 func handleCEXPermissions(w http.ResponseWriter, r *http.Request) {
-	response, err := cexpermissions.NewService(db).Get(r.Context())
+	store := currentCapabilityStore()
+	if store == nil {
+		writeError(w, fmt.Errorf("MM capability store is unavailable"))
+		return
+	}
+	if r.Method == http.MethodPut {
+		var input struct {
+			SpotEnabled  *bool `json:"spot_enabled"`
+			HedgeEnabled *bool `json:"hedge_enabled"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			http.Error(w, fmt.Sprintf("invalid policy: %v", err), http.StatusBadRequest)
+			return
+		}
+		if input.SpotEnabled == nil || input.HedgeEnabled == nil {
+			http.Error(w, "spot_enabled and hedge_enabled are required", http.StatusBadRequest)
+			return
+		}
+		policy := mmcapabilities.Policy{SpotEnabled: *input.SpotEnabled, HedgeEnabled: *input.HedgeEnabled}
+		state, err := store.UpdatePolicy(r.Context(), r.PathValue("provider"), policy)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := refreshLiveCapabilityPolicy(r.Context()); err != nil {
+			slog.ErrorContext(r.Context(), "refresh MM CEX policy after update; routing fail-closed", "err", err)
+		}
+		writeJSON(w, state)
+		return
+	}
+	states, err := store.States(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, response)
+	maxAge := capabilityMaxAge
+	if maxAge <= 0 {
+		maxAge = mmcapabilities.DefaultMaxAge
+	}
+	writeJSON(w, cexCapabilitiesResponse{Exchanges: states, MaxAgeSec: int64(maxAge / time.Second)})
+}
+
+func refreshLiveCapabilityPolicy(ctx context.Context) error {
+	store := currentCapabilityStore()
+	if store == nil {
+		all := mmcapabilities.CostSupportedProviderIDs()
+		hub.setCapabilityExclusions(all, all)
+		return fmt.Errorf("MM capability store is unavailable")
+	}
+	states, err := store.States(ctx)
+	if err != nil {
+		all := mmcapabilities.CostSupportedProviderIDs()
+		hub.setCapabilityExclusions(all, all)
+		return err
+	}
+	policySpot, policyHedge := mmcapabilities.EffectiveExclusions(states)
+	hub.setCapabilityExclusions(policySpot, policyHedge)
+	return nil
 }
 
 type accountHealthResponse struct {
