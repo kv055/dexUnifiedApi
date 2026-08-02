@@ -208,37 +208,6 @@ func ParseInterval(raw string) time.Duration {
 	return interval
 }
 
-// Runner represents a runner.
-type Runner struct {
-	recorder Recorder
-	checker  Checker
-	provider string
-	interval time.Duration
-}
-
-// NewRunner creates a runner.
-func NewRunner(recorder Recorder, checker Checker, interval time.Duration) *Runner {
-	return &Runner{
-		recorder: recorder,
-		checker:  checker,
-		provider: BisqAccountProvider,
-		interval: interval,
-	}
-}
-
-// Start starts the configured worker.
-func (r *Runner) Start(ctx context.Context) {
-	RunPeriodicAccountHealthCheck(ctx, r.interval, r.recorder, r.provider, r.checker.Check)
-}
-
-// CheckFunc identifies a check func.
-type CheckFunc func(context.Context) error
-
-// Check checks value.
-func (f CheckFunc) Check(ctx context.Context) error {
-	return f(ctx)
-}
-
 var bisqAccountFileDesc protoreflect.FileDescriptor
 
 func newBisqAccountMessage(name protoreflect.Name) *dynamicpb.Message {

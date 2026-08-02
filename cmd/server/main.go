@@ -310,7 +310,7 @@ func main() {
 		accountHealthInterval,
 		recorder,
 		"Bisq2",
-		appMetrics.instrumentCheck("Bisq2", accounthealth.CheckFunc(func(ctx context.Context) error {
+		appMetrics.instrumentCheck("Bisq2", func(ctx context.Context) error {
 			if bisq2RESTHost == "" {
 				return fmt.Errorf("bisq2 not configured (BISQ2_REST_HOST is unset)")
 			}
@@ -333,7 +333,7 @@ func main() {
 				return fmt.Errorf("bisq2 health: unexpected status %d", resp.StatusCode)
 			}
 			return nil
-		})),
+		}),
 	)
 
 	// Seed the cache before any REST or WebSocket traffic is served. PostgreSQL
@@ -347,28 +347,7 @@ func main() {
 	priceManager.Start(ctx)
 
 	mux := http.NewServeMux()
-
-	// API — live offers only
-	mux.HandleFunc("GET /api/live_offers", handleLiveOffersREST)
-	mux.HandleFunc("GET /api/live_offers/{id}/lifecycle", handleLiveOfferLifecycleREST)
-	mux.HandleFunc("GET /api/payment_notifications", handlePaymentNotifications)
-	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)
-	mux.HandleFunc("GET /api/trade_cost_config", handleTradeCostConfig)
-	mux.HandleFunc("GET /api/cex_permissions", handleCEXPermissions)
-	mux.HandleFunc("PUT /api/cex_permissions/{provider}", handleCEXPermissions)
-	mux.HandleFunc("POST /api/accounts/health_check", handleAccountHealthCheck)
-	mux.HandleFunc("GET /health", handleHealth)
-
-	// Internal: snapshot tool pushes live offer data after each run
-	mux.HandleFunc("POST /internal/live_offers", handleInternalLiveOffers)
-	mux.HandleFunc("POST /internal/payment_notifications", handleInternalPaymentNotifications)
-	mux.Handle("GET /internal/cex_permissions", internalSecretGate(http.HandlerFunc(handleCEXPermissions)))
-	// Internal: service-to-service live-offers WS (e.g. mm-controller's
-	// premium-offer watcher). Browser clients use the session-gated
-	// /ws/live_offers above; internal callers carry no session cookie, so this
-	// route is secret-gated via X-Internal-Secret (same convention as the POST
-	// ingest endpoints) and reuses the same WS handler.
-	mux.Handle("GET /internal/ws/live_offers", internalSecretGate(http.HandlerFunc(handleLiveOffersWS)))
+	registerRoutes(mux)
 
 	mux.Handle("GET /metrics", metricsReg.Handler())
 

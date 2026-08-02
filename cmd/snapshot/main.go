@@ -229,134 +229,6 @@ func clearnetClient() *http.Client {
 	return &http.Client{Timeout: 15 * time.Second, Transport: tracing.Transport(nil)}
 }
 
-// --- Reference price providers ---
-
-// bisqPriceNodes are the known Bisq price node onion addresses, tried in order.
-var bisqPriceNodes = []string{
-	"http://runbtcpn7gmbj5rgqeyfyvepqokrijem6rbw7o5wgqbguimuoxrmcdyd.onion",
-	"http://ro7nv73awqs3ga2qtqeqawrjpbxwarsazznszvr6whv7tes5ehffopid.onion",
-}
-
-func priceBisqTor(fiat string) (int, error) {
-	var lastErr error
-	for _, node := range bisqPriceNodes {
-		resp, err := torClient().Get(node + "/getAllMarketPrices")
-		if err != nil {
-			lastErr = err
-			fmt.Printf("[RefPrice] bisq_tor: %s failed: %v\n", node, err)
-			continue
-		}
-		body, _ := readAllLimited(resp.Body)
-		resp.Body.Close()
-
-		var result struct {
-			Data []struct {
-				CurrencyCode string  `json:"currencyCode"`
-				Price        float64 `json:"price"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(body, &result); err != nil {
-			lastErr = err
-			continue
-		}
-		for _, c := range result.Data {
-			if strings.EqualFold(c.CurrencyCode, fiat) {
-				return int(c.Price), nil
-			}
-		}
-		lastErr = fmt.Errorf("currency %s not found", fiat)
-	}
-	return 0, lastErr
-}
-
-func priceKraken(fiat string) (int, error) {
-	pair := "XBT" + strings.ToUpper(fiat)
-	resp, err := clearnetClient().Get("https://api.kraken.com/0/public/Ticker?pair=" + pair)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	body, _ := readAllLimited(resp.Body)
-
-	var data struct {
-		Result map[string]struct {
-			C []string `json:"c"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return 0, err
-	}
-	for _, ticker := range data.Result {
-		if len(ticker.C) > 0 {
-			v, _ := strconv.ParseFloat(ticker.C[0], 64)
-			return int(v), nil
-		}
-	}
-	return 0, fmt.Errorf("no ticker data for %s", pair)
-}
-
-func priceCoinGecko(fiat string) (int, error) {
-	resp, err := clearnetClient().Get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=" + fiat)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	body, _ := readAllLimited(resp.Body)
-
-	var data map[string]map[string]float64
-	if err := json.Unmarshal(body, &data); err != nil {
-		return 0, err
-	}
-	if btc, ok := data["bitcoin"]; ok {
-		if price, ok := btc[fiat]; ok {
-			return int(price), nil
-		}
-	}
-	return 0, fmt.Errorf("no price for %s", fiat)
-}
-
-func fetchReferencePrice(fiat string) int {
-	allProviders := []struct {
-		name string
-		fn   func(string) (int, error)
-	}{
-		{"bisq_tor", priceBisqTor},
-		{"kraken", priceKraken},
-		{"coingecko", priceCoinGecko},
-	}
-
-	// Build the ordered list: configured provider first, then the rest as fallbacks.
-	var ordered []struct {
-		name string
-		fn   func(string) (int, error)
-	}
-	for _, p := range allProviders {
-		if p.name == priceProvider {
-			ordered = append([]struct {
-				name string
-				fn   func(string) (int, error)
-			}{p}, ordered...)
-		} else {
-			ordered = append(ordered, p)
-		}
-	}
-	if len(ordered) == 0 || ordered[0].name != priceProvider {
-		fmt.Printf("[RefPrice] Unknown provider '%s', falling back to all\n", priceProvider)
-		ordered = allProviders
-	}
-
-	for _, p := range ordered {
-		price, err := p.fn(fiat)
-		if err != nil {
-			fmt.Printf("[RefPrice] Error from %s: %v\n", p.name, err)
-			continue
-		}
-		fmt.Printf("[RefPrice] %s: %d %s\n", p.name, price, strings.ToUpper(fiat))
-		return price
-	}
-	return 0
-}
-
 // --- Exchange fetchers ---
 
 func fetchBisq(direction string, btcPrice int) *fetchResult {
@@ -447,10 +319,6 @@ func mapBisqOffer(o *bisqgrpc.OfferInfo, direction string, now time.Time) offer 
 	applyRating(&newOffer, sellerrating.NormalizeBisqAccountSigning(
 		o.GetAccountAgeWitnessSignState(), o.GetAccountAgeWitnessDate(), now))
 	return newOffer
-}
-
-func fetchBisq2(direction string, btcPrice int) *fetchResult {
-	return fetchBisq2Currency(direction, "EUR", btcPrice)
 }
 
 func fetchBisq2Currency(direction, currency string, btcPrice int) *fetchResult {
@@ -698,10 +566,6 @@ func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
 	return s
 }
 
-func fetchHodlHodl(direction string, btcPrice int) *fetchResult {
-	return fetchHodlHodlCurrency(direction, "EUR", btcPrice)
-}
-
 func fetchHodlHodlCurrency(direction, currency string, btcPrice int) *fetchResult {
 	reqURL := fmt.Sprintf("https://hodlhodl.com/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", direction, url.QueryEscape(currency))
 	resp, err := clearnetClient().Get(reqURL)
@@ -915,10 +779,6 @@ type peachOffer struct {
 	} `json:"user"`
 }
 
-func fetchPeachBitcoin(direction string, btcPrice int) *fetchResult {
-	return fetchPeachBitcoinCurrency(direction, "EUR", btcPrice)
-}
-
 func fetchPeachBitcoinCurrency(direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[PeachBitcoin] Could not get reference price")
@@ -980,10 +840,6 @@ func fetchPeachBitcoinCurrency(direction, currency string, btcPrice int) *fetchR
 
 	fmt.Printf("[PeachBitcoin] Found %d %s offers\n", len(offers), direction)
 	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
-}
-
-func fetchRobosats(direction string, btcPrice int) *fetchResult {
-	return fetchRobosatsCurrency(direction, "EUR", btcPrice)
 }
 
 func fetchRobosatsCurrency(direction, currency string, btcPrice int) *fetchResult {

@@ -388,7 +388,7 @@ func TestLiveOffersRESTUsesRealSecurityDepositFromOffer(t *testing.T) {
 	cap := offers[0].Analysis.FullVolume.Capital
 	assertFloat(t, cap.SecurityDepositPct, 0.18)
 	assertFloat(t, cap.SecurityDepositBTC, 0.018) // 0.1 * 0.18
-	assertFloat(t, cap.SecurityDepositFiat, 1.8)   // 0.018 * 100
+	assertFloat(t, cap.SecurityDepositFiat, 1.8)  // 0.018 * 100
 	if cap.DepositEstimated {
 		t.Fatal("DepositEstimated = true, want false for a real measured deposit")
 	}
@@ -450,19 +450,30 @@ func TestLiveOffersRESTIncludesHedgelessDoubleCollateral(t *testing.T) {
 	}
 	hl := full.HedgelessDoubleCollateral
 
-	assertFloat(t, hl.Costs.Total.BTC, full.Costs.Total.BTC-hedgeFeeBTC)
+	assertFloat(t, hl.Costs.Total.BTC, full.Costs.Total.BTC-hedgeFeeBTC+full.Costs.Network.BTC)
+	if hl.Route.Settlement != "onchain_hub" || hl.NumNetworkTxs != 2 {
+		t.Fatalf("hedgeless route = %+v / %d txs", hl.Route, hl.NumNetworkTxs)
+	}
 	assertFloat(t, hl.Costs.Hedge.FeeSumBTC, 0)
 	if hl.Capital.TradeMode != tradecost.TradeModeHedgelessDoubleCollateral {
 		t.Fatalf("hedgeless trade_mode = %q", hl.Capital.TradeMode)
 	}
 	assertFloat(t, hl.Capital.HedgeCollateral, 0)
 	assertFloat(t, hl.Capital.BTCLiquidityBTC, 0.118) // 0.1 + 0.018
-	assertFloat(t, hl.Capital.FiatCollateral, 10)   // position × 100
+	assertFloat(t, hl.Capital.FiatCollateral, 10)     // position × 100
 	// total = (pos+deposit)*price + pos*price = 11.8 + 10 = 21.8
 	assertFloat(t, hl.Capital.TotalFiat, 21.8)
 	assertFloat(t, hl.Capital.TotalFiat, 2*hl.Capital.SpotNotional+hl.Capital.SecurityDepositFiat)
 	if full.Capital.TradeMode != tradecost.TradeModeHedgefullSingleCollateral {
 		t.Fatalf("hedgefull trade_mode = %q", full.Capital.TradeMode)
+	}
+}
+
+func TestAskScenarioOmitsHedgelessExecutionVariant(t *testing.T) {
+	bd := tradecost.CostBreakdown{BTCAmount: 0.01, RouteCEX: "kraken", RouteDEX: "bisq", TradeDirection: "ask"}
+	scenario := buildScenarioFromBreakdown(bd, 100, nil, 0, 0, tradecost.ManualRouteOptions{})
+	if scenario.HedgelessDoubleCollateral != nil {
+		t.Fatal("ask-side scenario must not advertise hedgeless execution")
 	}
 }
 

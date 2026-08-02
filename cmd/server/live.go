@@ -152,6 +152,7 @@ type liveOfferCostComponent struct {
 
 type liveOfferNetworkCost struct {
 	Pct float64 `json:"pct"`
+	BTC float64 `json:"btc"`
 }
 
 type liveOfferScenarioCosts struct {
@@ -167,11 +168,14 @@ type liveOfferScenarioCosts struct {
 // liveOfferModeVariant is the economics for an alternate trade mode on the
 // same spot route (currently Hedgeless Double Collateral).
 type liveOfferModeVariant struct {
-	Premium   liveOfferPremium             `json:"premium"`
-	Profit    liveOfferProfit              `json:"profit"`
-	Costs     liveOfferScenarioCosts       `json:"costs"`
-	AbortCost tradecost.AbortCostBreakdown `json:"abort_cost"`
-	Capital   tradecost.CapitalRequirement `json:"capital"`
+	Route            liveOfferRoute               `json:"route"`
+	NumNetworkTxs    int                          `json:"num_network_txs"`
+	NetworkFeeMethod string                       `json:"network_fee_method"`
+	Premium          liveOfferPremium             `json:"premium"`
+	Profit           liveOfferProfit              `json:"profit"`
+	Costs            liveOfferScenarioCosts       `json:"costs"`
+	AbortCost        tradecost.AbortCostBreakdown `json:"abort_cost"`
+	Capital          tradecost.CapitalRequirement `json:"capital"`
 }
 
 type liveOfferScenario struct {
@@ -291,6 +295,7 @@ func scenarioCostsFromBreakdown(bd tradecost.CostBreakdown) liveOfferScenarioCos
 		},
 		Network: liveOfferNetworkCost{
 			Pct: bd.NetworkFeePct,
+			BTC: bd.NetworkFeeBTC,
 		},
 		Conversion: bd.Conversion,
 		Hedge:      bd.Hedge,
@@ -303,6 +308,9 @@ func scenarioCostsFromBreakdown(bd tradecost.CostBreakdown) liveOfferScenarioCos
 
 func buildModeVariantFromBreakdown(bd tradecost.CostBreakdown, refPrice float64) liveOfferModeVariant {
 	return liveOfferModeVariant{
+		Route:            liveOfferRoute{CEX: bd.RouteCEX, Settlement: bd.RouteMethod},
+		NumNetworkTxs:    bd.NumNetworkTxs,
+		NetworkFeeMethod: bd.NetworkFeeMethod,
 		Premium: liveOfferPremium{
 			TradeCostPercent: bd.TotalCostPct,
 			NetPercent:       bd.EstimatedProfitPct,
@@ -339,9 +347,11 @@ func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, ca
 		Capital:            bd.Capital,
 		ManualRouteOptions: manualOptions,
 	}
-	if hedgeless := tradecost.DeriveHedgelessDoubleCollateral(bd); hedgeless.RouteCEX != "" {
-		variant := buildModeVariantFromBreakdown(hedgeless, refPrice)
-		scenario.HedgelessDoubleCollateral = &variant
+	if bd.TradeDirection == "bid" {
+		if hedgeless := tradecost.DeriveHedgelessDoubleCollateral(bd); hedgeless.RouteCEX != "" {
+			variant := buildModeVariantFromBreakdown(hedgeless, refPrice)
+			scenario.HedgelessDoubleCollateral = &variant
+		}
 	}
 	return scenario
 }

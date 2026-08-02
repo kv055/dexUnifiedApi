@@ -17,6 +17,15 @@ CREATE TABLE IF NOT EXISTS transactions (
     ),
     dex VARCHAR(16),
     status VARCHAR(32),
+    trade_mode TEXT,
+    btc_pool_target_btc DOUBLE PRECISION CHECK (btc_pool_target_btc IS NULL OR btc_pool_target_btc >= 0),
+    btc_required_liquidity DOUBLE PRECISION CHECK (btc_required_liquidity IS NULL OR btc_required_liquidity > 0),
+    btc_pool_refill_status TEXT CHECK (
+        btc_pool_refill_status IS NULL OR btc_pool_refill_status IN (
+            'pending', 'spot_buy_pending', 'spot_bought', 'withdrawal_initiated', 'restored', 'needs_review'
+        )
+    ),
+    btc_pool_refill_details JSONB,
     cex_transaction_details JSONB,
     cex_bitcoin_amount DOUBLE PRECISION CHECK (cex_bitcoin_amount IS NULL OR cex_bitcoin_amount >= 0),
     cex_transaction_timestamp TIMESTAMPTZ,
@@ -50,10 +59,16 @@ CREATE TABLE IF NOT EXISTS transactions (
         status IS NULL OR status IN (
             'FiatToCexInitiated', 'FiatToCexArrived',
             'CexTradeflowStarted', 'HedgeFailedNeedsReview', 'CexTradeflowNeedsReview',
+            'HedgelessTradeStarted', 'HedgelessFundingInitiated', 'HedgelessFundingNeedsReview',
             'CexTradeSucessfull',
             'CexCryptoWithdrawalInitiated', 'CexCryptoWithdrawalArrived',
             'DexPositionOpen', 'DexPositionTaken', 'DexFiatHasArrived',
             'DexPositionReleased'
+        )
+    ),
+    CONSTRAINT transactions_trade_mode_check CHECK (
+        trade_mode IS NULL OR trade_mode IN (
+            'hedgefull_single_collateral', 'hedgeless_double_collateral'
         )
     ),
     CONSTRAINT transactions_dex_check CHECK (
@@ -71,3 +86,11 @@ CREATE INDEX IF NOT EXISTS idx_transactions_dex_offer_id
     ON transactions(dex_offer_id) WHERE dex_offer_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transactions_dex_offer_db_id
     ON transactions(dex_offer_db_id) WHERE dex_offer_db_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_one_active_hedgeless_refill
+    ON transactions ((1))
+    WHERE trade_mode = 'hedgeless_double_collateral'
+      AND btc_pool_refill_status IS DISTINCT FROM 'restored'
+      AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_transactions_pool_refill_status
+    ON transactions (btc_pool_refill_status)
+    WHERE trade_mode = 'hedgeless_double_collateral';
