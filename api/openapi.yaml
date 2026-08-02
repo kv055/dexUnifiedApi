@@ -1,0 +1,167 @@
+openapi: 3.1.0
+info:
+  title: 'dexUnifiedApi HTTP API'
+  version: 0.1.0
+  description: |
+    Unified offer, notification, configuration, and internal ingestion routes.
+    This file is a generated, complete route catalog. Operations marked
+    with `x-contract-status: route-catalog` do not yet claim fully typed
+    request and response schemas; consult the handler until formalized.
+servers:
+  - url: 'http://localhost:5010'
+paths:
+  '/api/accounts/health_check':
+    post:
+      operationId: postApiAccountsHealthCheck
+      tags: ['accounts']
+      summary: 'POST /api/accounts/health_check'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/api/cex_permissions':
+    get:
+      operationId: getApiCexPermissions
+      tags: ['cex-permissions']
+      summary: 'GET /api/cex_permissions'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/api/cex_permissions/{provider}':
+    put:
+      operationId: putApiCexPermissionsProvider
+      tags: ['cex-permissions']
+      summary: 'PUT /api/cex_permissions/{provider}'
+      x-contract-status: route-catalog
+      parameters:
+        - name: 'provider'
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/api/live_offers':
+    get:
+      operationId: getApiLiveOffers
+      tags: ['live-offers']
+      summary: 'GET /api/live_offers'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/api/live_offers/{id}/lifecycle':
+    get:
+      operationId: getApiLiveOffersIdLifecycle
+      tags: ['live-offers']
+      summary: 'GET /api/live_offers/{id}/lifecycle'
+      x-contract-status: route-catalog
+      parameters:
+        - name: 'id'
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/api/payment_notifications':
+    get:
+      operationId: getApiPaymentNotifications
+      tags: ['payment-notifications']
+      summary: 'GET /api/payment_notifications'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/api/trade_cost_config':
+    get:
+      operationId: getApiTradeCostConfig
+      tags: ['trade-cost-config']
+      summary: 'GET /api/trade_cost_config'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/health':
+    get:
+      operationId: getHealth
+      tags: ['health']
+      summary: 'GET /health'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/internal/cex_permissions':
+    get:
+      operationId: getInternalCexPermissions
+      tags: ['cex-permissions']
+      summary: 'GET /internal/cex_permissions'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/internal/live_offers':
+    post:
+      operationId: postInternalLiveOffers
+      tags: ['live-offers']
+      summary: 'POST /internal/live_offers'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/internal/payment_notifications':
+    post:
+      operationId: postInternalPaymentNotifications
+      tags: ['payment-notifications']
+      summary: 'POST /internal/payment_notifications'
+      x-contract-status: route-catalog
+      responses:
+        '200':
+          description: Successful response
+        default:
+          description: Error response
+  '/internal/ws/live_offers':
+    get:
+      operationId: getInternalWsLiveOffers
+      tags: ['ws']
+      summary: 'GET /internal/ws/live_offers'
+      x-contract-status: route-catalog
+      responses:
+        '101':
+          description: WebSocket protocol upgrade
+        default:
+          description: Error response
+  '/ws/live_offers':
+    get:
+      operationId: getWsLiveOffers
+      tags: ['live-offers']
+      summary: 'GET /ws/live_offers'
+      x-contract-status: route-catalog
+      responses:
+        '101':
+          description: WebSocket protocol upgrade
+        default:
+          description: Error response
