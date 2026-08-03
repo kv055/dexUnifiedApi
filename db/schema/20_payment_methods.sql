@@ -3,7 +3,7 @@
 -- Replaces the hardcoded provider registry in commons/paymentmethods as the
 -- source of truth for merging raw offer labels (merge_regex), categorization,
 -- and linking a method to the operator's saved payment solution:
---   Bank Transfer    -> bank_accounts(id)
+--   Bank             -> bank_accounts(id)
 --   Fiat Transmitter -> accounts(id)
 --   Crypto           -> wallet_addresses(id)
 -- Cash, Gift Cards and Others are structurally unlinkable (CHECK below).
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS payment_methods (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT payment_methods_category_allowed_check CHECK (
-        category IN ('Cash', 'Bank Transfer', 'Fiat Transmitter', 'Gift Cards', 'Crypto', 'Others')
+        category IN ('Cash', 'Bank', 'Fiat Transmitter', 'Gift Cards', 'Crypto', 'Others')
     ),
     CONSTRAINT payment_methods_single_link_check CHECK (
         (bank_account_id IS NOT NULL)::int
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS payment_methods (
         + (wallet_address_id IS NOT NULL)::int <= 1
     ),
     CONSTRAINT payment_methods_link_category_check CHECK (
-        (bank_account_id   IS NULL OR category = 'Bank Transfer')
+        (bank_account_id   IS NULL OR category = 'Bank')
         AND (account_id        IS NULL OR category = 'Fiat Transmitter')
         AND (wallet_address_id IS NULL OR category = 'Crypto')
     )
