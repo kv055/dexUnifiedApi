@@ -65,7 +65,7 @@ func TestSeedPaymentMethodsLinksTransmitters(t *testing.T) {
 
 	var accountID int64
 	if err := db.QueryRow(
-		`INSERT INTO accounts (provider, category, phone) VALUES ('Revolut', 'Fiat Transmitter', '@revtag') RETURNING id`).
+		`INSERT INTO accounts (provider, category, payment_tag) VALUES ('Revolut', 'Fiat Transmitter', '@revtag') RETURNING id`).
 		Scan(&accountID); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
