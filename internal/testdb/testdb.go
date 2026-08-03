@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	dbutil "dexunifiedapi/db"
 
@@ -24,11 +25,15 @@ var (
 	containerErr  error
 	dbCounter     int
 	dbCounterMu   sync.Mutex
+	usersMu       sync.Mutex
+	users         int
 )
 
 // Open starts an isolated Postgres database for a test and applies the unified schema.
 func Open(t *testing.T) *dbutil.DB {
 	t.Helper()
+
+	acquireContainer(t)
 
 	ctx := context.Background()
 	baseURL := startContainer(t, ctx)
@@ -53,6 +58,34 @@ func Open(t *testing.T) *dbutil.DB {
 		t.Fatalf("seed payment methods: %v", err)
 	}
 	return db
+}
+
+// acquireContainer tracks shared-container users and terminates it when the last
+// test in this process finishes. Cleanup is LIFO, so registering first means
+// Terminate runs after per-test DB drops and connection closes.
+func acquireContainer(t *testing.T) {
+	t.Helper()
+
+	usersMu.Lock()
+	users++
+	usersMu.Unlock()
+
+	t.Cleanup(func() {
+		usersMu.Lock()
+		defer usersMu.Unlock()
+		users--
+		if users != 0 || container == nil {
+			return
+		}
+		termCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := container.Terminate(termCtx); err != nil {
+			t.Logf("terminate postgres test container: %v", err)
+		}
+		container = nil
+		containerErr = nil
+		containerOnce = sync.Once{}
+	})
 }
 
 func startContainer(t *testing.T, ctx context.Context) string {
