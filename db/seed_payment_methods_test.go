@@ -116,3 +116,61 @@ func TestSeedPaymentMethodsLinksTransmitters(t *testing.T) {
 		t.Errorf("Canonicalize alias via DB rows = %v, want [Revolut]", got)
 	}
 }
+
+// TestPaymentMethodsSourcesCurrenciesConstraints verifies the catalog columns
+// accept allowed DEX/currency arrays and reject unknown values.
+func TestPaymentMethodsSourcesCurrenciesConstraints(t *testing.T) {
+	ctx := context.Background()
+	db := testdb.Open(t)
+
+	if _, err := db.ExecContext(ctx, `
+		UPDATE payment_methods
+		SET sources = ARRAY['bisq', 'robosats']::text[],
+		    currencies = ARRAY['EUR', 'USD']::text[]
+		WHERE name = 'SEPA'`); err != nil {
+		t.Fatalf("set valid sources/currencies: %v", err)
+	}
+
+	var sources, currencies paymentmethods.TextArray
+	if err := db.QueryRowContext(ctx, `
+		SELECT sources, currencies FROM payment_methods WHERE name = 'SEPA'`).
+		Scan(&sources, &currencies); err != nil {
+		t.Fatalf("reload sources/currencies: %v", err)
+	}
+	if len(sources) != 2 || sources[0] != "bisq" || sources[1] != "robosats" {
+		t.Errorf("sources = %v, want [bisq robosats]", sources)
+	}
+	if len(currencies) != 2 || currencies[0] != "EUR" || currencies[1] != "USD" {
+		t.Errorf("currencies = %v, want [EUR USD]", currencies)
+	}
+
+	rows, err := paymentmethods.LoadRows(ctx, db.DB)
+	if err != nil {
+		t.Fatalf("LoadRows: %v", err)
+	}
+	var sepa *paymentmethods.MethodRow
+	for i := range rows {
+		if rows[i].Name == "SEPA" {
+			sepa = &rows[i]
+			break
+		}
+	}
+	if sepa == nil {
+		t.Fatal("SEPA row missing")
+	}
+	if len(sepa.Sources) != 2 || sepa.Sources[0] != "bisq" || sepa.Sources[1] != "robosats" {
+		t.Errorf("LoadRows sources = %v", sepa.Sources)
+	}
+	if len(sepa.Currencies) != 2 || sepa.Currencies[0] != "EUR" || sepa.Currencies[1] != "USD" {
+		t.Errorf("LoadRows currencies = %v", sepa.Currencies)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		UPDATE payment_methods SET sources = ARRAY['kraken']::text[] WHERE name = 'SEPA'`); err == nil {
+		t.Fatal("expected CHECK rejection for unknown source")
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE payment_methods SET currencies = ARRAY['XYZ']::text[] WHERE name = 'SEPA'`); err == nil {
+		t.Fatal("expected CHECK rejection for unknown currency")
+	}
+}
