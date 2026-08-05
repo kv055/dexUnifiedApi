@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
+	"commons/paymentmethods"
 	"dexunifiedapi/internal/sellerrating"
 	"dexunifiedapi/internal/testdb"
 )
@@ -832,3 +834,129 @@ func TestSaveSnapshotKeepsDistinctIdOffersWithSameFingerprint(t *testing.T) {
 		t.Fatalf("persisted offers = %d, want 3 (one row per distinct offer_id)", count)
 	}
 }
+
+func resetPaymentMethodTouchesForTest() {
+	paymentMethodTouches.Lock()
+	paymentMethodTouches.byName = make(map[string]*paymentMethodTouch)
+	paymentMethodTouches.Unlock()
+	unknownPaymentMethods.Lock()
+	unknownPaymentMethods.names = make(map[string]struct{})
+	unknownPaymentMethods.Unlock()
+}
+
+func TestSaveSnapshotBumpsPaymentMethodPopularityOnInsertOnly(t *testing.T) {
+	resetPaymentMethodTouchesForTest()
+	t.Cleanup(resetPaymentMethodTouchesForTest)
+
+	db := testdb.Open(t)
+	ctx := context.Background()
+	btcMin := 0.01
+	btcMax := 0.02
+	priceType := priceTypeFixed()
+
+	o := offer{
+		OfferID:        "pm-pop-1",
+		FiatCurrency:   "EUR",
+		Price:          61000,
+		BTCMin:         &btcMin,
+		BTCMax:         &btcMax,
+		PaymentMethods: []string{"SEPA"},
+		PriceType:      priceType,
+	}
+	if live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{o}); len(live) != 1 {
+		t.Fatalf("first insert live len = %d, want 1", len(live))
+	}
+	flushUnknownPaymentMethods(ctx, db)
+	flushPaymentMethodTouches(ctx, db)
+
+	var popularity int
+	var sources, currencies paymentmethods.TextArray
+	if err := db.QueryRow(`SELECT popularity, sources, currencies FROM payment_methods WHERE name = ?`, "SEPA").
+		Scan(&popularity, &sources, &currencies); err != nil {
+		t.Fatalf("load SEPA after insert: %v", err)
+	}
+	if popularity != 1 {
+		t.Fatalf("popularity after insert = %d, want 1", popularity)
+	}
+	if len(sources) != 1 || sources[0] != "bisq" {
+		t.Fatalf("sources after insert = %v, want [bisq]", []string(sources))
+	}
+	if len(currencies) != 1 || currencies[0] != "EUR" {
+		t.Fatalf("currencies after insert = %v, want [EUR]", []string(currencies))
+	}
+
+	// Re-seeing the same offer_id must not bump again.
+	o.Price = 62000
+	if live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{o}); len(live) != 1 {
+		t.Fatalf("update live len = %d, want 1", len(live))
+	}
+	flushUnknownPaymentMethods(ctx, db)
+	flushPaymentMethodTouches(ctx, db)
+
+	if err := db.QueryRow(`SELECT popularity, sources, currencies FROM payment_methods WHERE name = ?`, "SEPA").
+		Scan(&popularity, &sources, &currencies); err != nil {
+		t.Fatalf("load SEPA after update: %v", err)
+	}
+	if popularity != 1 {
+		t.Fatalf("popularity after re-see = %d, want 1", popularity)
+	}
+	if len(sources) != 1 || sources[0] != "bisq" {
+		t.Fatalf("sources after re-see = %v, want [bisq]", []string(sources))
+	}
+	if len(currencies) != 1 || currencies[0] != "EUR" {
+		t.Fatalf("currencies after re-see = %v, want [EUR]", []string(currencies))
+	}
+}
+
+func TestSaveSnapshotTouchesUnknownPaymentMethodAfterFlush(t *testing.T) {
+	resetPaymentMethodTouchesForTest()
+	t.Cleanup(resetPaymentMethodTouchesForTest)
+
+	db := testdb.Open(t)
+	ctx := context.Background()
+	btcMin := 0.01
+	btcMax := 0.02
+	priceType := priceTypeFixed()
+	unknownName := "Zzz Snapshot Pop Pay"
+
+	if live := saveSnapshot(db, "robosats", "USD", "buy", 60000, []offer{{
+		OfferID:        "pm-pop-unknown-1",
+		FiatCurrency:   "USD",
+		Price:          61000,
+		BTCMin:         &btcMin,
+		BTCMax:         &btcMax,
+		PaymentMethods: []string{unknownName},
+		PriceType:      priceType,
+	}}); len(live) != 1 {
+		t.Fatalf("live len = %d, want 1", len(live))
+	}
+
+	// Before unknown flush the catalog row does not exist; touches are deferred.
+	var preCount int
+	if err := db.QueryRow(`SELECT count(*) FROM payment_methods WHERE name = ?`, unknownName).Scan(&preCount); err != nil {
+		t.Fatalf("count before flush: %v", err)
+	}
+	if preCount != 0 {
+		t.Fatalf("unknown method present before flush = %d, want 0", preCount)
+	}
+
+	flushUnknownPaymentMethods(ctx, db)
+	flushPaymentMethodTouches(ctx, db)
+
+	var popularity int
+	var sources, currencies paymentmethods.TextArray
+	if err := db.QueryRow(`SELECT popularity, sources, currencies FROM payment_methods WHERE name = ?`, unknownName).
+		Scan(&popularity, &sources, &currencies); err != nil {
+		t.Fatalf("load unknown method after flush: %v", err)
+	}
+	if popularity != 1 {
+		t.Fatalf("unknown popularity = %d, want 1", popularity)
+	}
+	if len(sources) != 1 || sources[0] != "robosats" {
+		t.Fatalf("unknown sources = %v, want [robosats]", []string(sources))
+	}
+	if len(currencies) != 1 || currencies[0] != "USD" {
+		t.Fatalf("unknown currencies = %v, want [USD]", []string(currencies))
+	}
+}
+

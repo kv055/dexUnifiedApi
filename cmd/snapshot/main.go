@@ -1058,6 +1058,107 @@ func flushUnknownPaymentMethods(ctx context.Context, sdb *dbutil.DB) {
 	}
 }
 
+// paymentMethodTouch aggregates first-seen offer hits for one catalog name
+// within a snapshot run. Applied after unknown methods are flushed so new
+// Others rows still receive currencies/sources/popularity from that run.
+type paymentMethodTouch struct {
+	count      int
+	currencies map[string]struct{}
+	sources    map[string]struct{}
+}
+
+var paymentMethodTouches = struct {
+	sync.Mutex
+	byName map[string]*paymentMethodTouch
+}{byName: make(map[string]*paymentMethodTouch)}
+
+func queuePaymentMethodTouches(methods []string, exchange, fiat string) {
+	paymentMethodTouches.Lock()
+	defer paymentMethodTouches.Unlock()
+	seen := make(map[string]struct{}, len(methods))
+	for _, m := range methods {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		t := paymentMethodTouches.byName[m]
+		if t == nil {
+			t = &paymentMethodTouch{
+				currencies: make(map[string]struct{}),
+				sources:    make(map[string]struct{}),
+			}
+			paymentMethodTouches.byName[m] = t
+		}
+		t.count++
+		if fiat != "" {
+			t.currencies[fiat] = struct{}{}
+		}
+		if exchange != "" {
+			t.sources[exchange] = struct{}{}
+		}
+	}
+}
+
+func flushPaymentMethodTouches(ctx context.Context, sdb *dbutil.DB) {
+	paymentMethodTouches.Lock()
+	byName := paymentMethodTouches.byName
+	paymentMethodTouches.byName = make(map[string]*paymentMethodTouch)
+	paymentMethodTouches.Unlock()
+	if len(byName) == 0 {
+		return
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t := byName[name]
+		currencies := sortedStringSet(t.currencies)
+		sources := sortedStringSet(t.sources)
+		res, err := sdb.Exec(`
+			UPDATE payment_methods SET
+				currencies = (
+					SELECT COALESCE(array_agg(DISTINCT x), '{}'::text[])
+					FROM unnest(currencies || ?::text[]) AS x
+				),
+				sources = (
+					SELECT COALESCE(array_agg(DISTINCT x), '{}'::text[])
+					FROM unnest(sources || ?::text[]) AS x
+				),
+				popularity = popularity + ?,
+				updated_at = CURRENT_TIMESTAMP
+			WHERE name = ?`,
+			paymentmethods.TextArray(currencies),
+			paymentmethods.TextArray(sources),
+			t.count,
+			name,
+		)
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to update payment method popularity",
+				"name", name, "err", err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			slog.WarnContext(ctx, "payment method popularity touch matched no row",
+				"name", name)
+		}
+	}
+}
+
+func sortedStringSet(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for v := range set {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice float64, offers []offer) []livePayload {
 	if len(offers) == 0 {
 		fmt.Printf("[%s] No offers to save\n", exchange)
@@ -1083,6 +1184,9 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 	liveOffers := make([]livePayload, 0, len(offers))
 	seen := make(map[int64]bool, len(offers))
 	updated, inserted, failed := 0, 0, 0
+	// Collect payment methods from newly inserted offers; queue catalog
+	// touches only after a successful commit so a rolled-back tx never bumps.
+	var insertedMethods [][]string
 	for _, o := range offers {
 		var existingID int64
 		var found bool
@@ -1201,6 +1305,10 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 			updated++
 		} else {
 			inserted++
+			if len(o.PaymentMethods) > 0 {
+				methodsCopy := append([]string(nil), o.PaymentMethods...)
+				insertedMethods = append(insertedMethods, methodsCopy)
+			}
 		}
 		seen[live.ID] = true
 		liveOffers = append(liveOffers, live)
@@ -1209,6 +1317,9 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 	if err := tx.Commit(); err != nil {
 		fmt.Printf("[%s] snapshot commit failed (%s): %v\n", exchange, direction, err)
 		return nil
+	}
+	for _, methods := range insertedMethods {
+		queuePaymentMethodTouches(methods, exchange, fiat)
 	}
 	if failed > 0 {
 		fmt.Printf("[%s] %d new, %d updated, %d failed (%s)\n", exchange, inserted, updated, failed, direction)
@@ -1462,6 +1573,7 @@ func main() {
 	})
 
 	stage(ctx, "snapshot.register_unknown_payment_methods", func() { flushUnknownPaymentMethods(ctx, sdb) })
+	stage(ctx, "snapshot.update_payment_method_popularity", func() { flushPaymentMethodTouches(ctx, sdb) })
 
 	// Update is_live and duration in one pass:
 	// - live offers: is_live=true, duration=NULL, closure analysis fields cleared

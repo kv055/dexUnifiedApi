@@ -56,17 +56,16 @@ func TestSeedPaymentMethodsIdempotent(t *testing.T) {
 	}
 }
 
-// TestSeedPaymentMethodsLinksTransmitters proves the one-shot link pass
-// activates and links the known transmitters once their accounts row exists,
-// and that LoadRows surfaces the generated is_linked column.
-func TestSeedPaymentMethodsLinksTransmitters(t *testing.T) {
+// TestSeedPaymentMethodsDoesNotAutoLink proves seeding never wires a catalog
+// row to an accounts row by provider name — linking is done on the payment
+// accounts tab. Also checks LoadRows + registry still work against the seeded
+// catalog.
+func TestSeedPaymentMethodsDoesNotAutoLink(t *testing.T) {
 	ctx := context.Background()
 	db := testdb.Open(t)
 
-	var accountID int64
-	if err := db.QueryRow(
-		`INSERT INTO accounts (provider, category, payment_tag) VALUES ('Revolut', 'Fiat Transmitter', '@revtag') RETURNING id`).
-		Scan(&accountID); err != nil {
+	if _, err := db.Exec(
+		`INSERT INTO accounts (provider, category, payment_tag) VALUES ('Revolut', 'Fiat Transmitter', '@revtag')`); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
 
@@ -88,14 +87,13 @@ func TestSeedPaymentMethodsLinksTransmitters(t *testing.T) {
 	if revolut == nil {
 		t.Fatal("Revolut row missing")
 	}
-	if revolut.AccountID == nil || *revolut.AccountID != accountID {
-		t.Errorf("Revolut account link = %v, want %d", revolut.AccountID, accountID)
+	if revolut.AccountID != nil {
+		t.Errorf("Revolut account link = %v, want nil (no auto-link on seed)", revolut.AccountID)
 	}
-	if !revolut.IsActive || !revolut.IsLinked {
-		t.Errorf("Revolut is_active=%v is_linked=%v, want both true", revolut.IsActive, revolut.IsLinked)
+	if revolut.IsActive || revolut.IsLinked {
+		t.Errorf("Revolut is_active=%v is_linked=%v, want both false", revolut.IsActive, revolut.IsLinked)
 	}
 
-	// A registry built from these rows must still canonicalize.
 	reg := paymentmethods.NewRegistry(rows)
 	if got := reg.Canonicalize("REVOLUT"); len(got) != 1 || got[0] != "Revolut" {
 		t.Errorf("Canonicalize(REVOLUT) via DB rows = %v", got)

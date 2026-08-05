@@ -27,9 +27,9 @@ func TestSharedServiceSchemaContract(t *testing.T) {
 			"details", "is_active", "created_at", "updated_at",
 		},
 		"payment_methods": {
-			"id", "name", "merge_regex", "category", "bank_account_id", "account_id",
-			"wallet_address_id", "is_active", "is_linked", "priority", "match_order",
-			"sources", "currencies",
+			"id", "name", "merge_regex", "category", "account_id",
+			"is_active", "is_linked", "priority", "match_order",
+			"sources", "currencies", "popularity",
 		},
 		"transactions": {
 			"id", "direction", "fiat_amount", "fiat_currency", "cex", "dex", "status",

@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS bank_accounts (
     details JSONB NOT NULL DEFAULT '{}',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT bank_accounts_account_currency_key UNIQUE (account_id, currency)
 );
 
 CREATE INDEX IF NOT EXISTS bank_accounts_account_id_idx ON bank_accounts(account_id);
