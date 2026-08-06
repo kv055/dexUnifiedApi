@@ -26,8 +26,10 @@ func TestSeedPaymentMethodsIdempotent(t *testing.T) {
 	}
 
 	// Panel-style edit: recategorize, activate, and add manual aliases to SEPA.
+	// Use an alias that is not itself a seeded catalog name so re-seed's
+	// alias-heal pass does not change the row count under test.
 	if _, err := db.ExecContext(ctx,
-		`UPDATE payment_methods SET priority = 42, is_active = TRUE, alias_list = ARRAY['National Bank'] WHERE name = 'SEPA'`); err != nil {
+		`UPDATE payment_methods SET priority = 42, is_active = TRUE, alias_list = ARRAY['Sepa Manual'] WHERE name = 'SEPA'`); err != nil {
 		t.Fatalf("edit row: %v", err)
 	}
 
@@ -51,7 +53,7 @@ func TestSeedPaymentMethodsIdempotent(t *testing.T) {
 	if priority != 42 || !isActive {
 		t.Errorf("re-seed overwrote panel edit: priority=%d is_active=%v", priority, isActive)
 	}
-	if len(aliasList) != 1 || aliasList[0] != "National Bank" {
+	if len(aliasList) != 1 || aliasList[0] != "Sepa Manual" {
 		t.Errorf("re-seed overwrote alias_list: %v", aliasList)
 	}
 }
@@ -112,6 +114,68 @@ func TestSeedPaymentMethodsDoesNotAutoLink(t *testing.T) {
 	reg = paymentmethods.NewRegistry(rows)
 	if got := reg.Canonicalize("revoult_manual"); len(got) != 1 || got[0] != "Revolut" {
 		t.Errorf("Canonicalize alias via DB rows = %v, want [Revolut]", got)
+	}
+}
+
+// TestSeedPaymentMethodsDoesNotResurrectAliasedMethods proves that degrading a
+// catalog row to an alias survives re-seed: a name listed on another provider's
+// alias_list must not be re-inserted, and leftover catalog rows already covered
+// by an alias are healed away.
+func TestSeedPaymentMethodsDoesNotResurrectAliasedMethods(t *testing.T) {
+	ctx := context.Background()
+	db := testdb.Open(t)
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO payment_methods (name, category, is_active, alias_list)
+		VALUES ('Junk Method', 'Others', FALSE, '{}'::text[])`); err != nil {
+		t.Fatalf("insert junk catalog row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE payment_methods
+		SET alias_list = ARRAY['Junk Method', 'Ghost Alias']
+		WHERE name = 'PayPal'`); err != nil {
+		t.Fatalf("set PayPal aliases: %v", err)
+	}
+
+	var before int
+	if err := db.QueryRow(`SELECT count(*) FROM payment_methods`).Scan(&before); err != nil {
+		t.Fatalf("count before re-seed: %v", err)
+	}
+
+	if err := dbutil.SeedPaymentMethods(db); err != nil {
+		t.Fatalf("re-seed after alias degrade: %v", err)
+	}
+
+	var after int
+	if err := db.QueryRow(`SELECT count(*) FROM payment_methods`).Scan(&after); err != nil {
+		t.Fatalf("count after re-seed: %v", err)
+	}
+	// Junk Method was a catalog row while also listed as a PayPal alias;
+	// seed cleanup must remove it, and must not invent Ghost Alias as a row.
+	if after != before-1 {
+		t.Errorf("row count after re-seed = %d, want %d (Junk Method healed)", after, before-1)
+	}
+
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM payment_methods WHERE name = 'Junk Method')`).Scan(&exists); err != nil {
+		t.Fatalf("check Junk Method: %v", err)
+	}
+	if exists {
+		t.Fatal("re-seed left Junk Method catalog row that is already a PayPal alias")
+	}
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM payment_methods WHERE name = 'Ghost Alias')`).Scan(&exists); err != nil {
+		t.Fatalf("check Ghost Alias: %v", err)
+	}
+	if exists {
+		t.Fatal("re-seed created a catalog row for an alias-only name")
+	}
+
+	var aliases paymentmethods.TextArray
+	if err := db.QueryRow(`SELECT alias_list FROM payment_methods WHERE name = 'PayPal'`).Scan(&aliases); err != nil {
+		t.Fatalf("reload PayPal aliases: %v", err)
+	}
+	if len(aliases) != 2 || aliases[0] != "Junk Method" || aliases[1] != "Ghost Alias" {
+		t.Errorf("PayPal alias_list = %v, want [Junk Method Ghost Alias]", aliases)
 	}
 }
 
