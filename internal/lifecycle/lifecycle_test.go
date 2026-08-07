@@ -144,7 +144,7 @@ func TestPersistSnapshotEnrichesBaselineAndStoresStaticCostsOnOffer(t *testing.T
 
 	var taker, withdrawal, network, dexFee, abortBTC, abortPct float64
 	if err := db.QueryRow(`
-		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc,
+		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, routing_fee_sum,
 		       dex_fee_btc, abort_cost_btc, abort_cost_pct
 		FROM offers WHERE id = ?
 	`, offerID).Scan(&taker, &withdrawal, &network, &dexFee, &abortBTC, &abortPct); err != nil {

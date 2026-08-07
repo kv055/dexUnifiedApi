@@ -31,9 +31,9 @@ func insertClosedOfferTimed(t *testing.T, db *dbutil.DB, status any, isLive bool
 			historical_analysis_status, avg_estimated_profit_btc,
 			hedge_open_fee_btc, hedge_close_fee_btc, hedge_funding_fee_btc, hedge_fee_sum_btc,
 			hedge_venue, hedge_instrument, hedge_transfer_minutes,
-			best_route_cex, best_route_method, is_live, first_seen, last_seen
+			best_route_cex, routing_profile, is_live, first_seen, last_seen
 		)
-		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'onchain', ?, ?, ?)
+		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'Direct_main2main', ?, ?, ?)
 		RETURNING id
 	`, status, isLive, lastSeen.UTC().Add(-time.Hour), lastSeen.UTC()).Scan(&id); err != nil {
 		t.Fatalf("insert offer: %v", err)
@@ -51,9 +51,9 @@ func insertClosedOffer(t *testing.T, db *dbutil.DB, status any) int64 {
 			historical_analysis_status, avg_estimated_profit_btc,
 			hedge_open_fee_btc, hedge_close_fee_btc, hedge_funding_fee_btc, hedge_fee_sum_btc,
 			hedge_venue, hedge_instrument, hedge_transfer_minutes,
-			best_route_cex, best_route_method
+			best_route_cex, routing_profile
 		)
-		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'onchain')
+		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'Direct_main2main')
 		RETURNING id
 	`, status).Scan(&id); err != nil {
 		t.Fatalf("insert offer: %v", err)

@@ -451,7 +451,7 @@ func TestLiveOffersRESTIncludesHedgelessDoubleCollateral(t *testing.T) {
 	hl := full.HedgelessDoubleCollateral
 
 	assertFloat(t, hl.Costs.Total.BTC, full.Costs.Total.BTC-hedgeFeeBTC+full.Costs.Network.BTC)
-	if hl.Route.Settlement != "onchain_hub" || hl.NumNetworkTxs != 2 {
+	if hl.Route.Settlement != "Hub_main2main" || hl.NumNetworkTxs != 2 {
 		t.Fatalf("hedgeless route = %+v / %d txs", hl.Route, hl.NumNetworkTxs)
 	}
 	assertFloat(t, hl.Costs.Hedge.FeeSumBTC, 0)
@@ -474,6 +474,72 @@ func TestAskScenarioOmitsHedgelessExecutionVariant(t *testing.T) {
 	scenario := buildScenarioFromBreakdown(bd, 100, nil, 0, 0, tradecost.ManualRouteOptions{})
 	if scenario.HedgelessDoubleCollateral != nil {
 		t.Fatal("ask-side scenario must not advertise hedgeless execution")
+	}
+}
+
+func TestLiveOffersRESTAttachesHedgelessOnlyWhenHedgefullUnavailable(t *testing.T) {
+	oldHub := hub
+	oldPrices := cexPrices
+	oldOptimizer := tradeRouteOptimizer
+	oldEstimators := tradeCostEstimators
+	defer func() {
+		hub = oldHub
+		cexPrices = oldPrices
+		tradeRouteOptimizer = oldOptimizer
+		tradeCostEstimators = oldEstimators
+	}()
+
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	cexPrices = map[string]float64{"kraken": 100}
+
+	est := tradecost.NewHedgelessOnlyEstimatorForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
+	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
+	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+
+	btcMin := 0.01
+	btcMax := 0.1
+	hub.offers = []LiveOffer{{
+		ID:        1,
+		Exchange:  "bisq",
+		Direction: "buy",
+		Price:     102.5,
+		BTCMin:    &btcMin,
+		BTCMax:    &btcMax,
+		FirstSeen: "2026-04-01 12:00:00",
+		LastSeen:  "2026-04-01 12:00:00",
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
+	rec := httptest.NewRecorder()
+	handleLiveOffersREST(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var offers []liveOfferAPI
+	if err := json.Unmarshal(rec.Body.Bytes(), &offers); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offer count = %d, want 1", len(offers))
+	}
+
+	full := offers[0].Analysis.FullVolume
+	if full.Route.CEX != "" {
+		t.Fatalf("hedgefull route cex = %q, want empty when hedges unavailable", full.Route.CEX)
+	}
+	if full.HedgelessDoubleCollateral == nil {
+		t.Fatal("expected hedgeless_double_collateral when only spot routing works")
+	}
+	hl := full.HedgelessDoubleCollateral
+	if hl.Route.CEX != "kraken" {
+		t.Fatalf("hedgeless route cex = %q, want kraken", hl.Route.CEX)
+	}
+	if hl.Premium.NetPercent <= 0 {
+		t.Fatalf("hedgeless net premium = %v, want positive", hl.Premium.NetPercent)
+	}
+	if hl.Capital.TradeMode != tradecost.TradeModeHedgelessDoubleCollateral {
+		t.Fatalf("hedgeless trade_mode = %q", hl.Capital.TradeMode)
 	}
 }
 
@@ -881,7 +947,7 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 	}
 	var takerFee, withdrawalFee, networkFee, dexFee float64
 	if err := testDB.QueryRow(`
-		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc, dex_fee_btc
+		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, routing_fee_sum, dex_fee_btc
 		FROM offers WHERE id = ?
 	`, 1).Scan(&takerFee, &withdrawalFee, &networkFee, &dexFee); err != nil {
 		t.Fatalf("select offer fees: %v", err)

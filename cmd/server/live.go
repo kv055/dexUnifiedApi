@@ -237,6 +237,9 @@ type liveOutOffer struct {
 	EstimatedProfitBTCCapped  *float64                      `json:"estimated_profit_btc_capped,omitempty"`  // estimated BTC profit at the max fiat cap
 	EstimatedProfitFiatCapped *float64                      `json:"estimated_profit_fiat_capped,omitempty"` // estimated fiat profit at the max fiat cap
 	CostBreakdownMin          *tradecost.CostBreakdown      `json:"cost_breakdown_min,omitempty"`           // at the offer's min amount (only set when min < full size)
+	HedgelessOnlyBreakdown    *tradecost.CostBreakdown      `json:"-"` // spot-only route when hedgefull cannot be priced
+	HedgelessOnlyCapped       *tradecost.CostBreakdown      `json:"-"`
+	HedgelessOnlyMin          *tradecost.CostBreakdown      `json:"-"`
 	ManualRouteOptions        tradecost.ManualRouteOptions  `json:"-"`
 	ManualRouteOptionsCapped  *tradecost.ManualRouteOptions `json:"-"`
 	ManualRouteOptionsMin     *tradecost.ManualRouteOptions `json:"-"`
@@ -279,6 +282,13 @@ func derefStringOrEmpty(v *string) string {
 	return *v
 }
 
+func routingSettlement(bd tradecost.CostBreakdown) string {
+	if strings.TrimSpace(bd.RoutingProfile) != "" {
+		return bd.RoutingProfile
+	}
+	return bd.RouteMethod
+}
+
 func scenarioCostsFromBreakdown(bd tradecost.CostBreakdown) liveOfferScenarioCosts {
 	return liveOfferScenarioCosts{
 		CexTaker: liveOfferCostComponent{
@@ -308,7 +318,7 @@ func scenarioCostsFromBreakdown(bd tradecost.CostBreakdown) liveOfferScenarioCos
 
 func buildModeVariantFromBreakdown(bd tradecost.CostBreakdown, refPrice float64) liveOfferModeVariant {
 	return liveOfferModeVariant{
-		Route:            liveOfferRoute{CEX: bd.RouteCEX, Settlement: bd.RouteMethod},
+		Route:            liveOfferRoute{CEX: bd.RouteCEX, Settlement: routingSettlement(bd)},
 		NumNetworkTxs:    bd.NumNetworkTxs,
 		NetworkFeeMethod: bd.NetworkFeeMethod,
 		Premium: liveOfferPremium{
@@ -332,7 +342,7 @@ func buildScenarioFromBreakdown(bd tradecost.CostBreakdown, refPrice float64, ca
 		TradeSizeFiat: tradecost.Round2(bd.BTCAmount * refPrice),
 		Route: liveOfferRoute{
 			CEX:        bd.RouteCEX,
-			Settlement: bd.RouteMethod,
+			Settlement: routingSettlement(bd),
 		},
 		Premium: liveOfferPremium{
 			TradeCostPercent: tradeCostPct,
@@ -410,6 +420,10 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 		SellerRatingConfidence: o.SellerRatingConfidence,
 		SellerRatingRaw:        o.SellerRatingRaw,
 	}
+	attachHedgelessOnly(&api.Analysis.FullVolume, o.HedgelessOnlyBreakdown, o.RefPrice)
+	if api.BTCNetworkFee.Method == "" && o.HedgelessOnlyBreakdown != nil {
+		api.BTCNetworkFee = buildBTCLiveNetworkFee(*o.HedgelessOnlyBreakdown, requiredConfirmations)
+	}
 	if o.CostBreakdownCapped != nil && o.TradeCostPctCapped != nil && o.NetPremiumPctCapped != nil {
 		capFiat := tradecost.Round2(o.CostBreakdownCapped.BTCAmount * o.RefPrice)
 		manualOptions := tradecost.ManualRouteOptions{}
@@ -417,6 +431,7 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 			manualOptions = *o.ManualRouteOptionsCapped
 		}
 		api.Analysis.CappedVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownCapped, o.RefPrice, &capFiat, *o.TradeCostPctCapped, *o.NetPremiumPctCapped, manualOptions))
+		attachHedgelessOnly(api.Analysis.CappedVolume, o.HedgelessOnlyCapped, o.RefPrice)
 	}
 	if o.CostBreakdownMin != nil && o.TradeCostPctMin != nil && o.NetPremiumPctMin != nil {
 		manualOptions := tradecost.ManualRouteOptions{}
@@ -424,6 +439,7 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 			manualOptions = *o.ManualRouteOptionsMin
 		}
 		api.Analysis.MinVolume = ptrScenario(buildScenarioFromBreakdown(*o.CostBreakdownMin, o.RefPrice, nil, *o.TradeCostPctMin, *o.NetPremiumPctMin, manualOptions))
+		attachHedgelessOnly(api.Analysis.MinVolume, o.HedgelessOnlyMin, o.RefPrice)
 	}
 	return api
 }
@@ -465,6 +481,46 @@ func computeNetPremiumFieldsFull(premiumPct float64, btcSize float64, refPriceEU
 	bd.EstimatedProfitPct = netPremium
 	bd.EstimatedProfitBTC = math.Round((bd.BTCAmount*(netPremium/100))*1e8) / 1e8
 	return bd.TotalCostPct, netPremium, bd
+}
+
+// computeHedgelessOnlyBreakdown prices a spot-only route when hedgefull routing
+// cannot find any hedge venue. Bid offers are converted to hedgeless double-
+// collateral economics; ask offers keep the spot-only cost shape.
+func computeHedgelessOnlyBreakdown(premiumPct float64, btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedSpotCEXes, excludedHedgeCEXes []string, feeTier string, coupledHedge bool, realDepositPct *float64) *tradecost.CostBreakdown {
+	if tradeRouteOptimizer == nil || premiumPct <= 0 || btcSize <= 0 {
+		return nil
+	}
+	requiredConfirmations = tradecost.ResolveRequiredConfirmations(direction, requiredConfirmations)
+	spot := tradeRouteOptimizer.BestBreakdownSpotOnlyWithExclusions(btcSize, refPriceEUR, dexExchange, direction, requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, feeTier, coupledHedge, realDepositPct)
+	if spot.RouteCEX == "" {
+		return nil
+	}
+	bd := spot
+	if spot.TradeDirection == "bid" {
+		if hedgeless := tradecost.DeriveHedgelessDoubleCollateral(spot); hedgeless.RouteCEX != "" {
+			bd = hedgeless
+		}
+	}
+	netPremium := math.Round((premiumPct-bd.TotalCostPct)*100) / 100
+	bd.EstimatedProfitPct = netPremium
+	bd.EstimatedProfitBTC = math.Round((bd.BTCAmount*(netPremium/100))*1e8) / 1e8
+	return &bd
+}
+
+func attachHedgelessOnly(scenario *liveOfferScenario, hedgelessOnly *tradecost.CostBreakdown, refPrice float64) {
+	if scenario == nil || hedgelessOnly == nil || hedgelessOnly.RouteCEX == "" {
+		return
+	}
+	if scenario.HedgelessDoubleCollateral != nil {
+		return
+	}
+	variant := buildModeVariantFromBreakdown(*hedgelessOnly, refPrice)
+	scenario.HedgelessDoubleCollateral = &variant
+	// Keep size metadata usable even when the hedgefull parent route is empty.
+	if scenario.TradeSizeBTC <= 0 {
+		scenario.TradeSizeBTC = hedgelessOnly.BTCAmount
+		scenario.TradeSizeFiat = tradecost.Round2(hedgelessOnly.BTCAmount * refPrice)
+	}
 }
 
 func computeManualRouteOptions(btcSize float64, refPriceEUR float64, dexExchange string, direction string, requiredConfirmations int, excludedSpotCEXes, excludedHedgeCEXes []string, feeTier string) tradecost.ManualRouteOptions {
@@ -694,10 +750,24 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		btcSize := selectBTCTradeSize(o.BTCMax, o.BTCMin)
 		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 		manualOptions := computeManualRouteOptions(btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier)
+		var hedgelessOnly *tradecost.CostBreakdown
+		if bd.RouteCEX == "" {
+			if only := computeHedgelessOnlyBreakdown(pct, btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct); only != nil {
+				if only.TradeDirection == "ask" {
+					// Asks have no hedgeless trade mode; spot-only is the priced route.
+					bd = *only
+					tradeCostPct = only.TotalCostPct
+					netPremium = only.EstimatedProfitPct
+				} else {
+					hedgelessOnly = only
+				}
+			}
+		}
 
 		// If a max fiat limit is set and the offer's full size exceeds it, compute a second
 		// breakdown capped to that fiat amount so the frontend can show both side by side.
 		var bdCapped *tradecost.CostBreakdown
+		var hedgelessOnlyCapped *tradecost.CostBreakdown
 		var manualOptionsCapped *tradecost.ManualRouteOptions
 		var abortCapped *tradecost.AbortCostBreakdown
 		var tcCapped, npCapped *float64
@@ -707,6 +777,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			if btcSize > btcCap {
 				tc2, np2, bd2 := computeNetPremiumFieldsFull(pct, btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 				bdCapped = &bd2
+				if bd2.RouteCEX == "" {
+					hedgelessOnlyCapped = computeHedgelessOnlyBreakdown(pct, btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+				}
 				options := computeManualRouteOptions(btcCap, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier)
 				manualOptionsCapped = &options
 				abort2 := tradecost.AbortCostFromBreakdown(bd2)
@@ -723,11 +796,15 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		// If the offer has a minimum amount below its full size, compute a third
 		// breakdown at that minimum so the frontend can show the smallest viable trade.
 		var bdMin *tradecost.CostBreakdown
+		var hedgelessOnlyMin *tradecost.CostBreakdown
 		var manualOptionsMin *tradecost.ManualRouteOptions
 		var tcMin, npMin *float64
 		if o.BTCMin != nil && *o.BTCMin > 0 && *o.BTCMin < btcSize {
 			tc3, np3, bd3 := computeNetPremiumFieldsFull(pct, *o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 			bdMin = &bd3
+			if bd3.RouteCEX == "" {
+				hedgelessOnlyMin = computeHedgelessOnlyBreakdown(pct, *o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+			}
 			options := computeManualRouteOptions(*o.BTCMin, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier)
 			manualOptionsMin = &options
 			tcMin = &tc3
@@ -756,6 +833,9 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 			EstimatedProfitBTCCapped:  profitBTCCapped,
 			EstimatedProfitFiatCapped: profitFiatCapped,
 			CostBreakdownMin:          bdMin,
+			HedgelessOnlyBreakdown:    hedgelessOnly,
+			HedgelessOnlyCapped:       hedgelessOnlyCapped,
+			HedgelessOnlyMin:          hedgelessOnlyMin,
 			ManualRouteOptions:        manualOptions,
 			ManualRouteOptionsCapped:  manualOptionsCapped,
 			ManualRouteOptionsMin:     manualOptionsMin,

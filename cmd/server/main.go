@@ -468,7 +468,7 @@ func fetchOfferLifecycle(ctx context.Context, ids []int64) map[int64][]Lifecycle
 
 // writeLifecycleEntries persists a computed snapshot of each live offer's
 // metrics into the local order_lifecycle table, and updates best_route_cex /
-// best_route_method on the offers table.
+// routing_profile / routing_fee_* on the offers table.
 func writeLifecycleEntries(ctx context.Context, offers []liveOutOffer) {
 	if len(offers) == 0 || db == nil {
 		return

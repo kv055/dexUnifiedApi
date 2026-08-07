@@ -204,23 +204,24 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 	}
 
 	// Best route is maintained live on the offers table by the server.
-	var bestRouteCEX, bestRouteMethod sql.NullString
-	_ = sdb.QueryRow(`SELECT best_route_cex, best_route_method FROM offers WHERE id = ?`, offer.id).
-		Scan(&bestRouteCEX, &bestRouteMethod)
+	var bestRouteCEX, routingProfile sql.NullString
+	_ = sdb.QueryRow(`SELECT best_route_cex, routing_profile FROM offers WHERE id = ?`, offer.id).
+		Scan(&bestRouteCEX, &routingProfile)
 
-	var cexTakerFeeBTC, cexWithdrawFeeBTC, networkFeeBTC, hedgeOpenFeeBTC, hedgeCloseFeeBTC, hedgeFundingFeeBTC, hedgeFeeSumBTC, dexFeeBTC sql.NullFloat64
+	var cexTakerFeeBTC, cexWithdrawFeeBTC, routingFeeSum, hedgeOpenFeeBTC, hedgeCloseFeeBTC, hedgeFundingFeeBTC, hedgeFeeSumBTC, dexFeeBTC sql.NullFloat64
 	var hedgeVenue, hedgeInstrument sql.NullString
 	var hedgeTransferMinutes sql.NullInt64
+	var routingFeeDetail []byte
 	_ = sdb.QueryRow(`
-		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, network_fee_btc,
+		SELECT cex_taker_fee_btc, cex_withdraw_fee_btc, routing_fee_sum,
 		       hedge_open_fee_btc, hedge_close_fee_btc, hedge_funding_fee_btc, hedge_fee_sum_btc, hedge_venue, hedge_instrument, hedge_transfer_minutes,
-		       dex_fee_btc
+		       dex_fee_btc, routing_fee_detail
 		FROM offers
 		WHERE id = ?
 	`, offer.id).Scan(
 		&cexTakerFeeBTC,
 		&cexWithdrawFeeBTC,
-		&networkFeeBTC,
+		&routingFeeSum,
 		&hedgeOpenFeeBTC,
 		&hedgeCloseFeeBTC,
 		&hedgeFundingFeeBTC,
@@ -229,6 +230,7 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		&hedgeInstrument,
 		&hedgeTransferMinutes,
 		&dexFeeBTC,
+		&routingFeeDetail,
 	)
 
 	profitFiat := profAvgNetPremiumBTC.Float64 * avgRefPrice.Float64
@@ -244,7 +246,7 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 			avg_hedge_fee_sum_btc      = ?,
 			cex_taker_fee_btc          = ?,
 			cex_withdraw_fee_btc       = ?,
-			network_fee_btc            = ?,
+			routing_fee_sum            = ?,
 			hedge_open_fee_btc         = ?,
 			hedge_close_fee_btc        = ?,
 			hedge_funding_fee_btc      = ?,
@@ -265,7 +267,8 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 			avg_min_btc_amount          = ?,
 			min_volume_analyzed         = TRUE,
 			best_route_cex             = ?,
-			best_route_method          = ?
+			routing_profile            = ?,
+			routing_fee_detail         = ?
 		WHERE id = ?
 	`,
 		"analyzed",
@@ -276,7 +279,7 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		nullHistoricalRound8(hedgeFeeSumBTC),
 		nullHistoricalRound8(cexTakerFeeBTC),
 		nullHistoricalRound8(cexWithdrawFeeBTC),
-		nullHistoricalRound8(networkFeeBTC),
+		nullHistoricalRound8(routingFeeSum),
 		nullHistoricalRound8(hedgeOpenFeeBTC),
 		nullHistoricalRound8(hedgeCloseFeeBTC),
 		nullHistoricalRound8(hedgeFundingFeeBTC),
@@ -296,7 +299,8 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		nullHistoricalRound4IfValid(minAvgNetPremiumBTC, minProfitFiat),
 		nullHistoricalRound8(minAvgBTCAmount),
 		bestRouteCEX.String,
-		bestRouteMethod.String,
+		nullHistoricalString(routingProfile),
+		nullHistoricalJSON(routingFeeDetail),
 		offer.id,
 	)
 	return "analyzed", false
@@ -343,4 +347,11 @@ func nullHistoricalInt(v sql.NullInt64) any {
 		return nil
 	}
 	return v.Int64
+}
+
+func nullHistoricalJSON(raw []byte) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return raw
 }

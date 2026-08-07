@@ -50,12 +50,12 @@ func TestLiveStatusBulkUpdateClearsClosureFieldsOnRelive(t *testing.T) {
 			historical_analysis_status, avg_ref_price, avg_premium_pct,
 			avg_trade_cost_pct, avg_trade_cost_btc, avg_hedge_fee_sum_btc,
 			avg_net_premium_pct, avg_estimated_profit_btc, avg_estimated_profit_fiat, avg_btc_amount,
-			best_route_cex, best_route_method
+			best_route_cex, routing_profile
 		)
 		VALUES (
 			'bisq', 'EUR', 'buy', 100, FALSE, NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '10 minutes',
 			'analyzed', 100, 5, 1, 0.001, 0.0006, 4, 0.004, 0.4, 0.1,
-			'kraken', 'onchain'
+			'kraken', 'Direct_main2main'
 		)
 		RETURNING id
 	`).Scan(&id); err != nil {
