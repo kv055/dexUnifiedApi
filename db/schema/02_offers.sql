@@ -1,8 +1,8 @@
 CREATE TABLE IF NOT EXISTS offers (
     id BIGSERIAL PRIMARY KEY,
-    exchange VARCHAR(16) NOT NULL,
-    fiat_currency CHAR(3) NOT NULL CHECK (fiat_currency = UPPER(fiat_currency)),
-    direction VARCHAR(4) NOT NULL CHECK (direction IN ('buy', 'sell')),
+    exchange dex_provider NOT NULL,
+    fiat_currency fiat_currency NOT NULL,
+    direction trade_direction NOT NULL,
     price DOUBLE PRECISION,
     btc_min DOUBLE PRECISION CHECK (btc_min IS NULL OR btc_min >= 0),
     btc_max DOUBLE PRECISION CHECK (btc_max IS NULL OR btc_max >= 0),
@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS offers (
     abort_cost_pct DOUBLE PRECISION CHECK (abort_cost_pct IS NULL OR abort_cost_pct >= 0),
     cex_taker_fee_btc DOUBLE PRECISION CHECK (cex_taker_fee_btc IS NULL OR cex_taker_fee_btc >= 0),
     cex_withdraw_fee_btc DOUBLE PRECISION CHECK (cex_withdraw_fee_btc IS NULL OR cex_withdraw_fee_btc >= 0),
-    network_fee_btc DOUBLE PRECISION CHECK (network_fee_btc IS NULL OR network_fee_btc >= 0),
+    routing_fee_sum DOUBLE PRECISION CHECK (routing_fee_sum IS NULL OR routing_fee_sum >= 0),
+    routing_profile routing_profile,
+    routing_fee_detail JSONB,
     hedge_open_fee_btc DOUBLE PRECISION CHECK (hedge_open_fee_btc IS NULL OR hedge_open_fee_btc >= 0),
     hedge_close_fee_btc DOUBLE PRECISION CHECK (hedge_close_fee_btc IS NULL OR hedge_close_fee_btc >= 0),
     hedge_funding_fee_btc DOUBLE PRECISION CHECK (hedge_funding_fee_btc IS NULL OR hedge_funding_fee_btc >= 0),
@@ -47,19 +49,15 @@ CREATE TABLE IF NOT EXISTS offers (
     avg_min_estimated_profit_fiat DOUBLE PRECISION,
     avg_min_btc_amount DOUBLE PRECISION CHECK (avg_min_btc_amount IS NULL OR avg_min_btc_amount >= 0),
     min_volume_analyzed BOOLEAN NOT NULL DEFAULT FALSE,
-    price_type VARCHAR(16) CHECK (price_type IS NULL OR price_type IN ('fixed', 'floating', 'unknown')),
-    best_route_cex VARCHAR(16) CHECK (best_route_cex IS NULL OR best_route_cex IN ('kraken', 'binance', 'coinbase', 'bitstamp')),
-    best_route_method VARCHAR(16),
+    price_type offer_price_type,
+    best_route_cex cex_provider,
     security_deposit_btc DOUBLE PRECISION CHECK (security_deposit_btc IS NULL OR security_deposit_btc >= 0),
     security_deposit_pct DOUBLE PRECISION CHECK (security_deposit_pct IS NULL OR security_deposit_pct >= 0),
-    CONSTRAINT offers_exchange_check CHECK (
-        exchange IN ('bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin')
+    seller_rating_score DOUBLE PRECISION CHECK (
+        seller_rating_score IS NULL OR (seller_rating_score >= 0 AND seller_rating_score <= 100)
     ),
-    CONSTRAINT offers_best_route_method_check CHECK (
-        best_route_method IS NULL OR best_route_method IN (
-            'onchain', 'lightning', 'onchain_swap', 'onchain_direct', 'onchain_hub'
-        )
-    ),
+    seller_rating_confidence seller_rating_confidence,
+    seller_rating_raw JSONB,
     CHECK (btc_max IS NULL OR btc_min IS NULL OR btc_max >= btc_min),
     CHECK (fiat_max IS NULL OR fiat_min IS NULL OR fiat_max >= fiat_min),
     CHECK (last_seen >= first_seen)
@@ -73,14 +71,5 @@ CREATE INDEX IF NOT EXISTS idx_offers_live_fiat
 CREATE INDEX IF NOT EXISTS idx_offers_fingerprint
     ON offers(exchange, fiat_currency, direction, btc_min, btc_max);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_offer_id
-    ON offers(offer_id) WHERE offer_id IS NOT NULL;
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'offers' AND column_name = 'payment_methods'
-    ) THEN
-        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_offers_payment_methods ON offers USING GIN (payment_methods)';
-    END IF;
-END $$;
+    ON offers(exchange, fiat_currency, offer_id) WHERE offer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_offers_payment_methods ON offers USING GIN (payment_methods);

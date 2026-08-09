@@ -1123,12 +1123,12 @@ func flushPaymentMethodTouches(ctx context.Context, sdb *dbutil.DB) {
 		res, err := sdb.Exec(`
 			UPDATE payment_methods SET
 				currencies = (
-					SELECT COALESCE(array_agg(DISTINCT x), '{}'::text[])
-					FROM unnest(currencies || ?::text[]) AS x
+					SELECT COALESCE(array_agg(DISTINCT x), '{}'::fiat_currency[])
+					FROM unnest(currencies || ?::fiat_currency[]) AS x
 				),
 				sources = (
-					SELECT COALESCE(array_agg(DISTINCT x), '{}'::text[])
-					FROM unnest(sources || ?::text[]) AS x
+					SELECT COALESCE(array_agg(DISTINCT x), '{}'::dex_provider[])
+					FROM unnest(sources || ?::dex_provider[]) AS x
 				),
 				popularity = popularity + ?,
 				updated_at = CURRENT_TIMESTAMP

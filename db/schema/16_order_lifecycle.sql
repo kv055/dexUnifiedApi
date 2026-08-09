@@ -15,9 +15,9 @@ CREATE TABLE IF NOT EXISTS order_lifecycle (
     min_net_premium_pct DOUBLE PRECISION,
     min_net_premium_btc DOUBLE PRECISION,
     min_btc_amount DOUBLE PRECISION CHECK (min_btc_amount IS NULL OR min_btc_amount >= 0),
-    hedge_notional_eur DOUBLE PRECISION CHECK (hedge_notional_eur IS NULL OR hedge_notional_eur >= 0),
+    hedge_notional_fiat DOUBLE PRECISION CHECK (hedge_notional_fiat IS NULL OR hedge_notional_fiat >= 0),
     leverage_used DOUBLE PRECISION CHECK (leverage_used IS NULL OR leverage_used >= 0),
-    recommended_collateral_eur DOUBLE PRECISION CHECK (recommended_collateral_eur IS NULL OR recommended_collateral_eur >= 0)
+    recommended_collateral_fiat DOUBLE PRECISION CHECK (recommended_collateral_fiat IS NULL OR recommended_collateral_fiat >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_lifecycle_offer ON order_lifecycle(offer_db_id);

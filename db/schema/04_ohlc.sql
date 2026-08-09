@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS ohlc (
     time TIMESTAMPTZ NOT NULL,
-    fiat_currency CHAR(3) NOT NULL DEFAULT 'EUR' CHECK (fiat_currency = UPPER(fiat_currency)),
+    fiat_currency fiat_currency NOT NULL DEFAULT 'EUR',
     open DOUBLE PRECISION NOT NULL CHECK (open > 0),
     high DOUBLE PRECISION NOT NULL CHECK (high > 0),
     low DOUBLE PRECISION NOT NULL CHECK (low > 0),

@@ -12,17 +12,8 @@ import (
 //go:embed schema/*.sql
 var schemaFiles embed.FS
 
-//go:embed migrations/*
-var migrationFiles embed.FS
-
-// EnsureUnifiedSchema applies the base schema (schema/*.sql) and then any
-// forward-only migrations (migrations/*.sql), each at most once.
-//
-// Base schema files use CREATE TABLE IF NOT EXISTS so they're safe on existing
-// DBs. Migrations are one-shot changes (ALTER, data fixes, etc.) that run
-// exactly once. Both are tracked in the schema_migrations table — an applied
-// filename is recorded atomically with the change, and already-recorded files
-// are skipped on subsequent boots.
+// EnsureUnifiedSchema applies each table-local schema file at most once.
+// Files are tracked in schema_migrations so repeated boots do not reapply them.
 func EnsureUnifiedSchema(db *DB) error {
 	if _, err := db.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		filename   TEXT PRIMARY KEY,
@@ -31,15 +22,12 @@ func EnsureUnifiedSchema(db *DB) error {
 		return fmt.Errorf("ensure schema_migrations table: %w", err)
 	}
 
-	applied, err := appliedMigrations(db)
+	applied, err := appliedSchemaFiles(db)
 	if err != nil {
 		return err
 	}
 
 	if err := applyDir(db, schemaFiles, "schema", applied); err != nil {
-		return err
-	}
-	if err := applyDir(db, migrationFiles, "migrations", applied); err != nil {
 		return err
 	}
 	return nil
@@ -63,8 +51,7 @@ func applyDir(db *DB, fsys embed.FS, dir string, applied map[string]bool) error 
 	sort.Strings(filenames)
 
 	for _, filename := range filenames {
-		trackingKey := trackingKeyForDir(dir, filename)
-		if applied[trackingKey] {
+		if applied[filename] {
 			continue
 		}
 
@@ -82,7 +69,7 @@ func applyDir(db *DB, fsys embed.FS, dir string, applied map[string]bool) error 
 			_ = tx.Rollback()
 			return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, trackingKey); err != nil {
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, filename); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("record %s/%s: %w", dir, filename, err)
 		}
@@ -90,25 +77,15 @@ func applyDir(db *DB, fsys embed.FS, dir string, applied map[string]bool) error 
 			return fmt.Errorf("commit %s/%s: %w", dir, filename, err)
 		}
 
-		applied[trackingKey] = true
+		applied[filename] = true
 	}
 
 	return nil
 }
 
-// trackingKeyForDir returns the schema_migrations filename key. Base schema files
-// use the bare filename (backwards-compatible with the old single-directory layout);
-// migration files are prefixed with "migrations/" so the two namespaces don't collide.
-func trackingKeyForDir(dir, filename string) string {
-	if dir == "schema" {
-		return filename
-	}
-	return dir + "/" + filename
-}
-
-// appliedMigrations returns the set of migration filenames already recorded in
+// appliedSchemaFiles returns the set of schema filenames already recorded in
 // the schema_migrations tracking table.
-func appliedMigrations(db *DB) (map[string]bool, error) {
+func appliedSchemaFiles(db *DB) (map[string]bool, error) {
 	rows, err := db.DB.Query(`SELECT filename FROM schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("read schema_migrations: %w", err)

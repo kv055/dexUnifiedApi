@@ -187,8 +187,8 @@ func TestPaymentMethodsSourcesCurrenciesConstraints(t *testing.T) {
 
 	if _, err := db.ExecContext(ctx, `
 		UPDATE payment_methods
-		SET sources = ARRAY['bisq', 'robosats']::text[],
-		    currencies = ARRAY['EUR', 'USD']::text[]
+		SET sources = ARRAY['bisq', 'robosats']::dex_provider[],
+		    currencies = ARRAY['EUR', 'USD']::fiat_currency[]
 		WHERE name = 'SEPA'`); err != nil {
 		t.Fatalf("set valid sources/currencies: %v", err)
 	}
@@ -228,11 +228,11 @@ func TestPaymentMethodsSourcesCurrenciesConstraints(t *testing.T) {
 	}
 
 	if _, err := db.ExecContext(ctx, `
-		UPDATE payment_methods SET sources = ARRAY['kraken']::text[] WHERE name = 'SEPA'`); err == nil {
+		UPDATE payment_methods SET sources = ARRAY['kraken']::dex_provider[] WHERE name = 'SEPA'`); err == nil {
 		t.Fatal("expected CHECK rejection for unknown source")
 	}
 	if _, err := db.ExecContext(ctx, `
-		UPDATE payment_methods SET currencies = ARRAY['XYZ']::text[] WHERE name = 'SEPA'`); err == nil {
+		UPDATE payment_methods SET currencies = ARRAY['XYZ']::fiat_currency[] WHERE name = 'SEPA'`); err == nil {
 		t.Fatal("expected CHECK rejection for unknown currency")
 	}
 }

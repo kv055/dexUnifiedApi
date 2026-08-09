@@ -9,20 +9,17 @@ import (
 	"dexunifiedapi/internal/testdb"
 )
 
-// countSQLFiles counts *.sql files in schema/ and migrations/ so the test does not
-// hard-code the migration count.
+// countSchemaFiles counts the table-local schema files without hard-coding a count.
 func countSchemaFiles(t *testing.T) int {
 	t.Helper()
 	n := 0
-	for _, dir := range []string{"schema", "migrations"} {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-				n++
-			}
+	entries, err := os.ReadDir("schema")
+	if err != nil {
+		t.Fatalf("read schema directory: %v", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			n++
 		}
 	}
 	if n == 0 {
@@ -31,9 +28,9 @@ func countSchemaFiles(t *testing.T) int {
 	return n
 }
 
-// TestEnsureUnifiedSchemaRecordsEveryMigration verifies that the first run applies
-// and records every migration file exactly once.
-func TestEnsureUnifiedSchemaRecordsEveryMigration(t *testing.T) {
+// TestEnsureUnifiedSchemaRecordsEverySchemaFile verifies that the first run
+// applies and records every schema file exactly once.
+func TestEnsureUnifiedSchemaRecordsEverySchemaFile(t *testing.T) {
 	db := testdb.Open(t) // applies the schema once
 
 	var count int
@@ -70,6 +67,6 @@ func TestEnsureUnifiedSchemaIsRunOnce(t *testing.T) {
 		t.Fatalf("row count changed across runs: %d -> %d", count1, count2)
 	}
 	if maxApplied1 != maxApplied2 {
-		t.Fatalf("applied_at changed across runs (%q -> %q): migrations were re-applied", maxApplied1, maxApplied2)
+		t.Fatalf("applied_at changed across runs (%q -> %q): schema files were re-applied", maxApplied1, maxApplied2)
 	}
 }

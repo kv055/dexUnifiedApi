@@ -72,7 +72,7 @@ func TestAccountSeedRunsAgainstMigratedSchema(t *testing.T) {
 			var n int
 			var category string
 			if err := db.DB.QueryRowContext(ctx,
-				`SELECT count(*), coalesce(max(category), '') FROM accounts WHERE provider = $1`,
+				`SELECT count(*), coalesce(max(category)::text, '') FROM accounts WHERE provider = $1`,
 				tc.provider).Scan(&n, &category); err != nil {
 				t.Fatalf("read back %s account: %v", tc.provider, err)
 			}

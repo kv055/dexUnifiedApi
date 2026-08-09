@@ -2,6 +2,8 @@ CREATE TABLE IF NOT EXISTS wallet_addresses (
     id BIGSERIAL PRIMARY KEY,
     label VARCHAR(64) NOT NULL UNIQUE,
     address VARCHAR(128) NOT NULL UNIQUE,
+    provider TEXT,
+    category wallet_address_category,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS fiat_tx_push_logs (
 
     -- derived/normalized fields used by the matcher
     amount DOUBLE PRECISION,
-    currency CHAR(3),
+    currency fiat_currency,
     sender TEXT,
 
     -- pipeline state

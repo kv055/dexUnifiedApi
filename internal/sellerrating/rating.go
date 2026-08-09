@@ -23,7 +23,7 @@ import (
 
 // Confidence records how much a Score.Value can be trusted, independent of the
 // exchange it came from. New tags added here must be mirrored in the
-// offers.seller_rating_confidence CHECK constraint.
+// offers.seller_rating_confidence enum.
 type Confidence string
 
 const (

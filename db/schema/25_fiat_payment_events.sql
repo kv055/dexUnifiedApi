@@ -2,13 +2,13 @@
 -- MIME remains in Maddy; Postgres only stores parsed evidence and a SHA-256.
 CREATE TABLE IF NOT EXISTS fiat_payment_events (
     id BIGSERIAL PRIMARY KEY,
-    source VARCHAR(16) NOT NULL CHECK (source IN ('push', 'email')),
+    source notification_channel NOT NULL,
     provider TEXT NOT NULL,
     account_id BIGINT REFERENCES accounts(id) ON DELETE SET NULL,
     source_event_id TEXT NOT NULL,
     sender TEXT,
     amount_minor BIGINT,
-    currency CHAR(3),
+    currency fiat_currency,
     description TEXT,
     provider_timestamp TIMESTAMPTZ,
     received_timestamp TIMESTAMPTZ NOT NULL,
@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS fiat_payment_events_match_idx
 CREATE TABLE IF NOT EXISTS fiat_transaction_confirmations (
     transaction_id BIGINT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
     account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    channel VARCHAR(16) NOT NULL CHECK (channel IN ('push', 'email')),
+    channel notification_channel NOT NULL,
     payment_event_id BIGINT NOT NULL REFERENCES fiat_payment_events(id) ON DELETE RESTRICT,
     confirmed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (transaction_id, channel),

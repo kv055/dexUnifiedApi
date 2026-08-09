@@ -1,23 +1,14 @@
 CREATE TABLE IF NOT EXISTS transactions (
     id BIGSERIAL PRIMARY KEY,
-    direction VARCHAR(4) NOT NULL CHECK (direction IN ('BUY', 'SELL')),
+    direction trade_direction NOT NULL,
     fiat_amount DOUBLE PRECISION NOT NULL CHECK (fiat_amount > 0),
-    fiat_currency CHAR(3) NOT NULL CHECK (fiat_currency = UPPER(fiat_currency)),
-    cex VARCHAR(16) CHECK (
-        cex IS NULL OR cex IN (
-            'Binance', 'Kraken', 'Coinbase', 'Bybit',
-            'OKX', 'Bitfinex', 'Gemini', 'Bitstamp'
-        )
-    ),
-    cex_hedging_position VARCHAR(16) CHECK (
-        cex_hedging_position IS NULL OR cex_hedging_position IN (
-            'Binance', 'Kraken', 'Coinbase', 'Bybit',
-            'OKX', 'Bitfinex', 'Gemini', 'Bitstamp'
-        )
-    ),
-    dex VARCHAR(16),
+    fiat_currency fiat_currency NOT NULL,
+    cex cex_provider,
+    cex_hedging_position cex_provider,
+    dex dex_provider,
     status VARCHAR(32),
-    trade_mode TEXT,
+    payment_method TEXT,
+    trade_mode transaction_trade_mode,
     btc_pool_target_btc DOUBLE PRECISION CHECK (btc_pool_target_btc IS NULL OR btc_pool_target_btc >= 0),
     btc_required_liquidity DOUBLE PRECISION CHECK (btc_required_liquidity IS NULL OR btc_required_liquidity > 0),
     btc_pool_refill_status TEXT CHECK (
@@ -65,14 +56,6 @@ CREATE TABLE IF NOT EXISTS transactions (
             'DexPositionOpen', 'DexPositionTaken', 'DexFiatHasArrived',
             'DexPositionReleased'
         )
-    ),
-    CONSTRAINT transactions_trade_mode_check CHECK (
-        trade_mode IS NULL OR trade_mode IN (
-            'hedgefull_single_collateral', 'hedgeless_double_collateral'
-        )
-    ),
-    CONSTRAINT transactions_dex_check CHECK (
-        dex IS NULL OR dex IN ('Bisq', 'Bisq2', 'HodlHodl', 'RoboSats', 'PeachBitcoin')
     )
 );
 
