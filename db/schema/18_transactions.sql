@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS transactions (
             'FiatToCexInitiated', 'FiatToCexArrived',
             'CexTradeflowStarted', 'HedgeFailedNeedsReview', 'CexTradeflowNeedsReview',
             'HedgelessTradeStarted', 'HedgelessFundingInitiated', 'HedgelessFundingNeedsReview',
+			'DexTakenFundingNeedsReview',
             'CexTradeSucessfull',
             'CexCryptoWithdrawalInitiated', 'CexCryptoWithdrawalArrived',
             'DexPositionOpen', 'DexPositionTaken', 'DexFiatHasArrived',
