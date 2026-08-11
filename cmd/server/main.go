@@ -12,6 +12,7 @@ import (
 	"commons/tradecost"
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"dexunifiedapi/db"
 	"dexunifiedapi/internal/accounthealth"
 	"dexunifiedapi/internal/config"
@@ -278,6 +279,9 @@ func main() {
 	if err := refreshLiveCapabilityPolicy(ctx); err != nil {
 		slog.Error("initial MM CEX policy refresh failed; routing fail-closed", "err", err)
 	}
+	if err := refreshTransactionalRoutingSettings(ctx); err != nil {
+		slog.Error("initial transactional liquidity refresh failed; route resolution disabled", "err", err)
+	}
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -288,6 +292,9 @@ func main() {
 			case <-ticker.C:
 				if err := refreshLiveCapabilityPolicy(ctx); err != nil {
 					slog.Error("periodic MM CEX policy refresh failed; routing fail-closed", "err", err)
+				}
+				if err := refreshTransactionalRoutingSettings(ctx); err != nil {
+					slog.Error("periodic transactional liquidity refresh failed; route resolution disabled", "err", err)
 				}
 			}
 		}
@@ -659,6 +666,35 @@ func refreshLiveCapabilityPolicy(ctx context.Context) error {
 	}
 	policySpot, policyHedge := mmcapabilities.EffectiveExclusions(states)
 	hub.setCapabilityExclusions(policySpot, policyHedge)
+	return nil
+}
+
+// refreshTransactionalRoutingSettings loads the operator's route preference.
+// A failed read deliberately clears the cached profile so offers are never
+// forwarded with a route derived from stale liquidity settings.
+func refreshTransactionalRoutingSettings(ctx context.Context) error {
+	if db == nil {
+		hub.setTransactionalRoutingSettings(transactionalRoutingSettings{})
+		return fmt.Errorf("database is unavailable")
+	}
+	var (
+		settings transactionalRoutingSettings
+		custom   sql.NullFloat64
+	)
+	err := db.QueryRowContext(ctx, `
+		SELECT fiat_currency, custom_amount, trade_mode, target_direction, config_version
+		FROM transactional_liquidity_settings
+		WHERE id = 1
+	`).Scan(&settings.FiatCurrency, &custom, &settings.TradeMode, &settings.TargetDirection, &settings.ConfigVersion)
+	if err != nil {
+		hub.setTransactionalRoutingSettings(transactionalRoutingSettings{})
+		return fmt.Errorf("load transactional liquidity settings: %w", err)
+	}
+	if custom.Valid {
+		amount := custom.Float64
+		settings.CustomAmount = &amount
+	}
+	hub.setTransactionalRoutingSettings(settings)
 	return nil
 }
 

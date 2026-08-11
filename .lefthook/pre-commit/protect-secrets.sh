@@ -24,6 +24,13 @@ if ((${#offending_paths[@]})); then
 fi
 
 if ! command -v gitleaks >/dev/null 2>&1; then
+  go_bin="$(go env GOPATH 2>/dev/null)/bin"
+  if [[ -x "$go_bin/gitleaks" ]]; then
+    export PATH="$go_bin:$PATH"
+  fi
+fi
+
+if ! command -v gitleaks >/dev/null 2>&1; then
   printf 'ERROR: gitleaks is required for commits. Install pinned version %s:\n' "$GITLEAKS_VERSION" >&2
   printf '  go install github.com/gitleaks/gitleaks/v8@v%s\n' "$GITLEAKS_VERSION" >&2
   exit 1
