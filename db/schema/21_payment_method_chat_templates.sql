@@ -2,6 +2,7 @@
 -- where the counterparty's fiat details are exchanged via the trade chat (robosats, bisq2).
 --
 -- exchange:            chat-style DEX venue. Currently limited to the two chat venues.
+-- trade_direction:     offer direction, either bid or ask.
 -- payment_method_id:   canonical catalog row the template applies to.
 -- template:            message body sent to the counterparty. Supports placeholders:
 --                      {{amount}}    - expected fiat amount (e.g. "100.00")
@@ -11,6 +12,7 @@
 CREATE TABLE IF NOT EXISTS payment_method_chat_templates (
     id                  BIGSERIAL PRIMARY KEY,
     exchange            dex_provider NOT NULL,
+    trade_direction     TEXT NOT NULL DEFAULT 'bid',
     payment_method_id   BIGINT NOT NULL REFERENCES payment_methods(id) ON DELETE CASCADE,
     template            TEXT NOT NULL,
     is_active           BOOLEAN NOT NULL DEFAULT TRUE,
@@ -19,7 +21,10 @@ CREATE TABLE IF NOT EXISTS payment_method_chat_templates (
     CONSTRAINT payment_method_chat_templates_exchange_allowed_check CHECK (
         exchange IN ('robosats', 'bisq2')
     ),
-    CONSTRAINT payment_method_chat_templates_unique UNIQUE (exchange, payment_method_id)
+    CONSTRAINT payment_method_chat_templates_trade_direction_check CHECK (
+        trade_direction IN ('bid', 'ask')
+    ),
+    CONSTRAINT payment_method_chat_templates_unique UNIQUE (exchange, payment_method_id, trade_direction)
 );
 
 CREATE INDEX IF NOT EXISTS payment_method_chat_templates_exchange_idx ON payment_method_chat_templates(exchange);

@@ -134,6 +134,7 @@ func TestGlobalEnumTypesAndColumns(t *testing.T) {
 		"payment_methods.sources":                "_dex_provider",
 		"payment_methods.currencies":             "_fiat_currency",
 		"payment_method_chat_templates.exchange": "dex_provider",
+		"payment_method_chat_templates.trade_direction": "text",
 		"fiat_payment_events.source":             "notification_channel",
 		"fiat_payment_events.currency":           "fiat_currency",
 		"fiat_tx_push_logs.currency":             "fiat_currency",
