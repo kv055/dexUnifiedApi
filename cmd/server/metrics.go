@@ -20,6 +20,7 @@ type serverMetrics struct {
 	liveOffersPushed prometheus.Counter
 	healthCheckDur   *prometheus.HistogramVec
 	healthChecks     *prometheus.CounterVec
+	routeResolutions *prometheus.CounterVec
 }
 
 // newServerMetrics registers the unified-api instruments on reg.
@@ -50,10 +51,24 @@ func newServerMetrics(reg prometheus.Registerer) *serverMetrics {
 			Name: "dex_account_health_checks_total",
 			Help: "Account health checks run, by provider and result (ok|fail).",
 		}, []string{"provider", "result"}),
+		routeResolutions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dex_snapshot_route_resolutions_total",
+			Help: "Offers resolved, blocked, or out of scope while building route books.",
+		}, []string{"status", "reason"}),
 	}
 	reg.MustRegister(m.wsClients, m.wsBroadcasts, m.liveOffersInHub, m.liveOffersPushed,
-		m.healthCheckDur, m.healthChecks)
+		m.healthCheckDur, m.healthChecks, m.routeResolutions)
 	return m
+}
+
+func (m *serverMetrics) observeRouteResolution(status, reason string) {
+	if m == nil {
+		return
+	}
+	if reason == "" {
+		reason = "none"
+	}
+	m.routeResolutions.WithLabelValues(status, reason).Inc()
 }
 
 func (m *serverMetrics) incWSClient() {

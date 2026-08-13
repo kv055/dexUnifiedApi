@@ -111,12 +111,6 @@ func TestLiveHubCapabilityExclusionsAreIndependentFromSubscription(t *testing.T)
 	if strings.Join(spot, ",") != "kraken" || strings.Join(hedge, ",") != "coinbase" {
 		t.Fatalf("capability exclusions = spot %v hedge %v", spot, hedge)
 	}
-	sub := liveSubscription{excludedSpotCEXes: "binance"}
-	mergedSpot := mergeCEXLists(parseExcludedCEXes(sub.excludedSpotCEXes), spot)
-	if strings.Join(mergedSpot, ",") != "binance,kraken" {
-		t.Fatalf("merged spot exclusions = %v", mergedSpot)
-	}
-
 	// Re-enabling a provider updates the overlay without reconnecting the client.
 	h.setCapabilityExclusions(nil, nil)
 	spot, hedge = h.capabilityExclusions()
@@ -547,12 +541,14 @@ func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	oldOptimizer := tradeRouteOptimizer
 	oldEstimators := tradeCostEstimators
 	oldHubOffers := hub.getOffers()
+	oldRoutingSettings := hub.transactionalRoutingSettings()
 	oldKrakenPrice := getCexPrice("kraken")
 	defer func() {
 		tradeRouteOptimizer = oldOptimizer
 		tradeCostEstimators = oldEstimators
 		setCexPrice("kraken", oldKrakenPrice)
 		hub.setOffers(oldHubOffers)
+		hub.setTransactionalRoutingSettings(oldRoutingSettings)
 	}()
 
 	setCexPrice("kraken", 100)
@@ -560,6 +556,8 @@ func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	est := tradecost.NewFixedEstimatorForTesting("kraken", "bisq", 0.0025, 0.00015, 0.001, 0.00005)
 	tradeCostEstimators = map[string]*tradecost.TradeCostEstimator{"kraken": est}
 	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
+	capAmount := 5.0
+	hub.setTransactionalRoutingSettings(transactionalRoutingSettings{AmountSource: "capped_volume", AmountFiat: &capAmount, FeeTier: "economic"})
 
 	btcMin := 0.02
 	btcMax := 0.1
@@ -574,7 +572,7 @@ func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 		LastSeen:  "2026-04-01 12:00:00",
 	}})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken&max_fiat_limit=5", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
 	rec := httptest.NewRecorder()
 
 	handleLiveOffersREST(rec, req)

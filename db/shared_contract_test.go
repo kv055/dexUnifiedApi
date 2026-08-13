@@ -1,6 +1,7 @@
 package dbutil_test
 
 import (
+	"database/sql"
 	"sort"
 	"strings"
 	"testing"
@@ -43,6 +44,10 @@ func TestSharedServiceSchemaContract(t *testing.T) {
 		"telegram_settings": {
 			"id", "bot_token", "chat_id", "dexmm_webhook_url", "pushpush_webhook_url",
 			"config_version", "updated_at",
+		},
+		"transactional_liquidity_settings": {
+			"id", "fiat_currency", "amount_source", "amount_fiat", "trade_mode",
+			"target_direction", "fee_tier", "coupled_hedge", "config_version", "updated_at",
 		},
 		"fiat_payment_events": {
 			"id", "source", "provider", "account_id", "source_event_id", "amount_minor",
@@ -113,32 +118,32 @@ func TestGlobalEnumTypesAndColumns(t *testing.T) {
 	}
 
 	columns := map[string]string{
-		"accounts.provider":                      "account_provider",
-		"accounts.category":                      "account_category",
-		"offers.exchange":                        "dex_provider",
-		"offers.direction":                       "trade_direction",
-		"offers.fiat_currency":                   "fiat_currency",
-		"offers.best_route_cex":                  "cex_provider",
-		"offers.routing_profile":                 "routing_profile",
-		"offers.seller_rating_confidence":        "seller_rating_confidence",
-		"snapshots.exchange":                     "dex_provider",
-		"snapshots.fiat_currency":                "fiat_currency",
-		"ohlc.fiat_currency":                     "fiat_currency",
-		"bank_accounts.currency":                 "fiat_currency",
-		"transactions.cex":                       "cex_provider",
-		"transactions.direction":                 "trade_direction",
-		"transactions.dex":                       "dex_provider",
-		"transactions.trade_mode":                "transaction_trade_mode",
-		"transactions.fiat_currency":             "fiat_currency",
-		"payment_methods.category":               "payment_method_category",
-		"payment_methods.sources":                "_dex_provider",
-		"payment_methods.currencies":             "_fiat_currency",
-		"payment_method_chat_templates.exchange": "dex_provider",
+		"accounts.provider":                             "account_provider",
+		"accounts.category":                             "account_category",
+		"offers.exchange":                               "dex_provider",
+		"offers.direction":                              "trade_direction",
+		"offers.fiat_currency":                          "fiat_currency",
+		"offers.best_route_cex":                         "cex_provider",
+		"offers.routing_profile":                        "routing_profile",
+		"offers.seller_rating_confidence":               "seller_rating_confidence",
+		"snapshots.exchange":                            "dex_provider",
+		"snapshots.fiat_currency":                       "fiat_currency",
+		"ohlc.fiat_currency":                            "fiat_currency",
+		"bank_accounts.currency":                        "fiat_currency",
+		"transactions.cex":                              "cex_provider",
+		"transactions.direction":                        "trade_direction",
+		"transactions.dex":                              "dex_provider",
+		"transactions.trade_mode":                       "transaction_trade_mode",
+		"transactions.fiat_currency":                    "fiat_currency",
+		"payment_methods.category":                      "payment_method_category",
+		"payment_methods.sources":                       "_dex_provider",
+		"payment_methods.currencies":                    "_fiat_currency",
+		"payment_method_chat_templates.exchange":        "dex_provider",
 		"payment_method_chat_templates.trade_direction": "text",
-		"fiat_payment_events.source":             "notification_channel",
-		"fiat_payment_events.currency":           "fiat_currency",
-		"fiat_tx_push_logs.currency":             "fiat_currency",
-		"fiat_transaction_confirmations.channel": "notification_channel",
+		"fiat_payment_events.source":                    "notification_channel",
+		"fiat_payment_events.currency":                  "fiat_currency",
+		"fiat_tx_push_logs.currency":                    "fiat_currency",
+		"fiat_transaction_confirmations.channel":        "notification_channel",
 	}
 	for qualified, wantType := range columns {
 		parts := strings.SplitN(qualified, ".", 2)
@@ -164,5 +169,42 @@ func TestGlobalEnumTypesAndColumns(t *testing.T) {
 	}
 	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('bisq', 'XYZ', 'buy')`); err == nil {
 		t.Error("invalid fiat currency was accepted")
+	}
+}
+
+func TestTransactionalRoutingVersionOnlyBumpsForRoutingChanges(t *testing.T) {
+	db := testdb.Open(t)
+	var source, feeTier string
+	var amount sql.NullFloat64
+	var coupled bool
+	if err := db.QueryRow(`SELECT amount_source, amount_fiat, fee_tier, coupled_hedge FROM transactional_liquidity_settings WHERE id = 1`).Scan(&source, &amount, &feeTier, &coupled); err != nil {
+		t.Fatalf("read routing defaults: %v", err)
+	}
+	if source != "capped_volume" || amount.Valid || feeTier != "economic" || coupled {
+		t.Fatalf("routing defaults = source=%q amount=%v fee=%q coupled=%v", source, amount, feeTier, coupled)
+	}
+	var before int64
+	if err := db.QueryRow(`SELECT config_version FROM transactional_liquidity_settings WHERE id = 1`).Scan(&before); err != nil {
+		t.Fatalf("read initial routing version: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE transactional_liquidity_settings SET amount_source = 'custom', amount_fiat = 500 WHERE id = 1`); err != nil {
+		t.Fatalf("update routing amount: %v", err)
+	}
+	var changed int64
+	if err := db.QueryRow(`SELECT config_version FROM transactional_liquidity_settings WHERE id = 1`).Scan(&changed); err != nil {
+		t.Fatalf("read changed routing version: %v", err)
+	}
+	if changed != before+1 {
+		t.Fatalf("routing config version = %d, want %d", changed, before+1)
+	}
+	if _, err := db.Exec(`UPDATE transactional_liquidity_settings SET updated_at = CURRENT_TIMESTAMP WHERE id = 1`); err != nil {
+		t.Fatalf("touch routing settings: %v", err)
+	}
+	var touched int64
+	if err := db.QueryRow(`SELECT config_version FROM transactional_liquidity_settings WHERE id = 1`).Scan(&touched); err != nil {
+		t.Fatalf("read touched routing version: %v", err)
+	}
+	if touched != changed {
+		t.Fatalf("non-routing update changed version from %d to %d", changed, touched)
 	}
 }

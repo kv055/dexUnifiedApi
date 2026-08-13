@@ -276,12 +276,10 @@ func main() {
 	metricsReg.Registry.MustRegister(dbmetrics.NewCollector(db))
 	priceManager.SetMetrics(prices.NewMetrics(metricsReg.Registry))
 
-	if err := refreshLiveCapabilityPolicy(ctx); err != nil {
-		slog.Error("initial MM CEX policy refresh failed; routing fail-closed", "err", err)
+	if err := refreshSnapshotRoutingContext(ctx); err != nil {
+		slog.Error("initial snapshot routing context refresh failed; routing fail-closed", "err", err)
 	}
-	if err := refreshTransactionalRoutingSettings(ctx); err != nil {
-		slog.Error("initial transactional liquidity refresh failed; route resolution disabled", "err", err)
-	}
+	go listenSnapshotRoutingChanges(ctx, databaseURL)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -290,11 +288,8 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := refreshLiveCapabilityPolicy(ctx); err != nil {
-					slog.Error("periodic MM CEX policy refresh failed; routing fail-closed", "err", err)
-				}
-				if err := refreshTransactionalRoutingSettings(ctx); err != nil {
-					slog.Error("periodic transactional liquidity refresh failed; route resolution disabled", "err", err)
+				if err := refreshSnapshotRoutingContext(ctx); err != nil {
+					slog.Error("periodic snapshot routing context refresh failed; routing fail-closed", "err", err)
 				}
 			}
 		}
@@ -420,23 +415,9 @@ func corsMiddleware(next http.Handler) http.Handler {
 // --- Handlers ---
 
 func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
-	if err := refreshLiveHub(r.Context(), nil); err != nil {
-		slog.WarnContext(r.Context(), "live book refresh failed; serving cached book", "err", err)
-	}
-	if err := refreshLiveCapabilityPolicy(r.Context()); err != nil {
-		slog.ErrorContext(r.Context(), "refresh MM CEX policy; routing fail-closed", "err", err)
-	}
-	spotExclusions := queryExcludedSpotCEXes(r)
-	hedgeExclusions := queryExcludedHedgeCEXes(r)
 	sub := liveSubscription{
-		cex:                   queryCex(r),
-		fiat:                  queryFiat(r),
-		requiredConfirmations: queryConfirmations(r),
-		excludedSpotCEXes:     strings.Join(spotExclusions, ","),
-		excludedHedgeCEXes:    strings.Join(hedgeExclusions, ","),
-		feeTier:               queryFeeTier(r),
-		coupledHedge:          queryCoupledHedge(r),
-		maxFiatLimitEUR:       queryMaxFiatLimitEUR(r),
+		cex:  queryCex(r),
+		fiat: queryFiat(r),
 	}
 	payload := hub.computePayload(getCexPrice(sub.cex), sub)
 	if payload == nil {
@@ -548,6 +529,9 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	appMetrics.observePush()
+	if err := refreshSnapshotRoutingContext(ctx); err != nil {
+		slog.ErrorContext(ctx, "refresh routing context for snapshot; routing fail-closed", "err", err)
+	}
 	// We deliberately do NOT preload every live offer's full lifecycle history into the
 	// hub here. That unbounded bulk load (all order_lifecycle rows for all live offers)
 	// is what OOM-killed this service; the per-offer lifecycle endpoint lazy-loads on
@@ -673,29 +657,98 @@ func refreshLiveCapabilityPolicy(ctx context.Context) error {
 // A failed read deliberately clears the cached profile so offers are never
 // forwarded with a route derived from stale liquidity settings.
 func refreshTransactionalRoutingSettings(ctx context.Context) error {
-	if db == nil {
-		hub.setTransactionalRoutingSettings(transactionalRoutingSettings{})
-		return fmt.Errorf("database is unavailable")
-	}
-	var (
-		settings transactionalRoutingSettings
-		custom   sql.NullFloat64
-	)
-	err := db.QueryRowContext(ctx, `
-		SELECT fiat_currency, custom_amount, trade_mode, target_direction, config_version
-		FROM transactional_liquidity_settings
-		WHERE id = 1
-	`).Scan(&settings.FiatCurrency, &custom, &settings.TradeMode, &settings.TargetDirection, &settings.ConfigVersion)
+	settings, err := loadTransactionalRoutingSettings(ctx)
 	if err != nil {
 		hub.setTransactionalRoutingSettings(transactionalRoutingSettings{})
-		return fmt.Errorf("load transactional liquidity settings: %w", err)
-	}
-	if custom.Valid {
-		amount := custom.Float64
-		settings.CustomAmount = &amount
+		return err
 	}
 	hub.setTransactionalRoutingSettings(settings)
 	return nil
+}
+
+func loadTransactionalRoutingSettings(ctx context.Context) (transactionalRoutingSettings, error) {
+	if db == nil {
+		return transactionalRoutingSettings{}, fmt.Errorf("database is unavailable")
+	}
+	var (
+		settings transactionalRoutingSettings
+		amount   sql.NullFloat64
+	)
+	err := db.QueryRowContext(ctx, `
+		SELECT fiat_currency, amount_source, amount_fiat, trade_mode,
+		       target_direction, fee_tier, coupled_hedge, config_version
+		FROM transactional_liquidity_settings
+		WHERE id = 1
+	`).Scan(&settings.FiatCurrency, &settings.AmountSource, &amount, &settings.TradeMode,
+		&settings.TargetDirection, &settings.FeeTier, &settings.CoupledHedge, &settings.ConfigVersion)
+	if err != nil {
+		return transactionalRoutingSettings{}, fmt.Errorf("load transactional liquidity settings: %w", err)
+	}
+	if amount.Valid {
+		value := amount.Float64
+		settings.AmountFiat = &value
+	}
+	if settings.FeeTier == "" {
+		settings.FeeTier = "economic"
+	}
+	return settings, nil
+}
+
+func refreshSnapshotRoutingContext(ctx context.Context) error {
+	settings, settingsErr := loadTransactionalRoutingSettings(ctx)
+	store := currentCapabilityStore()
+	var states []mmcapabilities.ProviderState
+	var capabilityErr error
+	if store == nil {
+		capabilityErr = fmt.Errorf("MM capability store is unavailable")
+	} else {
+		states, capabilityErr = store.States(ctx)
+	}
+	spot, hedge := mmcapabilities.EffectiveExclusions(states)
+	if capabilityErr != nil {
+		spot = mmcapabilities.CostSupportedProviderIDs()
+		hedge = mmcapabilities.CostSupportedProviderIDs()
+	}
+	if settingsErr != nil {
+		settings = transactionalRoutingSettings{}
+	}
+	spotBlockCode := capabilityLegBlockCode(states, true)
+	hedgeBlockCode := capabilityLegBlockCode(states, false)
+	if capabilityErr != nil {
+		spotBlockCode = "routing_context_unavailable"
+		hedgeBlockCode = "routing_context_unavailable"
+	}
+	hub.setSnapshotRoutingContext(settings, spot, hedge, spotBlockCode, hedgeBlockCode)
+	if settingsErr != nil || capabilityErr != nil {
+		return fmt.Errorf("load snapshot routing context: settings=%v capabilities=%v", settingsErr, capabilityErr)
+	}
+	return nil
+}
+
+func capabilityLegBlockCode(states []mmcapabilities.ProviderState, spot bool) string {
+	eligible := false
+	stale := false
+	for _, state := range states {
+		if !state.CostSupported {
+			continue
+		}
+		leg := state.Hedge
+		if spot {
+			leg = state.Spot
+		}
+		if leg.EffectiveEnabled {
+			eligible = true
+		}
+		for _, blocker := range leg.Blockers {
+			if blocker.Code == mmcapabilities.BlockStale {
+				stale = true
+			}
+		}
+	}
+	if !eligible && stale {
+		return "stale_permission_checks"
+	}
+	return ""
 }
 
 type accountHealthResponse struct {
@@ -793,96 +846,6 @@ func queryInt(r *http.Request, key string, defaultVal int) int {
 		return defaultVal
 	}
 	return v
-}
-
-func queryConfirmations(r *http.Request) int {
-	v := queryInt(r, "confirmations", 0)
-	if v <= 0 {
-		return 0
-	}
-	if v > 6 {
-		return 6
-	}
-	return v
-}
-
-var validFeeTiers = map[string]bool{
-	"economic": true,
-	"standard": true,
-	"fast":     true,
-	"express":  true,
-}
-
-func queryFeeTier(r *http.Request) string {
-	tier := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("fee_tier")))
-	if validFeeTiers[tier] {
-		return tier
-	}
-	return ""
-}
-
-func queryExcludedCEXes(r *http.Request) []string {
-	return queryCEXList(r, "exclude_cexes")
-}
-
-func queryExcludedSpotCEXes(r *http.Request) []string {
-	return mergeCEXLists(queryExcludedCEXes(r), queryCEXList(r, "exclude_spot_cexes"))
-}
-
-func queryExcludedHedgeCEXes(r *http.Request) []string {
-	return mergeCEXLists(queryExcludedCEXes(r), queryCEXList(r, "exclude_hedge_cexes"))
-}
-
-func queryCEXList(r *http.Request, key string) []string {
-	values := append([]string{}, r.URL.Query()[key]...)
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, raw := range values {
-		for _, part := range strings.Split(raw, ",") {
-			cex := strings.TrimSpace(strings.ToLower(part))
-			if cex == "" {
-				continue
-			}
-			if _, ok := seen[cex]; ok {
-				continue
-			}
-			seen[cex] = struct{}{}
-			result = append(result, cex)
-		}
-	}
-	return result
-}
-
-func mergeCEXLists(lists ...[]string) []string {
-	seen := make(map[string]struct{})
-	result := make([]string, 0)
-	for _, list := range lists {
-		for _, cex := range list {
-			if _, ok := seen[cex]; ok {
-				continue
-			}
-			seen[cex] = struct{}{}
-			result = append(result, cex)
-		}
-	}
-	return result
-}
-
-func queryCoupledHedge(r *http.Request) bool {
-	v := r.URL.Query().Get("coupled_hedge")
-	return v != "false" && v != "0"
-}
-
-func queryMaxFiatLimitEUR(r *http.Request) float64 {
-	v := r.URL.Query().Get("max_fiat_limit")
-	if v == "" {
-		return 0
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || f <= 0 {
-		return 0
-	}
-	return f
 }
 
 func writeJSON(w http.ResponseWriter, data any) {
