@@ -228,26 +228,23 @@ func main() {
 		slog.Error("failed to ping database", "err", err)
 		os.Exit(1)
 	}
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		slog.Error("schema init error", "err", err)
+		os.Exit(1)
+	}
 
 	// One orchestrator serves every CEX: it picks the cheapest non-excluded CEX
 	// internally via the cextrading engine. The map is kept (the shared instance
 	// under each CEX key) only for CEX-name validation and optimizer adoption.
 	credentialStore := exchangecredentials.NewStore(db.DB)
-	orchestrator := tradecost.NewTradeCostEstimatorWithCredentials(credentialStore.Resolve)
+	orchestrator := tradecost.NewTradeCostEstimatorWithPersistedFees(db.DB)
 	tradeCostEstimators = make(map[string]*tradecost.TradeCostEstimator, len(supportedCEXes))
 	for _, c := range supportedCEXes {
 		tradeCostEstimators[c] = orchestrator
-		slog.Info("trade-cost CEX enabled",
-			"cex", c,
-			"taker_fallback_pct", tradecost.TakerFeeFallback(c)*100,
-			"onchain_withdrawal_fallback_btc", tradecost.WithdrawalFallback(c))
+		slog.Info("trade-cost CEX enabled", "cex", c, "fee_source", "persisted_exchange_snapshot")
 	}
 	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
 
-	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
-		slog.Error("schema init error", "err", err)
-		os.Exit(1)
-	}
 	if err := dbutil.SeedPaymentMethods(db); err != nil {
 		slog.Error("payment methods seed error", "err", err)
 		os.Exit(1)
@@ -279,6 +276,9 @@ func main() {
 	if err := refreshLiveCapabilityPolicy(ctx); err != nil {
 		slog.Error("initial MM CEX policy refresh failed; routing fail-closed", "err", err)
 	}
+	if err := refreshPersistedCEXFees(ctx, db.DB, credentialStore); err != nil {
+		slog.Error("initial CEX fee refresh incomplete; missing/stale providers are excluded", "err", err)
+	}
 	if err := refreshTransactionalRoutingSettings(ctx); err != nil {
 		slog.Error("initial transactional liquidity refresh failed; route resolution disabled", "err", err)
 	}
@@ -295,6 +295,20 @@ func main() {
 				}
 				if err := refreshTransactionalRoutingSettings(ctx); err != nil {
 					slog.Error("periodic transactional liquidity refresh failed; route resolution disabled", "err", err)
+				}
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := refreshPersistedCEXFees(ctx, db.DB, credentialStore); err != nil {
+					slog.Error("periodic CEX fee refresh incomplete; missing/stale providers are excluded", "err", err)
 				}
 			}
 		}
