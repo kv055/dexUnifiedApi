@@ -96,6 +96,7 @@ Important variables:
 - `POSTGRES_FIAT_CONTROLLER_PASSWORD`
 - `LISTEN_ADDR`
 - `SNAPSHOT_INTERVAL_MIN`
+- `LIVE_OFFER_STALE_GRACE` (default `5m`; retain offers during source outages)
 - `CLOSED_OFFER_ANALYSIS_GRACE_CYCLES`
 - `TOR_PROXY_ADDR`
 - `BISQ_GRPC_HOST`

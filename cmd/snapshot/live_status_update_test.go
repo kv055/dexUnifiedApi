@@ -16,28 +16,31 @@ func openLiveStatusDB(t *testing.T) *dbutil.DB {
 
 func applyLiveStatusBulkUpdate(t *testing.T, db *dbutil.DB, snapshotStart time.Time) {
 	t.Helper()
-
-	_, err := db.Exec(`
-		UPDATE offers SET
-			is_live = (last_seen >= ?),
-			duration = CASE WHEN last_seen < ? THEN EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT ELSE NULL END,
-			historical_analysis_status = CASE WHEN last_seen >= ? THEN NULL ELSE historical_analysis_status END,
-			avg_ref_price              = CASE WHEN last_seen >= ? THEN NULL ELSE avg_ref_price END,
-			avg_premium_pct            = CASE WHEN last_seen >= ? THEN NULL ELSE avg_premium_pct END,
-			avg_trade_cost_pct         = CASE WHEN last_seen >= ? THEN NULL ELSE avg_trade_cost_pct END,
-			avg_trade_cost_btc         = CASE WHEN last_seen >= ? THEN NULL ELSE avg_trade_cost_btc END,
-			avg_hedge_fee_sum_btc      = CASE WHEN last_seen >= ? THEN NULL ELSE avg_hedge_fee_sum_btc END,
-			avg_net_premium_pct        = CASE WHEN last_seen >= ? THEN NULL ELSE avg_net_premium_pct END,
-			avg_estimated_profit_btc   = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_btc END,
-			avg_estimated_profit_fiat  = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_fiat END,
-			avg_btc_amount             = CASE WHEN last_seen >= ? THEN NULL ELSE avg_btc_amount END`,
-		snapshotStart, snapshotStart,
-		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
-		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
-	)
+	err := reconcileLiveOfferStatus(db, snapshotStart, nil, defaultLiveOfferStaleGrace)
 	if err != nil {
-		t.Fatalf("bulk live status update: %v", err)
+		t.Fatalf("reconcile live offer status: %v", err)
 	}
+}
+
+func insertLiveOffer(t *testing.T, db *dbutil.DB, exchange, fiat, direction string, lastSeen time.Time) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`
+		INSERT INTO offers (exchange, fiat_currency, direction, price, is_live, first_seen, last_seen)
+		VALUES (?, ?, ?, 100, TRUE, ?, ?)
+		RETURNING id`, exchange, fiat, direction, lastSeen.Add(-time.Hour), lastSeen).Scan(&id); err != nil {
+		t.Fatalf("insert live offer: %v", err)
+	}
+	return id
+}
+
+func offerIsLive(t *testing.T, db *dbutil.DB, id int64) bool {
+	t.Helper()
+	var isLive bool
+	if err := db.QueryRow(`SELECT is_live FROM offers WHERE id = ?`, id).Scan(&isLive); err != nil {
+		t.Fatalf("select offer live state: %v", err)
+	}
+	return isLive
 }
 
 func TestLiveStatusBulkUpdateClearsClosureFieldsOnRelive(t *testing.T) {
@@ -89,5 +92,49 @@ func TestLiveStatusBulkUpdateClearsClosureFieldsOnRelive(t *testing.T) {
 	}
 	if !bestRouteCEX.Valid || bestRouteCEX.String != "kraken" {
 		t.Fatalf("best_route_cex = %v, want kraken preserved", bestRouteCEX)
+	}
+}
+
+func TestReconcileLiveOfferStatusRetainsFailedMarketWithinGrace(t *testing.T) {
+	db := openLiveStatusDB(t)
+	snapshotStart := time.Now().UTC()
+	id := insertLiveOffer(t, db, "bisq", "EUR", "buy", snapshotStart.Add(-time.Minute))
+
+	if err := reconcileLiveOfferStatus(db, snapshotStart, nil, 5*time.Minute); err != nil {
+		t.Fatalf("reconcile failed market: %v", err)
+	}
+	if !offerIsLive(t, db, id) {
+		t.Fatal("offer disappeared after failed market fetch within grace")
+	}
+}
+
+func TestReconcileLiveOfferStatusClosesOnlyConfirmedMarketAbsences(t *testing.T) {
+	db := openLiveStatusDB(t)
+	snapshotStart := time.Now().UTC()
+	missing := insertLiveOffer(t, db, "bisq", "EUR", "buy", snapshotStart.Add(-time.Minute))
+	otherMarket := insertLiveOffer(t, db, "bisq", "EUR", "sell", snapshotStart.Add(-time.Minute))
+	confirmed := map[liveMarket]struct{}{{exchange: "bisq", fiat: "EUR", direction: "buy"}: {}}
+
+	if err := reconcileLiveOfferStatus(db, snapshotStart, confirmed, 5*time.Minute); err != nil {
+		t.Fatalf("reconcile confirmed market: %v", err)
+	}
+	if offerIsLive(t, db, missing) {
+		t.Fatal("offer missing from a confirmed market remained live")
+	}
+	if !offerIsLive(t, db, otherMarket) {
+		t.Fatal("offer from an unconfirmed market was closed")
+	}
+}
+
+func TestReconcileLiveOfferStatusExpiresFailedMarketAfterGrace(t *testing.T) {
+	db := openLiveStatusDB(t)
+	snapshotStart := time.Now().UTC()
+	id := insertLiveOffer(t, db, "bisq2", "USD", "sell", snapshotStart.Add(-6*time.Minute))
+
+	if err := reconcileLiveOfferStatus(db, snapshotStart, nil, 5*time.Minute); err != nil {
+		t.Fatalf("reconcile stale market: %v", err)
+	}
+	if offerIsLive(t, db, id) {
+		t.Fatal("offer from failed market remained live after grace")
 	}
 }

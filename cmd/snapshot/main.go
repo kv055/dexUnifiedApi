@@ -169,6 +169,15 @@ type exchFetcher struct {
 
 type exchangeSnapshotData map[string]map[string]bool
 
+// liveMarket identifies the smallest independently fetchable offer book. A
+// successful snapshot of one market can prove offers absent only from that
+// market; failures elsewhere must not change its live state.
+type liveMarket struct {
+	exchange  string
+	fiat      string
+	direction string
+}
+
 type livePayload struct {
 	ID                 int64    `json:"id"`
 	Exchange           string   `json:"exchange"`
@@ -1159,16 +1168,26 @@ func sortedStringSet(set map[string]struct{}) []string {
 	return out
 }
 
+// saveSnapshot persists one non-empty market snapshot. It remains as a small
+// compatibility wrapper for tests and callers that only need its live payload.
 func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice float64, offers []offer) []livePayload {
+	live, _ := saveSnapshotPersisted(sdb, exchange, fiat, direction, btcPrice, offers)
+	return live
+}
+
+// saveSnapshotPersisted reports whether the database transaction committed.
+// Callers must not use a fetched response to close prior offers unless this is
+// true: a source response that we failed to persist is not authoritative.
+func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice float64, offers []offer) ([]livePayload, bool) {
 	if len(offers) == 0 {
 		fmt.Printf("[%s] No offers to save\n", exchange)
-		return nil
+		return nil, true
 	}
 
 	tx, err := sdb.Begin()
 	if err != nil {
 		fmt.Printf("[%s] DB error: %v\n", exchange, err)
-		return nil
+		return nil, false
 	}
 	defer tx.Rollback()
 
@@ -1178,7 +1197,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 		// offer upserts below would all fail too. Bail loudly rather than silently
 		// pushing id=0 offers to the hub (the bug that hid bisq2/peach for so long).
 		fmt.Printf("[%s] snapshot insert failed (%s): %v\n", exchange, direction, err)
-		return nil
+		return nil, false
 	}
 
 	liveOffers := make([]livePayload, 0, len(offers))
@@ -1316,7 +1335,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 
 	if err := tx.Commit(); err != nil {
 		fmt.Printf("[%s] snapshot commit failed (%s): %v\n", exchange, direction, err)
-		return nil
+		return nil, false
 	}
 	for _, methods := range insertedMethods {
 		queuePaymentMethodTouches(methods, exchange, fiat)
@@ -1326,7 +1345,7 @@ func saveSnapshot(sdb *dbutil.DB, exchange, fiat, direction string, btcPrice flo
 	} else {
 		fmt.Printf("[%s] %d new, %d updated (%s)\n", exchange, inserted, updated, direction)
 	}
-	return liveOffers
+	return liveOffers, true
 }
 
 func recordFetchResult(exchangeData exchangeSnapshotData, exchange string, result *fetchResult) bool {
@@ -1352,6 +1371,77 @@ func offlineExchangeNames(fetchers []exchFetcher, exchangeData exchangeSnapshotD
 		}
 	}
 	return names
+}
+
+const defaultLiveOfferStaleGrace = 5 * time.Minute
+
+// liveOfferStaleGrace is the maximum time an offer remains visible when its
+// market cannot be fetched. A successful market snapshot always wins and
+// closes absent offers immediately.
+func liveOfferStaleGrace() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("LIVE_OFFER_STALE_GRACE"))
+	if raw == "" {
+		return defaultLiveOfferStaleGrace
+	}
+	grace, err := time.ParseDuration(raw)
+	if err != nil || grace <= 0 {
+		slog.Warn("invalid LIVE_OFFER_STALE_GRACE; using default", "value", raw, "default", defaultLiveOfferStaleGrace)
+		return defaultLiveOfferStaleGrace
+	}
+	return grace
+}
+
+const clearLiveOfferClosureFields = `
+		historical_analysis_status = NULL,
+		avg_ref_price = NULL,
+		avg_premium_pct = NULL,
+		avg_trade_cost_pct = NULL,
+		avg_trade_cost_btc = NULL,
+		avg_hedge_fee_sum_btc = NULL,
+		avg_net_premium_pct = NULL,
+		avg_estimated_profit_btc = NULL,
+		avg_estimated_profit_fiat = NULL,
+		avg_btc_amount = NULL,
+		avg_min_trade_cost_pct = NULL,
+		avg_min_trade_cost_btc = NULL,
+		avg_min_net_premium_pct = NULL,
+		avg_min_estimated_profit_btc = NULL,
+		avg_min_estimated_profit_fiat = NULL,
+		avg_min_btc_amount = NULL,
+		min_volume_analyzed = FALSE`
+
+// reconcileLiveOfferStatus updates live state from persisted market snapshots.
+// Only a successfully fetched and committed market can immediately close offers
+// missing from it. Markets that could not be fetched retain their last known
+// offers until the stale grace expires.
+func reconcileLiveOfferStatus(sdb *dbutil.DB, snapshotStart time.Time, confirmed map[liveMarket]struct{}, staleGrace time.Duration) error {
+	if _, err := sdb.Exec(`UPDATE offers SET
+		is_live = TRUE,
+		duration = NULL,`+clearLiveOfferClosureFields+`
+		WHERE last_seen >= ?`, snapshotStart); err != nil {
+		return fmt.Errorf("mark refreshed offers live: %w", err)
+	}
+
+	for market := range confirmed {
+		if _, err := sdb.Exec(`UPDATE offers SET
+			is_live = FALSE,
+			duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
+			WHERE is_live = TRUE
+			  AND exchange = ? AND fiat_currency = ? AND direction = ?
+			  AND last_seen < ?`,
+			market.exchange, market.fiat, market.direction, snapshotStart); err != nil {
+			return fmt.Errorf("close absent offers for %s/%s/%s: %w", market.exchange, market.fiat, market.direction, err)
+		}
+	}
+
+	staleCutoff := snapshotStart.Add(-staleGrace)
+	if _, err := sdb.Exec(`UPDATE offers SET
+		is_live = FALSE,
+		duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
+		WHERE is_live = TRUE AND last_seen < ?`, staleCutoff); err != nil {
+		return fmt.Errorf("expire stale live offers: %w", err)
+	}
+	return nil
 }
 
 // fetchTimings accumulates per-exchange fetch effort across both directions of
@@ -1527,6 +1617,7 @@ func main() {
 	}
 
 	exchangeData := make(exchangeSnapshotData)
+	confirmedMarkets := make(map[liveMarket]struct{})
 	liveOffers := make([]livePayload, 0)
 	timings := newFetchTimings()
 	serverURL := os.Getenv("SERVER_INTERNAL_URL")
@@ -1553,19 +1644,33 @@ func main() {
 						timings.failures[f.name]++
 						continue
 					}
+					market := liveMarket{exchange: f.name, fiat: currency, direction: direction}
 					before := len(result.Offers)
 					result.Offers = filterDustOffers(result.Offers)
 					if dropped := before - len(result.Offers); dropped > 0 {
 						slog.InfoContext(ctx, "dust offers filtered", "exchange", f.name, "direction", direction, "dropped", dropped)
 					}
-					if !recordFetchResult(exchangeData, f.name, result) || len(result.Offers) == 0 {
+					if !recordFetchResult(exchangeData, f.name, result) {
+						continue
+					}
+					// A decoded empty response is a successful, authoritative snapshot:
+					// it proves this market is empty. Non-empty responses need a
+					// committed DB transaction before they get the same authority.
+					if len(result.Offers) == 0 {
+						confirmedMarkets[market] = struct{}{}
 						continue
 					}
 					price := result.BTCPrice
 					if price == 0 {
 						price = float64(refPrice)
 					}
-					liveOffers = append(liveOffers, saveSnapshot(sdb, f.name, currency, direction, price, result.Offers)...)
+					persisted, ok := saveSnapshotPersisted(sdb, f.name, currency, direction, price, result.Offers)
+					if !ok {
+						slog.WarnContext(ctx, "market snapshot was not persisted; retaining prior live offers", "exchange", f.name, "fiat", currency, "direction", direction)
+						continue
+					}
+					liveOffers = append(liveOffers, persisted...)
+					confirmedMarkets[market] = struct{}{}
 				}
 			}
 
@@ -1575,48 +1680,17 @@ func main() {
 	stage(ctx, "snapshot.register_unknown_payment_methods", func() { flushUnknownPaymentMethods(ctx, sdb) })
 	stage(ctx, "snapshot.update_payment_method_popularity", func() { flushPaymentMethodTouches(ctx, sdb) })
 
-	// Update is_live and duration in one pass:
-	// - live offers: is_live=true, duration=NULL, closure analysis fields cleared
-	// - closed offers: is_live=false, duration=seconds between first_seen and last_seen
-	if _, err := sdb.Exec(`UPDATE offers SET
-		is_live = (last_seen >= ?),
-		duration = CASE WHEN last_seen < ? THEN EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT ELSE NULL END,
-		historical_analysis_status = CASE WHEN last_seen >= ? THEN NULL ELSE historical_analysis_status END,
-		avg_ref_price              = CASE WHEN last_seen >= ? THEN NULL ELSE avg_ref_price END,
-		avg_premium_pct            = CASE WHEN last_seen >= ? THEN NULL ELSE avg_premium_pct END,
-		avg_trade_cost_pct         = CASE WHEN last_seen >= ? THEN NULL ELSE avg_trade_cost_pct END,
-		avg_trade_cost_btc         = CASE WHEN last_seen >= ? THEN NULL ELSE avg_trade_cost_btc END,
-		avg_hedge_fee_sum_btc      = CASE WHEN last_seen >= ? THEN NULL ELSE avg_hedge_fee_sum_btc END,
-		avg_net_premium_pct        = CASE WHEN last_seen >= ? THEN NULL ELSE avg_net_premium_pct END,
-		avg_estimated_profit_btc   = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_btc END,
-		avg_estimated_profit_fiat  = CASE WHEN last_seen >= ? THEN NULL ELSE avg_estimated_profit_fiat END,
-		avg_btc_amount             = CASE WHEN last_seen >= ? THEN NULL ELSE avg_btc_amount END,
-		avg_min_trade_cost_pct      = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_trade_cost_pct END,
-		avg_min_trade_cost_btc      = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_trade_cost_btc END,
-		avg_min_net_premium_pct     = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_net_premium_pct END,
-		avg_min_estimated_profit_btc = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_estimated_profit_btc END,
-		avg_min_estimated_profit_fiat = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_estimated_profit_fiat END,
-		avg_min_btc_amount          = CASE WHEN last_seen >= ? THEN NULL ELSE avg_min_btc_amount END,
-		min_volume_analyzed         = CASE WHEN last_seen >= ? THEN FALSE ELSE min_volume_analyzed END`,
-		snapshotStart, snapshotStart,
-		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
-		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart,
-		snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart, snapshotStart); err != nil {
-		// Don't ignore this: on failure closed offers stay is_live=true and mislead
-		// the hub/analytics until a later cycle happens to succeed.
-		slog.ErrorContext(ctx, "failed to update is_live/duration for offers", "err", err)
+	staleGrace := liveOfferStaleGrace()
+	if err := reconcileLiveOfferStatus(sdb, snapshotStart, confirmedMarkets, staleGrace); err != nil {
+		slog.ErrorContext(ctx, "failed to reconcile live offer state", "err", err)
 	}
 
-	// Explicitly close offers from any exchange that failed entirely this run
+	// Keep failed exchanges in the snapshot log, but do not treat an outage as
+	// proof that its offers closed. reconcileLiveOfferStatus retains them until
+	// the configured stale grace expires.
 	offline := offlineExchangeNames(fetchers, exchangeData)
 	for _, name := range offline {
-		res, _ := sdb.Exec(`UPDATE offers SET
-				is_live = FALSE,
-				duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
-				WHERE exchange = ?`, name)
-		if n, _ := res.RowsAffected(); n > 0 {
-			slog.WarnContext(ctx, "exchange offline — marked offers as closed", "exchange", name, "closed", n)
-		}
+		slog.WarnContext(ctx, "exchange offline — retaining last known offers through stale grace", "exchange", name, "stale_grace", staleGrace)
 	}
 
 	// Always write a baseline lifecycle row for every live offer directly to the
