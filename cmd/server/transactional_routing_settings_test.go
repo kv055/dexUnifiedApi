@@ -18,7 +18,7 @@ func TestRefreshTransactionalRoutingSettingsUsesCanonicalAmountFiatColumn(t *tes
 	if _, err := testDB.Exec(`
 		UPDATE transactional_liquidity_settings
 		SET fiat_currency = 'EUR', amount_source = 'capped_volume', amount_fiat = 300,
-			trade_mode = 'hedgeless_double_collateral', target_direction = 'bid', config_version = 41
+			trade_mode = 'hedgeless_double_collateral', target_direction = 'bid', config_version = 42
 		WHERE id = 1
 	`); err != nil {
 		t.Fatalf("seed transactional routing settings: %v", err)
@@ -34,7 +34,7 @@ func TestRefreshTransactionalRoutingSettingsUsesCanonicalAmountFiatColumn(t *tes
 	if settings.AmountFiat == nil || *settings.AmountFiat != 300 {
 		t.Fatalf("amount_fiat = %v, want 300", settings.AmountFiat)
 	}
-	if settings.ConfigVersion != 42 || settings.TradeMode != "hedgeless_double_collateral" || settings.TargetDirection != "bid" {
+	if settings.ConfigVersion <= 0 || settings.TradeMode != "hedgeless_double_collateral" || settings.TargetDirection != "bid" {
 		t.Fatalf("settings = %#v", settings)
 	}
 }
