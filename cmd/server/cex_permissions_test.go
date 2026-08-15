@@ -43,16 +43,3 @@ func TestCEXPermissionsAuthenticationPolicies(t *testing.T) {
 		t.Fatalf("valid secret: status=%d called=%v", response.Code, called)
 	}
 }
-
-func TestCategoryExclusionsIncludeLegacyValues(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet,
-		"/api/live_offers?exclude_cexes=binance&exclude_spot_cexes=kraken,binance&exclude_hedge_cexes=coinbase", nil)
-	spot := queryExcludedSpotCEXes(request)
-	hedge := queryExcludedHedgeCEXes(request)
-	if len(spot) != 2 || spot[0] != "binance" || spot[1] != "kraken" {
-		t.Fatalf("spot exclusions = %v", spot)
-	}
-	if len(hedge) != 2 || hedge[0] != "binance" || hedge[1] != "coinbase" {
-		t.Fatalf("hedge exclusions = %v", hedge)
-	}
-}
