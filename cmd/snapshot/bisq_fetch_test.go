@@ -25,7 +25,7 @@ func TestMapBisqOfferSellDirectionUsesBuyerDeposit(t *testing.T) {
 		SellerSecurityDeposit:  2_500_000, // 0.025 BTC
 	}
 
-	got := mapBisqOffer(o, "sell", time.Now())
+	got := mapBisqOffer(o, "ask", time.Now())
 
 	if got.OfferID != "offer-1" {
 		t.Fatalf("OfferID = %q, want offer-1", got.OfferID)
@@ -77,7 +77,7 @@ func TestMapBisqOfferBuyDirectionUsesSellerDeposit(t *testing.T) {
 		UseMarketBasedPrice:   true,
 	}
 
-	got := mapBisqOffer(o, "buy", time.Now())
+	got := mapBisqOffer(o, "bid", time.Now())
 
 	// Taker on a buy offer sells → posts the SELLER deposit.
 	if got.SecurityDepositBTC == nil || *got.SecurityDepositBTC != 0.025 {
@@ -89,7 +89,7 @@ func TestMapBisqOfferBuyDirectionUsesSellerDeposit(t *testing.T) {
 }
 
 func TestMapBisqOfferZeroAmountSkipsDeposit(t *testing.T) {
-	got := mapBisqOffer(&bisqgrpc.OfferInfo{Id: "z", Price: "1", Amount: 0}, "sell", time.Now())
+	got := mapBisqOffer(&bisqgrpc.OfferInfo{Id: "z", Price: "1", Amount: 0}, "ask", time.Now())
 	if got.SecurityDepositBTC != nil || got.SecurityDepositPct != nil {
 		t.Fatal("deposit fields should be nil for zero-amount offer")
 	}
@@ -105,7 +105,7 @@ func TestMapBisqOfferWitnessRating(t *testing.T) {
 		AccountAgeWitnessDate:      now.Add(-90 * 24 * time.Hour).UnixMilli(),
 	}
 
-	got := mapBisqOffer(o, "sell", now)
+	got := mapBisqOffer(o, "ask", now)
 
 	if got.SellerRatingScore == nil {
 		t.Fatal("SellerRatingScore = nil, want a score for a signed witness")
@@ -161,7 +161,7 @@ func TestFetchBisqMapsOffersFromWire(t *testing.T) {
 		},
 	}})
 
-	result := fetchBisq("sell", 54000)
+	result := fetchBisq("ask", 54000)
 	if result == nil {
 		t.Fatal("fetchBisq returned nil, want a populated result")
 	}
@@ -180,7 +180,7 @@ func TestFetchBisqSendsUpperCaseDirectionAndEUR(t *testing.T) {
 	impl := &fakeOffersServer{}
 	startFakeBisqDaemon(t, impl)
 
-	if result := fetchBisq("buy", 54000); result == nil {
+	if result := fetchBisq("bid", 54000); result == nil {
 		t.Fatal("fetchBisq returned nil for a healthy empty daemon")
 	}
 	if impl.gotReq == nil {
@@ -201,7 +201,7 @@ func TestFetchBisqSendsUpperCaseDirectionAndEUR(t *testing.T) {
 func TestFetchBisqEmptyBookIsOnlineWithZeroOffers(t *testing.T) {
 	startFakeBisqDaemon(t, &fakeOffersServer{})
 
-	result := fetchBisq("sell", 54000)
+	result := fetchBisq("ask", 54000)
 	if result == nil {
 		t.Fatal("fetchBisq returned nil for reachable daemon with empty book, want zero-offer result")
 	}
@@ -213,13 +213,13 @@ func TestFetchBisqEmptyBookIsOnlineWithZeroOffers(t *testing.T) {
 func TestFetchBisqRPCErrorReturnsNil(t *testing.T) {
 	startFakeBisqDaemon(t, &fakeOffersServer{err: errors.New("daemon exploded")})
 
-	if result := fetchBisq("sell", 54000); result != nil {
+	if result := fetchBisq("ask", 54000); result != nil {
 		t.Fatalf("fetchBisq = %+v, want nil on RPC error", result)
 	}
 }
 
 func TestFetchBisqZeroReferencePriceReturnsNil(t *testing.T) {
-	if result := fetchBisq("sell", 0); result != nil {
+	if result := fetchBisq("ask", 0); result != nil {
 		t.Fatalf("fetchBisq = %+v, want nil when reference price unavailable", result)
 	}
 }

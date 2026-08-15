@@ -138,30 +138,48 @@ type liveOfferRoute struct {
 // resolvedRoute is the executable route selected by Unified API. Consumers pass
 // it to MM controller unchanged, avoiding a second route calculation there.
 type resolvedRoute struct {
-	ConfigVersion          int64   `json:"config_version"`
-	TradeMode              string  `json:"trade_mode"`
-	TargetDirection        string  `json:"target_direction"`
-	MarketSide             string  `json:"market_side"`
-	Provider               string  `json:"provider"`
-	HedgeVenue             string  `json:"hedge_venue,omitempty"`
-	HedgeSide              string  `json:"hedge_side,omitempty"`
-	HedgeNotional          float64 `json:"hedge_notional_btc,omitempty"`
-	Leverage               float64 `json:"leverage,omitempty"`
-	Settlement             string  `json:"settlement"`
-	NeedsHub               bool    `json:"needs_hub"`
-	NeedsLightning         bool    `json:"needs_lightning"`
-	FiatCurrency           string  `json:"fiat_currency"`
-	FiatAmount             float64 `json:"fiat_amount"`
-	BTCAmount              float64 `json:"btc_amount"`
-	RequiredCapital        float64 `json:"required_capital"`
-	RequiredBTCLiquidity   float64 `json:"required_btc_liquidity"`
-	SecurityDepositBTC     float64 `json:"security_deposit_btc"`
-	RoutingFeeAllowanceSat int64   `json:"routing_fee_allowance_sat"`
-	CEXWithdrawalFeeBTC    float64 `json:"cex_withdrawal_fee_btc"`
-	SwapSafetyHeadroomBTC  float64 `json:"swap_safety_headroom_btc"`
-	TotalCostBTC           float64 `json:"total_cost_btc"`
-	TotalCostPercent       float64 `json:"total_cost_percent"`
-	NetPremiumPercent      float64 `json:"net_premium_percent"`
+	ConfigVersion          int64           `json:"config_version"`
+	SnapshotRevision       int64           `json:"snapshot_revision"`
+	ResolvedAt             string          `json:"resolved_at"`
+	TradeMode              string          `json:"trade_mode"`
+	TargetDirection        string          `json:"target_direction"`
+	MarketSide             string          `json:"market_side"`
+	Provider               string          `json:"provider"`
+	HedgeVenue             string          `json:"hedge_venue,omitempty"`
+	HedgeSide              string          `json:"hedge_side,omitempty"`
+	HedgeNotional          float64         `json:"hedge_notional_btc,omitempty"`
+	Leverage               float64         `json:"leverage,omitempty"`
+	Settlement             string          `json:"settlement"`
+	NeedsHub               bool            `json:"needs_hub"`
+	NeedsLightning         bool            `json:"needs_lightning"`
+	FiatCurrency           string          `json:"fiat_currency"`
+	FiatAmount             float64         `json:"fiat_amount"`
+	BTCAmount              float64         `json:"btc_amount"`
+	RequiredCapital        float64         `json:"required_capital"`
+	RequiredBTCLiquidity   float64         `json:"required_btc_liquidity"`
+	SecurityDepositBTC     float64         `json:"security_deposit_btc"`
+	RoutingFeeAllowanceSat int64           `json:"routing_fee_allowance_sat"`
+	CEXWithdrawalFeeBTC    float64         `json:"cex_withdrawal_fee_btc"`
+	SwapSafetyHeadroomBTC  float64         `json:"swap_safety_headroom_btc"`
+	TotalCostBTC           float64         `json:"total_cost_btc"`
+	TotalCostPercent       float64         `json:"total_cost_percent"`
+	NetPremiumPercent      float64         `json:"net_premium_percent"`
+	CostInputs             routeCostInputs `json:"cost_inputs"`
+}
+
+type routeCostInputs struct {
+	ReferencePrice         float64 `json:"reference_price"`
+	FeeTier                string  `json:"fee_tier"`
+	CoupledHedge           bool    `json:"coupled_hedge"`
+	SpotTakerFeeBTC        float64 `json:"spot_taker_fee_btc"`
+	WithdrawalFeeBTC       float64 `json:"withdrawal_fee_btc"`
+	HedgeOpenFeeBTC        float64 `json:"hedge_open_fee_btc"`
+	HedgeCloseFeeBTC       float64 `json:"hedge_close_fee_btc"`
+	ProjectedFundingFeeBTC float64 `json:"projected_funding_fee_btc"`
+	FundingCostAvailable   bool    `json:"funding_cost_available"`
+	DEXFeeBTC              float64 `json:"dex_fee_btc"`
+	MinerFeeBTC            float64 `json:"miner_fee_btc"`
+	ConversionFeeBTC       float64 `json:"conversion_fee_btc"`
 }
 
 type liveOfferMetadata struct {
@@ -173,7 +191,7 @@ type liveOfferMetadata struct {
 // one coherent policy snapshot for every offer in the payload.
 type transactionalRoutingSettings struct {
 	FiatCurrency    string
-	CustomAmount    *float64
+	AmountFiat      *float64
 	TradeMode       string
 	TargetDirection string
 	ConfigVersion   int64
@@ -514,8 +532,8 @@ func routeSizeForSettings(o LiveOffer, refPrice float64, settings transactionalR
 	if btcSize <= 0 {
 		return 0, false
 	}
-	if settings.CustomAmount != nil && *settings.CustomAmount > 0 && refPrice > 0 && strings.EqualFold(o.FiatCurrency, settings.FiatCurrency) {
-		btcSize = math.Min(btcSize, *settings.CustomAmount/refPrice)
+	if settings.AmountFiat != nil && *settings.AmountFiat > 0 && refPrice > 0 && strings.EqualFold(o.FiatCurrency, settings.FiatCurrency) {
+		btcSize = math.Min(btcSize, *settings.AmountFiat/refPrice)
 	}
 	if o.BTCMin != nil && btcSize+1e-12 < *o.BTCMin {
 		return 0, false
@@ -523,12 +541,25 @@ func routeSizeForSettings(o LiveOffer, refPrice float64, settings transactionalR
 	return btcSize, true
 }
 
+func offerMatchesTargetDirection(offerDirection, targetDirection string) bool {
+	switch strings.ToLower(strings.TrimSpace(offerDirection)) {
+	case "bid":
+		return strings.EqualFold(strings.TrimSpace(targetDirection), "bid")
+	case "ask":
+		return strings.EqualFold(strings.TrimSpace(targetDirection), "ask")
+	default:
+		return false
+	}
+}
+
 func resolvedRouteFromBreakdown(bd tradecost.CostBreakdown, fiatCurrency string, settings transactionalRoutingSettings) *resolvedRoute {
 	if bd.RouteCEX == "" || bd.BTCAmount <= 0 {
 		return nil
 	}
+	resolvedAt := time.Now().UTC()
 	route := &resolvedRoute{
 		ConfigVersion: settings.ConfigVersion, TradeMode: settings.TradeMode,
+		SnapshotRevision: resolvedAt.UnixNano(), ResolvedAt: resolvedAt.Format(time.RFC3339Nano),
 		TargetDirection: settings.TargetDirection, MarketSide: bd.TradeDirection,
 		Provider: bd.RouteCEX, Settlement: bd.RouteMethod,
 		FiatCurrency: fiatCurrency, BTCAmount: bd.BTCAmount,
@@ -538,15 +569,22 @@ func resolvedRouteFromBreakdown(bd tradecost.CostBreakdown, fiatCurrency string,
 		SecurityDepositBTC:   bd.Capital.SecurityDepositBTC,
 		TotalCostBTC:         bd.TotalCostBTC, TotalCostPercent: bd.TotalCostPct,
 		NetPremiumPercent: bd.EstimatedProfitPct,
+		CostInputs: routeCostInputs{
+			ReferencePrice: bd.Capital.BTCPrice, FeeTier: "economic", CoupledHedge: true,
+			SpotTakerFeeBTC: bd.CexTakerFeeBTC, WithdrawalFeeBTC: bd.WithdrawalFeeBTC,
+			HedgeOpenFeeBTC: bd.Hedge.OpenFeeBTC, HedgeCloseFeeBTC: bd.Hedge.CloseFeeBTC,
+			DEXFeeBTC: bd.DexFeeBTC, MinerFeeBTC: bd.NetworkFeeBTC,
+			ConversionFeeBTC: bd.Conversion.FeeSumBTC,
+		},
 	}
 	route.NeedsHub = route.Settlement == "onchain_hub" || route.Settlement == "onchain_swap"
 	route.NeedsLightning = route.Settlement == "onchain_swap"
+	route.CEXWithdrawalFeeBTC = bd.WithdrawalFeeBTC
 	if route.NeedsLightning {
 		route.RoutingFeeAllowanceSat = int64(math.Ceil(bd.Conversion.RoutingFeeBTC * 1e8))
 		if route.RoutingFeeAllowanceSat <= 0 {
 			route.RoutingFeeAllowanceSat = 100
 		}
-		route.CEXWithdrawalFeeBTC = bd.WithdrawalFeeBTC
 		route.SwapSafetyHeadroomBTC = 0.00001
 	}
 	if settings.TradeMode == tradecost.TradeModeHedgefullSingleCollateral {
@@ -746,10 +784,10 @@ func routingSettingsEqual(a, b transactionalRoutingSettings) bool {
 	if a.FiatCurrency != b.FiatCurrency || a.TradeMode != b.TradeMode || a.TargetDirection != b.TargetDirection || a.ConfigVersion != b.ConfigVersion {
 		return false
 	}
-	if a.CustomAmount == nil || b.CustomAmount == nil {
-		return a.CustomAmount == nil && b.CustomAmount == nil
+	if a.AmountFiat == nil || b.AmountFiat == nil {
+		return a.AmountFiat == nil && b.AmountFiat == nil
 	}
-	return *a.CustomAmount == *b.CustomAmount
+	return *a.AmountFiat == *b.AmountFiat
 }
 
 func (h *LiveHub) transactionalRoutingSettings() transactionalRoutingSettings {
@@ -879,15 +917,15 @@ func (h *LiveHub) computeOutOffers(price float64, sub liveSubscription) []liveOu
 		tradeCostPct, netPremium, bd := computeNetPremiumFieldsFull(pct, btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
 		manualOptions := computeManualRouteOptions(btcSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier)
 		var selectedRoute *resolvedRoute
-		if pct > 0 && settings.ConfigVersion > 0 {
+		if pct > 0 && settings.ConfigVersion > 0 && offerMatchesTargetDirection(o.Direction, settings.TargetDirection) {
 			if routeSize, ok := routeSizeForSettings(o, offerPrice, settings); ok {
 				var routeBD tradecost.CostBreakdown
 				if settings.TradeMode == tradecost.TradeModeHedgelessDoubleCollateral {
-					if hedgeless := computeHedgelessOnlyBreakdown(pct, routeSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct); hedgeless != nil {
+					if hedgeless := computeHedgelessOnlyBreakdown(pct, routeSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, "economic", true, o.SecurityDepositPct); hedgeless != nil {
 						routeBD = *hedgeless
 					}
 				} else {
-					_, _, routeBD = computeNetPremiumFieldsFull(pct, routeSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, sub.feeTier, sub.coupledHedge, o.SecurityDepositPct)
+					_, _, routeBD = computeNetPremiumFieldsFull(pct, routeSize, offerPrice, o.Exchange, o.Direction, sub.requiredConfirmations, excludedSpotCEXes, excludedHedgeCEXes, "economic", true, o.SecurityDepositPct)
 				}
 				selectedRoute = resolvedRouteFromBreakdown(routeBD, offerFiat, settings)
 			}

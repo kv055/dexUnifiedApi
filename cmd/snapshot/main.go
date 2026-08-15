@@ -162,6 +162,15 @@ type fetchResult struct {
 	Offers   []offer
 }
 
+// externalOfferDirection translates the canonical stored side to the legacy
+// buy/sell vocabulary required by DEX APIs that have not adopted bid/ask.
+func externalOfferDirection(direction string) string {
+	if strings.EqualFold(strings.TrimSpace(direction), "ask") {
+		return "sell"
+	}
+	return "buy"
+}
+
 type exchFetcher struct {
 	name string
 	fn   func(string, string, int) *fetchResult
@@ -266,7 +275,7 @@ func fetchBisqCurrency(direction, currency string, btcPrice int) *fetchResult {
 
 	stub := bisqgrpc.NewOffersClient(conn)
 	reply, err := stub.GetOffers(ctx, &bisqgrpc.GetOffersRequest{
-		Direction:    strings.ToUpper(direction),
+		Direction:    strings.ToUpper(externalOfferDirection(direction)),
 		CurrencyCode: currency,
 	})
 	if err != nil {
@@ -297,12 +306,12 @@ func mapBisqOffer(o *bisqgrpc.OfferInfo, direction string, now time.Time) offer 
 	if o.UseMarketBasedPrice {
 		pt = priceTypeFloating()
 	}
-	// The taker plays the opposite side of the maker: on a "sell" offer
+	// The taker plays the opposite side of the maker: on an "ask" offer
 	// (maker sells BTC) the taker buys, so they post the buyer deposit;
-	// on a "buy" offer the taker sells, so they post the seller deposit.
+	// on a "bid" offer the taker sells, so they post the seller deposit.
 	// Mirrors the isBid mapping in tradecost.computeCapitalRequirement.
 	depositSats := o.BuyerSecurityDeposit
-	if direction == "buy" {
+	if direction == "bid" {
 		depositSats = o.SellerSecurityDeposit
 	}
 	depositBTCPtr, depositPctPtr := securityDeposit(depositSats, btcMax)
@@ -407,7 +416,7 @@ func fetchBisq2Currency(direction, currency string, btcPrice int) *fetchResult {
 		return nil
 	}
 
-	wantDir := strings.ToUpper(direction)
+	wantDir := strings.ToUpper(externalOfferDirection(direction))
 	var offers []offer
 	for _, item := range raw {
 		o := item.BisqEasyOffer
@@ -576,7 +585,7 @@ func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
 }
 
 func fetchHodlHodlCurrency(direction, currency string, btcPrice int) *fetchResult {
-	reqURL := fmt.Sprintf("https://hodlhodl.com/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", direction, url.QueryEscape(currency))
+	reqURL := fmt.Sprintf("https://hodlhodl.com/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", externalOfferDirection(direction), url.QueryEscape(currency))
 	resp, err := clearnetClient().Get(reqURL)
 	if err != nil {
 		fmt.Printf("[HodlHodl] Error: %v\n", err)
@@ -618,7 +627,7 @@ func fetchHodlHodlCurrency(direction, currency string, btcPrice int) *fetchResul
 		// HodlHodl labels pass through as-is; canonicalization in
 		// commons/paymentmethods handles SEPA and national-bank variants.
 		var methods []string
-		if direction == "buy" {
+		if direction == "bid" {
 			for _, pm := range o.PaymentMethods {
 				methods = append(methods, pm.Name)
 			}
@@ -740,7 +749,7 @@ func mapPeachOfferCurrency(o peachOffer, direction, currency string, btcPrice in
 	var price float64
 
 	switch direction {
-	case "sell":
+	case "ask":
 		currencyFiat, ok := o.Prices[currency]
 		if !ok || currencyFiat <= 0 {
 			return offer{}, false
@@ -794,10 +803,7 @@ func fetchPeachBitcoinCurrency(direction, currency string, btcPrice int) *fetchR
 		return nil
 	}
 
-	peachType := "ask" // sell offers (maker sells BTC)
-	if direction == "buy" {
-		peachType = "bid" // buy offers (maker buys BTC)
-	}
+	peachType := direction
 
 	type peachResponse struct {
 		Offers    []peachOffer `json:"offers"`
@@ -882,7 +888,7 @@ func fetchRobosatsCurrencyFrom(direction, currency string, btcPrice int, client 
 		return nil
 	}
 	offerType := 1 // sell
-	if direction == "buy" {
+	if direction == "bid" {
 		offerType = 0
 	}
 
@@ -1631,7 +1637,7 @@ func main() {
 			if !ok {
 				continue
 			}
-			for _, direction := range []string{"sell", "buy"} {
+			for _, direction := range []string{"ask", "bid"} {
 				slog.InfoContext(ctx, "fetching offers", "direction", direction, "fiat", currency)
 				for _, f := range fetchers {
 					if !fiat.SupportsDEX(f.name, currency) {

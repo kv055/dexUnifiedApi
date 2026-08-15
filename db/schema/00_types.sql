@@ -74,7 +74,7 @@ $$;
 DO $$
 BEGIN
     IF to_regtype('trade_direction') IS NULL THEN
-        CREATE TYPE trade_direction AS ENUM ('buy', 'sell');
+        CREATE TYPE trade_direction AS ENUM ('bid', 'ask');
     END IF;
 END
 $$;

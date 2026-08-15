@@ -693,20 +693,20 @@ func refreshTransactionalRoutingSettings(ctx context.Context) error {
 	}
 	var (
 		settings transactionalRoutingSettings
-		custom   sql.NullFloat64
+		amount   sql.NullFloat64
 	)
 	err := db.QueryRowContext(ctx, `
-		SELECT fiat_currency, custom_amount, trade_mode, target_direction, config_version
+		SELECT fiat_currency, amount_fiat, trade_mode, target_direction, config_version
 		FROM transactional_liquidity_settings
 		WHERE id = 1
-	`).Scan(&settings.FiatCurrency, &custom, &settings.TradeMode, &settings.TargetDirection, &settings.ConfigVersion)
+	`).Scan(&settings.FiatCurrency, &amount, &settings.TradeMode, &settings.TargetDirection, &settings.ConfigVersion)
 	if err != nil {
 		hub.setTransactionalRoutingSettings(transactionalRoutingSettings{})
 		return fmt.Errorf("load transactional liquidity settings: %w", err)
 	}
-	if custom.Valid {
-		amount := custom.Float64
-		settings.CustomAmount = &amount
+	if amount.Valid {
+		amountFiat := amount.Float64
+		settings.AmountFiat = &amountFiat
 	}
 	hub.setTransactionalRoutingSettings(settings)
 	return nil

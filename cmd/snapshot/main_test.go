@@ -254,7 +254,7 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	depositBTC := 0.003
 	depositPct := 0.15
 
-	live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{{
+	live := saveSnapshot(db, "bisq", "EUR", "ask", 60000, []offer{{
 		OfferID:            "bisq-offer-1",
 		FiatCurrency:       "EUR",
 		Price:              61000,
@@ -304,7 +304,7 @@ func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 		PaymentMethods: []string{"SEPA"},
 		PriceType:      priceType,
 	}
-	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{dup, dup, dup})
+	live := saveSnapshot(db, "peachbitcoin", "EUR", "bid", 60000, []offer{dup, dup, dup})
 
 	if len(live) != 1 {
 		t.Fatalf("live offers len = %d, want 1 (id-less duplicates collapse by fingerprint)", len(live))
@@ -461,7 +461,7 @@ func TestSaveSnapshotPersistsSellerRating(t *testing.T) {
 		PriceType:    priceTypeFixed(),
 	}
 	applyRating(&rated, mapHodlHodlTrader(hodlHodlTrader{TradesCount: 42, Rating: floatPtr(0.98), StrongHodler: true}))
-	saveSnapshot(db, "hodlhodl", "EUR", "sell", 60000, []offer{rated})
+	saveSnapshot(db, "hodlhodl", "EUR", "ask", 60000, []offer{rated})
 
 	var gotScore *float64
 	var gotConf *string
@@ -490,7 +490,7 @@ func TestSaveSnapshotPersistsSellerRating(t *testing.T) {
 		PriceType:    priceTypeFixed(),
 	}
 	applyRating(&unrated, sellerrating.Unavailable())
-	saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{unrated})
+	saveSnapshot(db, "bisq", "EUR", "ask", 60000, []offer{unrated})
 
 	var uScore *float64
 	var uConf *string
@@ -536,7 +536,7 @@ func TestMapPeachOffer(t *testing.T) {
 				MeansOfPayment: map[string][]string{"EUR": {"revolut"}},
 				Prices:         map[string]float64{"EUR": 17},
 			},
-			direction: "sell",
+			direction: "ask",
 			btcPrice:  55359,
 			wantOK:    true,
 			wantFiat:  17,
@@ -549,7 +549,7 @@ func TestMapPeachOffer(t *testing.T) {
 				Amount:         buyAmount,
 				MeansOfPayment: map[string][]string{"EUR": {"sepa"}},
 			},
-			direction: "buy",
+			direction: "bid",
 			btcPrice:  55359,
 			wantOK:    true,
 			wantFiat:  331, // round(0.0059873 * 55359)
@@ -563,7 +563,7 @@ func TestMapPeachOffer(t *testing.T) {
 				MeansOfPayment: map[string][]string{"EUR": {"sepa"}},
 				Prices:         map[string]float64{"SAT": 66950},
 			},
-			direction: "sell",
+			direction: "ask",
 			btcPrice:  55359,
 			wantOK:    false,
 		},
@@ -575,7 +575,7 @@ func TestMapPeachOffer(t *testing.T) {
 				MeansOfPayment: map[string][]string{"SAT": {"lnurl"}},
 				Prices:         map[string]float64{"EUR": 17},
 			},
-			direction: "sell",
+			direction: "ask",
 			btcPrice:  55359,
 			wantOK:    false,
 		},
@@ -612,7 +612,7 @@ func TestMapPeachOffer(t *testing.T) {
 			if got.BTCMin == nil || *got.BTCMin != *got.BTCMax {
 				t.Fatalf("btc_min = %v, btc_max = %v, want equal fixed size", got.BTCMin, got.BTCMax)
 			}
-			if tc.direction == "sell" && got.Price <= 1000 {
+			if tc.direction == "ask" && got.Price <= 1000 {
 				t.Fatalf("sell price = %f, want EUR/BTC not total fiat", got.Price)
 			}
 		})
@@ -630,7 +630,7 @@ func TestMapPeachOfferCarriesMakerID(t *testing.T) {
 	}
 	in.User.ID = "maker-9"
 
-	got, ok := mapPeachOffer(in, "sell", 55359)
+	got, ok := mapPeachOffer(in, "ask", 55359)
 	if !ok {
 		t.Fatal("mapPeachOffer returned ok=false")
 	}
@@ -788,7 +788,7 @@ func TestSaveSnapshotSkipsDustOffersWhenFiltered(t *testing.T) {
 		PaymentMethods: []string{"SEPA"},
 		PriceType:      priceType,
 	}
-	live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, filterDustOffers([]offer{dust, ok}))
+	live := saveSnapshot(db, "bisq", "EUR", "ask", 60000, filterDustOffers([]offer{dust, ok}))
 	if len(live) != 1 {
 		t.Fatalf("live offers len = %d, want 1", len(live))
 	}
@@ -821,7 +821,7 @@ func TestSaveSnapshotKeepsDistinctIdOffersWithSameFingerprint(t *testing.T) {
 			PriceType:      priceType,
 		}
 	}
-	live := saveSnapshot(db, "peachbitcoin", "EUR", "buy", 60000, []offer{mk("p-1"), mk("p-2"), mk("p-3")})
+	live := saveSnapshot(db, "peachbitcoin", "EUR", "bid", 60000, []offer{mk("p-1"), mk("p-2"), mk("p-3")})
 
 	if len(live) != 3 {
 		t.Fatalf("live offers len = %d, want 3 (distinct ids must not collapse)", len(live))
@@ -863,7 +863,7 @@ func TestSaveSnapshotBumpsPaymentMethodPopularityOnInsertOnly(t *testing.T) {
 		PaymentMethods: []string{"SEPA"},
 		PriceType:      priceType,
 	}
-	if live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{o}); len(live) != 1 {
+	if live := saveSnapshot(db, "bisq", "EUR", "ask", 60000, []offer{o}); len(live) != 1 {
 		t.Fatalf("first insert live len = %d, want 1", len(live))
 	}
 	flushUnknownPaymentMethods(ctx, db)
@@ -887,7 +887,7 @@ func TestSaveSnapshotBumpsPaymentMethodPopularityOnInsertOnly(t *testing.T) {
 
 	// Re-seeing the same offer_id must not bump again.
 	o.Price = 62000
-	if live := saveSnapshot(db, "bisq", "EUR", "sell", 60000, []offer{o}); len(live) != 1 {
+	if live := saveSnapshot(db, "bisq", "EUR", "ask", 60000, []offer{o}); len(live) != 1 {
 		t.Fatalf("update live len = %d, want 1", len(live))
 	}
 	flushUnknownPaymentMethods(ctx, db)
@@ -919,7 +919,7 @@ func TestSaveSnapshotTouchesUnknownPaymentMethodAfterFlush(t *testing.T) {
 	priceType := priceTypeFixed()
 	unknownName := "Zzz Snapshot Pop Pay"
 
-	if live := saveSnapshot(db, "robosats", "USD", "buy", 60000, []offer{{
+	if live := saveSnapshot(db, "robosats", "USD", "bid", 60000, []offer{{
 		OfferID:        "pm-pop-unknown-1",
 		FiatCurrency:   "USD",
 		Price:          61000,
@@ -959,4 +959,3 @@ func TestSaveSnapshotTouchesUnknownPaymentMethodAfterFlush(t *testing.T) {
 		t.Fatalf("unknown currencies = %v, want [USD]", []string(currencies))
 	}
 }
-

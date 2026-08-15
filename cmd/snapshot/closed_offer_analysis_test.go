@@ -33,7 +33,7 @@ func insertClosedOfferTimed(t *testing.T, db *dbutil.DB, status any, isLive bool
 			hedge_venue, hedge_instrument, hedge_transfer_minutes,
 			best_route_cex, routing_profile, is_live, first_seen, last_seen
 		)
-		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'Direct_main2main', ?, ?, ?)
+		VALUES ('bisq', 'EUR', 'bid', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'Direct_main2main', ?, ?, ?)
 		RETURNING id
 	`, status, isLive, lastSeen.UTC().Add(-time.Hour), lastSeen.UTC()).Scan(&id); err != nil {
 		t.Fatalf("insert offer: %v", err)
@@ -53,7 +53,7 @@ func insertClosedOffer(t *testing.T, db *dbutil.DB, status any) int64 {
 			hedge_venue, hedge_instrument, hedge_transfer_minutes,
 			best_route_cex, routing_profile
 		)
-		VALUES ('bisq', 'EUR', 'buy', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'Direct_main2main')
+		VALUES ('bisq', 'EUR', 'bid', 100, ?, NULL, 0.0001, 0.0002, 0.0003, 0.0006, 'coinbase_futures', 'BTC-PERP', 45, 'coinbase', 'Direct_main2main')
 		RETURNING id
 	`, status).Scan(&id); err != nil {
 		t.Fatalf("insert offer: %v", err)

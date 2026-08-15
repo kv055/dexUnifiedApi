@@ -68,7 +68,7 @@ func TestPersistPeachRatings(t *testing.T) {
 
 	var id int64
 	if err := db.QueryRow(`INSERT INTO offers (exchange, fiat_currency, direction, price)
-		VALUES (?, ?, ?, ?) RETURNING id`, "peachbitcoin", "EUR", "sell", 61000).Scan(&id); err != nil {
+		VALUES (?, ?, ?, ?) RETURNING id`, "peachbitcoin", "EUR", "ask", 61000).Scan(&id); err != nil {
 		t.Fatalf("insert offer: %v", err)
 	}
 

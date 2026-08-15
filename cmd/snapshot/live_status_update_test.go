@@ -56,7 +56,7 @@ func TestLiveStatusBulkUpdateClearsClosureFieldsOnRelive(t *testing.T) {
 			best_route_cex, routing_profile
 		)
 		VALUES (
-			'bisq', 'EUR', 'buy', 100, FALSE, NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '10 minutes',
+			'bisq', 'EUR', 'bid', 100, FALSE, NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '10 minutes',
 			'analyzed', 100, 5, 1, 0.001, 0.0006, 4, 0.004, 0.4, 0.1,
 			'kraken', 'Direct_main2main'
 		)
@@ -98,7 +98,7 @@ func TestLiveStatusBulkUpdateClearsClosureFieldsOnRelive(t *testing.T) {
 func TestReconcileLiveOfferStatusRetainsFailedMarketWithinGrace(t *testing.T) {
 	db := openLiveStatusDB(t)
 	snapshotStart := time.Now().UTC()
-	id := insertLiveOffer(t, db, "bisq", "EUR", "buy", snapshotStart.Add(-time.Minute))
+	id := insertLiveOffer(t, db, "bisq", "EUR", "bid", snapshotStart.Add(-time.Minute))
 
 	if err := reconcileLiveOfferStatus(db, snapshotStart, nil, 5*time.Minute); err != nil {
 		t.Fatalf("reconcile failed market: %v", err)
@@ -111,9 +111,9 @@ func TestReconcileLiveOfferStatusRetainsFailedMarketWithinGrace(t *testing.T) {
 func TestReconcileLiveOfferStatusClosesOnlyConfirmedMarketAbsences(t *testing.T) {
 	db := openLiveStatusDB(t)
 	snapshotStart := time.Now().UTC()
-	missing := insertLiveOffer(t, db, "bisq", "EUR", "buy", snapshotStart.Add(-time.Minute))
-	otherMarket := insertLiveOffer(t, db, "bisq", "EUR", "sell", snapshotStart.Add(-time.Minute))
-	confirmed := map[liveMarket]struct{}{{exchange: "bisq", fiat: "EUR", direction: "buy"}: {}}
+	missing := insertLiveOffer(t, db, "bisq", "EUR", "bid", snapshotStart.Add(-time.Minute))
+	otherMarket := insertLiveOffer(t, db, "bisq", "EUR", "ask", snapshotStart.Add(-time.Minute))
+	confirmed := map[liveMarket]struct{}{{exchange: "bisq", fiat: "EUR", direction: "bid"}: {}}
 
 	if err := reconcileLiveOfferStatus(db, snapshotStart, confirmed, 5*time.Minute); err != nil {
 		t.Fatalf("reconcile confirmed market: %v", err)
@@ -129,7 +129,7 @@ func TestReconcileLiveOfferStatusClosesOnlyConfirmedMarketAbsences(t *testing.T)
 func TestReconcileLiveOfferStatusExpiresFailedMarketAfterGrace(t *testing.T) {
 	db := openLiveStatusDB(t)
 	snapshotStart := time.Now().UTC()
-	id := insertLiveOffer(t, db, "bisq2", "USD", "sell", snapshotStart.Add(-6*time.Minute))
+	id := insertLiveOffer(t, db, "bisq2", "USD", "ask", snapshotStart.Add(-6*time.Minute))
 
 	if err := reconcileLiveOfferStatus(db, snapshotStart, nil, 5*time.Minute); err != nil {
 		t.Fatalf("reconcile stale market: %v", err)

@@ -37,14 +37,14 @@ func PriceDiffPct(offerPrice, refPrice float64) float64 {
 }
 
 // DirectionalPremiumPct returns the premium from the taker's perspective:
-// positive means the offer is profitable to take. For a "sell" offer (maker
+// positive means the offer is profitable to take. For an "ask" offer (maker
 // sells BTC, we buy) profit grows as the price drops below ref, so the sign is
 // flipped; for any other direction the raw difference is used as-is. This is the
 // single source of truth for the premium sign, shared by the server and the
 // snapshot job.
 func DirectionalPremiumPct(direction string, offerPrice, refPrice float64) float64 {
 	raw := PriceDiffPct(offerPrice, refPrice)
-	if direction == "sell" {
+	if direction == "ask" {
 		return -raw
 	}
 	return raw

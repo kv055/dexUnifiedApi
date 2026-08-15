@@ -113,32 +113,32 @@ func TestGlobalEnumTypesAndColumns(t *testing.T) {
 	}
 
 	columns := map[string]string{
-		"accounts.provider":                      "account_provider",
-		"accounts.category":                      "account_category",
-		"offers.exchange":                        "dex_provider",
-		"offers.direction":                       "trade_direction",
-		"offers.fiat_currency":                   "fiat_currency",
-		"offers.best_route_cex":                  "cex_provider",
-		"offers.routing_profile":                 "routing_profile",
-		"offers.seller_rating_confidence":        "seller_rating_confidence",
-		"snapshots.exchange":                     "dex_provider",
-		"snapshots.fiat_currency":                "fiat_currency",
-		"ohlc.fiat_currency":                     "fiat_currency",
-		"bank_accounts.currency":                 "fiat_currency",
-		"transactions.cex":                       "cex_provider",
-		"transactions.direction":                 "trade_direction",
-		"transactions.dex":                       "dex_provider",
-		"transactions.trade_mode":                "transaction_trade_mode",
-		"transactions.fiat_currency":             "fiat_currency",
-		"payment_methods.category":               "payment_method_category",
-		"payment_methods.sources":                "_dex_provider",
-		"payment_methods.currencies":             "_fiat_currency",
-		"payment_method_chat_templates.exchange": "dex_provider",
+		"accounts.provider":                             "account_provider",
+		"accounts.category":                             "account_category",
+		"offers.exchange":                               "dex_provider",
+		"offers.direction":                              "trade_direction",
+		"offers.fiat_currency":                          "fiat_currency",
+		"offers.best_route_cex":                         "cex_provider",
+		"offers.routing_profile":                        "routing_profile",
+		"offers.seller_rating_confidence":               "seller_rating_confidence",
+		"snapshots.exchange":                            "dex_provider",
+		"snapshots.fiat_currency":                       "fiat_currency",
+		"ohlc.fiat_currency":                            "fiat_currency",
+		"bank_accounts.currency":                        "fiat_currency",
+		"transactions.cex":                              "cex_provider",
+		"transactions.direction":                        "trade_direction",
+		"transactions.dex":                              "dex_provider",
+		"transactions.trade_mode":                       "transaction_trade_mode",
+		"transactions.fiat_currency":                    "fiat_currency",
+		"payment_methods.category":                      "payment_method_category",
+		"payment_methods.sources":                       "_dex_provider",
+		"payment_methods.currencies":                    "_fiat_currency",
+		"payment_method_chat_templates.exchange":        "dex_provider",
 		"payment_method_chat_templates.trade_direction": "text",
-		"fiat_payment_events.source":             "notification_channel",
-		"fiat_payment_events.currency":           "fiat_currency",
-		"fiat_tx_push_logs.currency":             "fiat_currency",
-		"fiat_transaction_confirmations.channel": "notification_channel",
+		"fiat_payment_events.source":                    "notification_channel",
+		"fiat_payment_events.currency":                  "fiat_currency",
+		"fiat_tx_push_logs.currency":                    "fiat_currency",
+		"fiat_transaction_confirmations.channel":        "notification_channel",
 	}
 	for qualified, wantType := range columns {
 		parts := strings.SplitN(qualified, ".", 2)
@@ -159,10 +159,10 @@ func TestGlobalEnumTypesAndColumns(t *testing.T) {
 		}
 	}
 
-	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('not-a-dex', 'EUR', 'buy')`); err == nil {
+	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('not-a-dex', 'EUR', 'bid')`); err == nil {
 		t.Error("invalid dex provider was accepted")
 	}
-	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('bisq', 'XYZ', 'buy')`); err == nil {
+	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('bisq', 'XYZ', 'bid')`); err == nil {
 		t.Error("invalid fiat currency was accepted")
 	}
 }

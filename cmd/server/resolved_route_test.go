@@ -30,15 +30,38 @@ func TestResolvedRouteFromBreakdownCarriesExecutionSnapshot(t *testing.T) {
 	if route.HedgeVenue != "kraken_futures" || route.HedgeNotional != 0.01 || route.Leverage != 3 {
 		t.Fatalf("hedge route = %+v", route)
 	}
+	if route.SnapshotRevision <= 0 || route.ResolvedAt == "" || route.CostInputs.ReferencePrice != 50000 || route.CostInputs.FeeTier != "economic" {
+		t.Fatalf("authoritative snapshot = %+v", route)
+	}
+	if route.CostInputs.FundingCostAvailable || route.CostInputs.ProjectedFundingFeeBTC != 0 {
+		t.Fatalf("unsupported projected funding leaked into route = %+v", route.CostInputs)
+	}
 }
 
-func TestRouteSizeForSettingsCapsCustomFiatAmount(t *testing.T) {
+func TestRouteSizeForSettingsCapsFiatAmount(t *testing.T) {
 	max := 0.05
 	min := 0.01
 	custom := 1000.0
-	size, ok := routeSizeForSettings(LiveOffer{BTCMin: &min, BTCMax: &max}, 50000, transactionalRoutingSettings{CustomAmount: &custom})
+	size, ok := routeSizeForSettings(LiveOffer{BTCMin: &min, BTCMax: &max}, 50000, transactionalRoutingSettings{AmountFiat: &custom})
 	if !ok || size != 0.02 {
 		t.Fatalf("size, ok = %v, %v; want 0.02, true", size, ok)
+	}
+}
+
+func TestOfferMatchesTargetDirectionNormalizesOfferVocabulary(t *testing.T) {
+	tests := []struct {
+		offer, target string
+		want          bool
+	}{
+		{offer: "bid", target: "bid", want: true},
+		{offer: "ask", target: "ask", want: true},
+		{offer: "bid", target: "ask", want: false},
+		{offer: "ask", target: "bid", want: false},
+	}
+	for _, tt := range tests {
+		if got := offerMatchesTargetDirection(tt.offer, tt.target); got != tt.want {
+			t.Errorf("offerMatchesTargetDirection(%q, %q) = %v; want %v", tt.offer, tt.target, got, tt.want)
+		}
 	}
 }
 

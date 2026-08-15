@@ -23,7 +23,7 @@ func insertOffer(t *testing.T, db *dbutil.DB) int64 {
 	var id int64
 	if err := db.QueryRow(`
 		INSERT INTO offers (exchange, fiat_currency, direction, price)
-		VALUES ('bisq', 'EUR', 'buy', 100)
+		VALUES ('bisq', 'EUR', 'bid', 100)
 		RETURNING id
 	`).Scan(&id); err != nil {
 		t.Fatalf("insert offer: %v", err)

@@ -31,9 +31,9 @@ func TestRefreshLiveHubLoadsCompleteMultiFiatBookAndRetainsItOnFailure(t *testin
 			offer_id, is_live, security_deposit_pct, seller_rating_score,
 			seller_rating_confidence, seller_rating_raw
 		) VALUES
-			(1, 'bisq', 'EUR', 'buy', 61000, ARRAY['SEPA'], 'eur-1', TRUE, 0.15, 91, 'feedback_verified', '{"rating":0.95}'::jsonb),
-			(2, 'hodlhodl', 'USD', 'sell', 67000, ARRAY['Wise'], 'usd-1', TRUE, NULL, 88, 'feedback_verified', '{"rating":0.9}'::jsonb),
-			(3, 'bisq', 'GBP', 'buy', 52000, ARRAY['Faster Payments'], 'closed-1', FALSE, NULL, NULL, NULL, NULL)
+			(1, 'bisq', 'EUR', 'bid', 61000, ARRAY['SEPA'], 'eur-1', TRUE, 0.15, 91, 'feedback_verified', '{"rating":0.95}'::jsonb),
+			(2, 'hodlhodl', 'USD', 'ask', 67000, ARRAY['Wise'], 'usd-1', TRUE, NULL, 88, 'feedback_verified', '{"rating":0.9}'::jsonb),
+			(3, 'bisq', 'GBP', 'bid', 52000, ARRAY['Faster Payments'], 'closed-1', FALSE, NULL, NULL, NULL, NULL)
 	`); err != nil {
 		t.Fatalf("insert offers: %v", err)
 	}
@@ -86,8 +86,8 @@ func TestLiveHubFiltersSubscriptionsByFiatAndUsesStoredReferencePrice(t *testing
 	})
 	hub = &LiveHub{
 		offers: []LiveOffer{
-			{ID: 1, Exchange: "bisq", FiatCurrency: "EUR", Direction: "buy", Price: 61000, ReferencePrice: 60000},
-			{ID: 2, Exchange: "hodlhodl", FiatCurrency: "USD", Direction: "sell", Price: 67000, ReferencePrice: 66500},
+			{ID: 1, Exchange: "bisq", FiatCurrency: "EUR", Direction: "bid", Price: 61000, ReferencePrice: 60000},
+			{ID: 2, Exchange: "hodlhodl", FiatCurrency: "USD", Direction: "ask", Price: 67000, ReferencePrice: 66500},
 		},
 		lifecycle:   make(map[int64][]LifecyclePoint),
 		subscribers: make(map[chan []byte]liveSubscription),
@@ -156,7 +156,7 @@ func TestLiveOffersRESTReturnsComputedCostFields(t *testing.T) {
 	hub.offers = []LiveOffer{{
 		ID:        1,
 		Exchange:  "bisq",
-		Direction: "buy",
+		Direction: "bid",
 		Price:     102.5,
 		BTCMin:    &btcMin,
 		BTCMax:    &btcMax,
@@ -245,7 +245,7 @@ func TestLiveOffersRESTPreservesTradeSizeWhenPremiumNonPositive(t *testing.T) {
 	hub.setOffers([]LiveOffer{{
 		ID:        1,
 		Exchange:  "bisq",
-		Direction: "buy",
+		Direction: "bid",
 		Price:     98, // below ref → negative premium → no cost route
 		BTCMin:    &btcMin,
 		BTCMax:    &btcMax,
@@ -306,7 +306,7 @@ func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
 	hub.offers = []LiveOffer{{
 		ID:                     1,
 		Exchange:               "bisq",
-		Direction:              "buy",
+		Direction:              "bid",
 		Price:                  102.5,
 		BTCMin:                 &btcMin,
 		BTCMax:                 &btcMax,
@@ -359,7 +359,7 @@ func TestLiveOffersRESTUsesRealSecurityDepositFromOffer(t *testing.T) {
 	hub.offers = []LiveOffer{{
 		ID:                 1,
 		Exchange:           "bisq",
-		Direction:          "buy",
+		Direction:          "bid",
 		Price:              102.5,
 		BTCMin:             &btcMin,
 		BTCMax:             &btcMax,
@@ -420,7 +420,7 @@ func TestLiveOffersRESTIncludesHedgelessDoubleCollateral(t *testing.T) {
 	hub.offers = []LiveOffer{{
 		ID:                 1,
 		Exchange:           "bisq",
-		Direction:          "buy",
+		Direction:          "bid",
 		Price:              102.5,
 		BTCMin:             &btcMin,
 		BTCMax:             &btcMax,
@@ -501,7 +501,7 @@ func TestLiveOffersRESTAttachesHedgelessOnlyWhenHedgefullUnavailable(t *testing.
 	hub.offers = []LiveOffer{{
 		ID:        1,
 		Exchange:  "bisq",
-		Direction: "buy",
+		Direction: "bid",
 		Price:     102.5,
 		BTCMin:    &btcMin,
 		BTCMax:    &btcMax,
@@ -566,7 +566,7 @@ func TestHandleLiveOffersRESTIncludesCappedProfitFields(t *testing.T) {
 	hub.setOffers([]LiveOffer{{
 		ID:        1,
 		Exchange:  "bisq",
-		Direction: "buy",
+		Direction: "bid",
 		Price:     102.5,
 		BTCMin:    &btcMin,
 		BTCMax:    &btcMax,
@@ -634,7 +634,7 @@ func TestHandleLiveOffersRESTIncludesMinVolumeScenario(t *testing.T) {
 	hub.setOffers([]LiveOffer{{
 		ID:        1,
 		Exchange:  "bisq",
-		Direction: "buy",
+		Direction: "bid",
 		Price:     102.5,
 		BTCMin:    &btcMin,
 		BTCMax:    &btcMax,
@@ -705,7 +705,7 @@ func TestHandleLiveOffersRESTOmitsMinVolumeWhenMinEqualsFullSize(t *testing.T) {
 	hub.setOffers([]LiveOffer{{
 		ID:        1,
 		Exchange:  "bisq",
-		Direction: "buy",
+		Direction: "bid",
 		Price:     102.5,
 		BTCMin:    &btcMin,
 		BTCMax:    &btcMax,
@@ -883,7 +883,7 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 	testDB := testdb.Open(t)
 	if _, err := testDB.Exec(`
 		INSERT INTO offers (id, exchange, fiat_currency, direction, price, btc_min, btc_max, is_live)
-		VALUES (1, 'bisq', 'EUR', 'buy', 102.5, 0.01, 0.1, TRUE)
+		VALUES (1, 'bisq', 'EUR', 'bid', 102.5, 0.01, 0.1, TRUE)
 	`); err != nil {
 		t.Fatalf("insert offer: %v", err)
 	}
@@ -907,7 +907,7 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 	payload, err := json.Marshal([]LiveOffer{{
 		ID:        1,
 		Exchange:  "bisq",
-		Direction: "buy",
+		Direction: "bid",
 		Price:     102.5,
 		BTCMin:    &btcMin,
 		BTCMax:    &btcMax,
