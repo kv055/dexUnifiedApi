@@ -33,6 +33,21 @@ var (
 func Open(t *testing.T) *dbutil.DB {
 	t.Helper()
 
+	db := OpenUninitialized(t)
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("apply postgres test schema: %v", err)
+	}
+	if err := dbutil.SeedPaymentMethods(db); err != nil {
+		t.Fatalf("seed payment methods: %v", err)
+	}
+	return db
+}
+
+// OpenUninitialized starts an isolated Postgres database without applying the
+// unified schema. Migration tests use it to construct historical schemas.
+func OpenUninitialized(t *testing.T) *dbutil.DB {
+	t.Helper()
+
 	acquireContainer(t)
 
 	ctx := context.Background()
@@ -50,13 +65,6 @@ func Open(t *testing.T) *dbutil.DB {
 	t.Cleanup(func() {
 		db.Close()
 	})
-
-	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
-		t.Fatalf("apply postgres test schema: %v", err)
-	}
-	if err := dbutil.SeedPaymentMethods(db); err != nil {
-		t.Fatalf("seed payment methods: %v", err)
-	}
 	return db
 }
 

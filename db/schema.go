@@ -9,11 +9,24 @@ import (
 	"strings"
 )
 
-//go:embed schema/*.sql
+//go:embed schema/*.sql migrations/*.sql
 var schemaFiles embed.FS
 
-// EnsureUnifiedSchema applies each table-local schema file at most once.
-// Files are tracked in schema_migrations so repeated boots do not reapply them.
+var baselineMigrationFiles = []string{
+	"28_transactional_liquidity_target_direction.sql",
+	"29_lsp_channel_config.sql",
+	"30_submarine_swaps.sql",
+	"31_dex_taken_funding_review.sql",
+	"32_submarine_swap_reservation_id.sql",
+	"33_authoritative_snapshot_routing.sql",
+	"33_cex_provider_fees.sql",
+	"34_payment_method_chat_template_directions.sql",
+	"34_transactional_liquidity_lightning_source.sql",
+	"35_cex_provider_fee_units.sql",
+}
+
+// EnsureUnifiedSchema applies the base schema and initialized forward-only
+// migrations at most once.
 func EnsureUnifiedSchema(db *DB) error {
 	if _, err := db.DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		filename   TEXT PRIMARY KEY,
@@ -27,15 +40,38 @@ func EnsureUnifiedSchema(db *DB) error {
 		return err
 	}
 
-	if err := applyDir(db, schemaFiles, "schema", applied); err != nil {
+	if err := applyDir(db, schemaFiles, "schema", "schema_migrations", applied); err != nil {
 		return err
 	}
-	return nil
+	return ensureUnifiedMigrations(db)
+}
+
+// ensureUnifiedMigrations initializes and applies forward-only migrations from
+// db/migrations. The historical files predate this runner and are recorded as
+// a baseline because their effects are already represented in db/schema.
+func ensureUnifiedMigrations(db *DB) error {
+	if _, err := db.DB.Exec(`CREATE TABLE IF NOT EXISTS migration_migrations (
+		filename   TEXT PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return fmt.Errorf("ensure migration_migrations table: %w", err)
+	}
+	for _, filename := range baselineMigrationFiles {
+		if _, err := db.DB.Exec(`INSERT INTO migration_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING`, filename); err != nil {
+			return fmt.Errorf("initialize migration baseline %s: %w", filename, err)
+		}
+	}
+
+	applied, err := appliedMigrationFiles(db)
+	if err != nil {
+		return err
+	}
+	return applyDir(db, schemaFiles, "migrations", "migration_migrations", applied)
 }
 
 // applyDir reads .sql files from an embedded directory, sorts them, and applies
-// any that haven't been recorded in schema_migrations yet.
-func applyDir(db *DB, fsys embed.FS, dir string, applied map[string]bool) error {
+// any that haven't been recorded in its migration tracking table yet.
+func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[string]bool) error {
 	entries, err := fsys.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("read %s directory: %w", dir, err)
@@ -69,7 +105,7 @@ func applyDir(db *DB, fsys embed.FS, dir string, applied map[string]bool) error 
 			_ = tx.Rollback()
 			return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
 		}
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (filename) VALUES ($1)`, filename); err != nil {
+		if _, err := tx.Exec(`INSERT INTO `+migrationTable+` (filename) VALUES ($1)`, filename); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("record %s/%s: %w", dir, filename, err)
 		}
@@ -86,9 +122,17 @@ func applyDir(db *DB, fsys embed.FS, dir string, applied map[string]bool) error 
 // appliedSchemaFiles returns the set of schema filenames already recorded in
 // the schema_migrations tracking table.
 func appliedSchemaFiles(db *DB) (map[string]bool, error) {
-	rows, err := db.DB.Query(`SELECT filename FROM schema_migrations`)
+	return appliedFiles(db, "schema_migrations")
+}
+
+func appliedMigrationFiles(db *DB) (map[string]bool, error) {
+	return appliedFiles(db, "migration_migrations")
+}
+
+func appliedFiles(db *DB, table string) (map[string]bool, error) {
+	rows, err := db.DB.Query(`SELECT filename FROM ` + table)
 	if err != nil {
-		return nil, fmt.Errorf("read schema_migrations: %w", err)
+		return nil, fmt.Errorf("read %s: %w", table, err)
 	}
 	defer rows.Close()
 
