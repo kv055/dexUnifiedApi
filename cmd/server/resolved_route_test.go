@@ -31,6 +31,9 @@ func TestResolvedRouteFromBreakdownCarriesExecutionSnapshot(t *testing.T) {
 	if route.HedgeVenue != "kraken_futures" || route.HedgeNotional != 0.01 || route.Leverage != 3 {
 		t.Fatalf("hedge route = %+v", route)
 	}
+	if route.RequiredBTCLiquidity != 0 {
+		t.Fatalf("non-swap hedgefull liquidity = %.8f, want 0", route.RequiredBTCLiquidity)
+	}
 }
 
 func TestSnapshotRouteBookIsAuthoritativeAcrossClientParameters(t *testing.T) {
@@ -105,10 +108,35 @@ func TestResolvedSwapRouteCarriesExecutionFeeAllowances(t *testing.T) {
 		BTCAmount: 0.01, RouteCEX: "kraken", RouteMethod: "onchain_swap", TradeDirection: "bid",
 		WithdrawalFeeBTC: 0.000002,
 		Conversion:       tradecost.ConversionBreakdown{RoutingFeeBTC: 0.000003},
-		Capital:          tradecost.CapitalRequirement{BTCPrice: 50000, TotalFiat: 500, BTCLiquidityBTC: 0.01},
+		Capital:          tradecost.CapitalRequirement{BTCPrice: 50000, TotalFiat: 500, SecurityDepositBTC: 0.0015, BTCLiquidityBTC: 0.0115},
 	}
 	route := resolvedRouteFromBreakdown(bd, "EUR", transactionalRoutingSettings{ConfigVersion: 1, TradeMode: tradecost.TradeModeHedgelessDoubleCollateral, TargetDirection: "bid"})
 	if route == nil || !route.NeedsLightning || route.RoutingFeeAllowanceSat != 300 || route.CEXWithdrawalFeeBTC != bd.WithdrawalFeeBTC || route.SwapSafetyHeadroomBTC <= 0 {
 		t.Fatalf("swap route allowances = %+v", route)
+	}
+	if route.RequiredBTCLiquidity != 0.0115 {
+		t.Fatalf("required BTC liquidity = %.8f, want 0.01150000", route.RequiredBTCLiquidity)
+	}
+}
+
+func TestResolvedHedgefullSwapRouteDerivesRequiredBTCLiquidity(t *testing.T) {
+	bd := tradecost.CostBreakdown{
+		BTCAmount: 0.01, RouteCEX: "kraken", RouteMethod: "onchain_swap", TradeDirection: "bid",
+		Hedge: tradecost.HedgeBreakdown{
+			Venue: "kraken_futures", Side: "short",
+			Position: &tradecost.HedgePositionDetail{HedgeRatio: 1, LeverageUsed: 5},
+		},
+		Capital: tradecost.CapitalRequirement{
+			BTCPrice: 50000, TotalFiat: 550, SecurityDepositBTC: 0.0015,
+		},
+	}
+	route := resolvedRouteFromBreakdown(bd, "EUR", transactionalRoutingSettings{
+		ConfigVersion: 1, TradeMode: tradecost.TradeModeHedgefullSingleCollateral, TargetDirection: "bid",
+	})
+	if route == nil {
+		t.Fatal("resolved route is nil")
+	}
+	if route.RequiredBTCLiquidity != 0.0115 {
+		t.Fatalf("required BTC liquidity = %.8f, want 0.01150000", route.RequiredBTCLiquidity)
 	}
 }

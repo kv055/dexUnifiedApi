@@ -87,6 +87,23 @@ func EnsureAppRoles(admin *DB, cfg RoleBootstrapConfig) error {
 		}
 	}
 
+	// Schema initialization runs as dex_unified_api. Older databases may have
+	// been initialized by dex_admin, which leaves enum types owned by the admin
+	// role and prevents migrations such as ALTER TYPE ... RENAME VALUE. Transfer
+	// ownership of the type that is changed by the schema runner so upgrades do
+	// not fail on an otherwise healthy database. On a fresh database the type is
+	// not present yet and will be created by the application role.
+	if _, err := admin.DB.Exec(`
+		DO $$
+		BEGIN
+			IF to_regtype('trade_direction') IS NOT NULL THEN
+				ALTER TYPE trade_direction OWNER TO dex_unified_api;
+			END IF;
+		END
+		$$`); err != nil {
+		return fmt.Errorf("ensure trade_direction ownership: %w", err)
+	}
+
 	return ensureGrafanaRORole(admin, cfg)
 }
 

@@ -557,6 +557,13 @@ func resolvedRouteFromBreakdown(bd tradecost.CostBreakdown, fiatCurrency string,
 	if bd.RouteCEX == "" || bd.BTCAmount <= 0 {
 		return nil
 	}
+	requiredBTCLiquidity := bd.Capital.BTCLiquidityBTC
+	if bd.RouteMethod == "onchain_swap" {
+		// Hedgefull capital does not populate BTCLiquidityBTC because it is not
+		// backed by the pre-funded LND pool. Swap execution still needs the full
+		// Lightning payment amount: the DEX position plus its security deposit.
+		requiredBTCLiquidity = tradecost.Round8(bd.BTCAmount + bd.Capital.SecurityDepositBTC)
+	}
 	route := &resolvedRoute{
 		ConfigVersion: settings.ConfigVersion, SnapshotRevision: settings.SnapshotRevision, ResolvedAt: settings.ResolvedAt, TradeMode: settings.TradeMode,
 		TargetDirection: settings.TargetDirection, MarketSide: bd.TradeDirection,
@@ -564,7 +571,7 @@ func resolvedRouteFromBreakdown(bd tradecost.CostBreakdown, fiatCurrency string,
 		FiatCurrency: fiatCurrency, BTCAmount: bd.BTCAmount,
 		FiatAmount:           tradecost.Round2(bd.BTCAmount * bd.Capital.BTCPrice),
 		RequiredCapital:      bd.Capital.TotalFiat,
-		RequiredBTCLiquidity: bd.Capital.BTCLiquidityBTC,
+		RequiredBTCLiquidity: requiredBTCLiquidity,
 		SecurityDepositBTC:   bd.Capital.SecurityDepositBTC,
 		TotalCostBTC:         bd.TotalCostBTC, TotalCostPercent: bd.TotalCostPct,
 		NetPremiumPercent: bd.EstimatedProfitPct,

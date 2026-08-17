@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/exchangecredentials"
 	"commons/fiat"
 	"commons/logging"
 	"commons/metrics"
@@ -9,6 +10,7 @@ import (
 	"commons/session"
 	"commons/tracing"
 	"commons/tradecost"
+	"commons/tradecost/cextrading"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -247,6 +249,7 @@ func main() {
 		slog.Error("payment methods seed error", "err", err)
 		os.Exit(1)
 	}
+	credentialStore := exchangecredentials.NewStore(db.DB)
 
 	// Dashboard login session: unified-api only VALIDATES the shared dex_session
 	// cookie (stored in the same Postgres `sessions` table dexMonitor creates);
@@ -271,6 +274,9 @@ func main() {
 	metricsReg.Registry.MustRegister(dbmetrics.NewCollector(db))
 	priceManager.SetMetrics(prices.NewMetrics(metricsReg.Registry))
 
+	if err := refreshPersistedCEXFees(ctx, db.DB, credentialStore); err != nil {
+		slog.Error("initial CEX fee refresh incomplete; last-known complete snapshots remain usable", "err", err)
+	}
 	if err := refreshSnapshotRoutingContext(ctx); err != nil {
 		slog.Error("initial snapshot routing context refresh failed; routing fail-closed", "err", err)
 	}
@@ -289,6 +295,11 @@ func main() {
 			}
 		}
 	}()
+	go runPeriodicCEXFeeRefresh(ctx, defaultCEXFeeRefreshInterval, func(refreshCtx context.Context) error {
+		return refreshPersistedCEXFees(refreshCtx, db.DB, credentialStore)
+	}, func(err error) {
+		slog.Error("periodic CEX fee refresh incomplete; last-known complete snapshots remain usable", "err", err)
+	})
 
 	recorder := accounthealth.NewDBRecorder(db)
 
@@ -574,8 +585,69 @@ func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 type cexCapabilitiesResponse struct {
-	Exchanges []mmcapabilities.ProviderState `json:"exchanges"`
-	MaxAgeSec int64                          `json:"max_age_seconds"`
+	Exchanges []cexCapabilityExchange `json:"exchanges"`
+	MaxAgeSec int64                   `json:"max_age_seconds"`
+}
+
+type cexFeeSnapshotStatus struct {
+	SpotTakerFeePercent         *float64   `json:"spot_taker_fee_percent"`
+	WithdrawalFeeBTC            *float64   `json:"withdrawal_fee_btc"`
+	FuturesOpenTakerFeePercent  *float64   `json:"futures_open_taker_fee_percent"`
+	FuturesCloseTakerFeePercent *float64   `json:"futures_close_taker_fee_percent"`
+	FuturesFundingFeePercent    *float64   `json:"futures_funding_fee_percent"`
+	FuturesFundingIntervalSecs  *int64     `json:"futures_funding_interval_seconds"`
+	SpotAvailable               bool       `json:"spot_available"`
+	HedgeAvailable              bool       `json:"hedge_available"`
+	Stale                       bool       `json:"stale"`
+	FetchedAt                   *time.Time `json:"fetched_at,omitempty"`
+	LastAttemptedAt             *time.Time `json:"last_attempted_at,omitempty"`
+	LastError                   string     `json:"last_error,omitempty"`
+}
+
+type cexCapabilityExchange struct {
+	mmcapabilities.ProviderState
+	FeeSnapshot cexFeeSnapshotStatus `json:"fee_snapshot"`
+}
+
+func buildCEXCapabilityExchange(ctx context.Context, state mmcapabilities.ProviderState) cexCapabilityExchange {
+	result := cexCapabilityExchange{ProviderState: state}
+	fees, err := cextrading.ReadPersistedFees(ctx, db.DB, state.Exchange)
+	if err != nil {
+		result.FeeSnapshot.LastError = "fee snapshot status is unavailable"
+		return result
+	}
+	now := time.Now().UTC()
+	if fees.SpotTakerFeeRate.Valid {
+		result.FeeSnapshot.SpotTakerFeePercent = &fees.SpotTakerFeeRate.Float64
+	}
+	if fees.BTCWithdrawalFeeBTC.Valid {
+		result.FeeSnapshot.WithdrawalFeeBTC = &fees.BTCWithdrawalFeeBTC.Float64
+	}
+	if fees.FuturesOpenTakerRate.Valid {
+		result.FeeSnapshot.FuturesOpenTakerFeePercent = &fees.FuturesOpenTakerRate.Float64
+	}
+	if fees.FuturesCloseTakerRate.Valid {
+		result.FeeSnapshot.FuturesCloseTakerFeePercent = &fees.FuturesCloseTakerRate.Float64
+	}
+	if fees.FuturesFundingRate.Valid {
+		result.FeeSnapshot.FuturesFundingFeePercent = &fees.FuturesFundingRate.Float64
+	}
+	if fees.FundingIntervalSeconds.Valid {
+		result.FeeSnapshot.FuturesFundingIntervalSecs = &fees.FundingIntervalSeconds.Int64
+	}
+	result.FeeSnapshot.SpotAvailable = fees.SpotTakerFeeRate.Valid && fees.BTCWithdrawalFeeBTC.Valid && fees.FetchedAt.Valid
+	result.FeeSnapshot.HedgeAvailable = fees.FuturesOpenTakerRate.Valid && fees.FuturesCloseTakerRate.Valid && fees.FuturesFundingRate.Valid && fees.FundingIntervalSeconds.Valid && fees.FundingIntervalSeconds.Int64 > 0 && fees.FetchedAt.Valid
+	result.FeeSnapshot.Stale = fees.Stale(now)
+	if fees.FetchedAt.Valid {
+		value := fees.FetchedAt.Time.UTC()
+		result.FeeSnapshot.FetchedAt = &value
+	}
+	if fees.LastAttemptedAt.Valid {
+		value := fees.LastAttemptedAt.Time.UTC()
+		result.FeeSnapshot.LastAttemptedAt = &value
+	}
+	result.FeeSnapshot.LastError = strings.TrimSpace(fees.LastError.String)
+	return result
 }
 
 func currentCapabilityStore() *mmcapabilities.Store {
@@ -615,7 +687,7 @@ func handleCEXPermissions(w http.ResponseWriter, r *http.Request) {
 		if err := refreshLiveCapabilityPolicy(r.Context()); err != nil {
 			slog.ErrorContext(r.Context(), "refresh MM CEX policy after update; routing fail-closed", "err", err)
 		}
-		writeJSON(w, state)
+		writeJSON(w, buildCEXCapabilityExchange(r.Context(), state))
 		return
 	}
 	states, err := store.States(r.Context())
@@ -627,7 +699,11 @@ func handleCEXPermissions(w http.ResponseWriter, r *http.Request) {
 	if maxAge <= 0 {
 		maxAge = mmcapabilities.DefaultMaxAge
 	}
-	writeJSON(w, cexCapabilitiesResponse{Exchanges: states, MaxAgeSec: int64(maxAge / time.Second)})
+	exchanges := make([]cexCapabilityExchange, 0, len(states))
+	for _, state := range states {
+		exchanges = append(exchanges, buildCEXCapabilityExchange(r.Context(), state))
+	}
+	writeJSON(w, cexCapabilitiesResponse{Exchanges: exchanges, MaxAgeSec: int64(maxAge / time.Second)})
 }
 
 func refreshLiveCapabilityPolicy(ctx context.Context) error {

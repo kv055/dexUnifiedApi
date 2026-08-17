@@ -11,6 +11,26 @@ import (
 	"commons/tradecost/cextrading"
 )
 
+const defaultCEXFeeRefreshInterval = 15 * time.Minute
+
+func runPeriodicCEXFeeRefresh(ctx context.Context, interval time.Duration, refresh func(context.Context) error, reportError func(error)) {
+	if interval <= 0 {
+		interval = defaultCEXFeeRefreshInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := refresh(ctx); err != nil && reportError != nil {
+				reportError(err)
+			}
+		}
+	}
+}
+
 func refreshPersistedCEXFees(ctx context.Context, database *sql.DB, credentials *exchangecredentials.Store) error {
 	var failures []string
 	for _, provider := range cextrading.SupportedCEXes() {

@@ -2,6 +2,7 @@ package dbutil_test
 
 import (
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -9,6 +10,22 @@ import (
 	dbutil "dexunifiedapi/db"
 	"dexunifiedapi/internal/testdb"
 )
+
+var legacyMigrationFiles = map[string]struct{}{
+	"28_transactional_liquidity_target_direction.sql":      {},
+	"29_lsp_channel_config.sql":                            {},
+	"30_submarine_swaps.sql":                               {},
+	"31_dex_taken_funding_review.sql":                      {},
+	"32_submarine_swap_reservation_id.sql":                 {},
+	"33_authoritative_snapshot_routing.sql":                {},
+	"33_cex_provider_fees.sql":                             {},
+	"34_payment_method_chat_template_directions.sql":       {},
+	"34_transactional_liquidity_lightning_source.sql":      {},
+	"35_cex_provider_fee_units.sql":                        {},
+	"36_repair_legacy_varchar_directions.sql":              {},
+}
+
+var timestampMigrationFilename = regexp.MustCompile(`^\d{14}_[a-z0-9_]+\.sql$`)
 
 // countSchemaFiles counts the table-local schema files without hard-coding a count.
 func countSchemaFiles(t *testing.T) int {
@@ -106,6 +123,60 @@ func TestEnsureUnifiedSchemaIsRunOnce(t *testing.T) {
 	}
 	if maxApplied1 != maxApplied2 {
 		t.Fatalf("applied_at changed across runs (%q -> %q): schema files were re-applied", maxApplied1, maxApplied2)
+	}
+}
+
+func TestEnsureUnifiedSchemaAppliesLightningLiquiditySourceMigration(t *testing.T) {
+	db := testdb.Open(t)
+
+	var source string
+	if err := db.QueryRow(`SELECT lightning_liquidity_source FROM transactional_liquidity_settings WHERE id = 1`).Scan(&source); err != nil {
+		t.Fatalf("read lightning liquidity source: %v", err)
+	}
+	if source != "own_channels" {
+		t.Errorf("lightning liquidity source = %q, want own_channels", source)
+	}
+}
+
+func TestNewMigrationFilenamesUseTimestamps(t *testing.T) {
+	entries, err := os.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		if _, legacy := legacyMigrationFiles[entry.Name()]; legacy {
+			continue
+		}
+		if !timestampMigrationFilename.MatchString(entry.Name()) {
+			t.Errorf("new migration filename %q must use YYYYMMDDHHMMSS_description.sql", entry.Name())
+		}
+	}
+}
+
+func TestEnsureUnifiedSchemaRepairsRecordedLightningLiquiditySourceMigration(t *testing.T) {
+	db := testdb.Open(t)
+
+	if _, err := db.Exec(`ALTER TABLE transactional_liquidity_settings DROP COLUMN lightning_liquidity_source`); err != nil {
+		t.Fatalf("remove lightning liquidity source for legacy fixture: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM migration_migrations WHERE filename = '20260817000000_repair_transactional_liquidity_lightning_source.sql'`); err != nil {
+		t.Fatalf("reset repair migration record: %v", err)
+	}
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("repair recorded lightning liquidity source migration: %v", err)
+	}
+
+	var source string
+	if err := db.QueryRow(`SELECT lightning_liquidity_source FROM transactional_liquidity_settings WHERE id = 1`).Scan(&source); err != nil {
+		t.Fatalf("read repaired lightning liquidity source: %v", err)
+	}
+	if source != "own_channels" {
+		t.Errorf("repaired lightning liquidity source = %q, want own_channels", source)
 	}
 }
 
