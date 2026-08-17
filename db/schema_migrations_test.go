@@ -77,6 +77,29 @@ func markExistingSchemaFilesApplied(t *testing.T, db *dbutil.DB) {
 	}
 }
 
+// markExistingMigrationFilesAppliedExcept models a legacy database that has
+// already applied every migration except the one under test. This keeps a
+// focused migration test independent of unrelated forward migrations.
+func markExistingMigrationFilesAppliedExcept(t *testing.T, db *dbutil.DB, excluded string) {
+	t.Helper()
+	if _, err := db.Exec(`CREATE TABLE migration_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
+		t.Fatalf("create migration_migrations: %v", err)
+	}
+	entries, err := os.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	for _, entry := range entries {
+		filename := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(filename, ".sql") || filename == excluded {
+			continue
+		}
+		if _, err := db.Exec(`INSERT INTO migration_migrations (filename) VALUES ($1)`, filename); err != nil {
+			t.Fatalf("record prior migration %s: %v", filename, err)
+		}
+	}
+}
+
 // TestEnsureUnifiedSchemaRecordsEverySchemaFile verifies that the first run
 // applies and records every schema file exactly once.
 func TestEnsureUnifiedSchemaRecordsEverySchemaFile(t *testing.T) {
@@ -196,6 +219,7 @@ func TestEnsureUnifiedSchemaRepairsLegacyVarcharDirections(t *testing.T) {
 		t.Fatalf("create legacy direction tables: %v", err)
 	}
 	markExistingSchemaFilesApplied(t, db)
+	markExistingMigrationFilesAppliedExcept(t, db, "36_repair_legacy_varchar_directions.sql")
 
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		t.Fatalf("apply legacy direction repair: %v", err)
