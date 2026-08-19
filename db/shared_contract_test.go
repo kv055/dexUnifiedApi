@@ -47,7 +47,8 @@ func TestSharedServiceSchemaContract(t *testing.T) {
 		},
 		"transactional_liquidity_settings": {
 			"id", "fiat_currency", "amount_source", "amount_fiat", "trade_mode",
-			"target_direction", "fee_tier", "coupled_hedge", "config_version", "updated_at",
+			"target_direction", "lightning_liquidity_source", "supported_routing_profiles",
+			"fee_tier", "coupled_hedge", "config_version", "updated_at",
 		},
 		"fiat_payment_events": {
 			"id", "source", "provider", "account_id", "source_event_id", "amount_minor",

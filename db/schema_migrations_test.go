@@ -12,17 +12,17 @@ import (
 )
 
 var legacyMigrationFiles = map[string]struct{}{
-	"28_transactional_liquidity_target_direction.sql":      {},
-	"29_lsp_channel_config.sql":                            {},
-	"30_submarine_swaps.sql":                               {},
-	"31_dex_taken_funding_review.sql":                      {},
-	"32_submarine_swap_reservation_id.sql":                 {},
-	"33_authoritative_snapshot_routing.sql":                {},
-	"33_cex_provider_fees.sql":                             {},
-	"34_payment_method_chat_template_directions.sql":       {},
-	"34_transactional_liquidity_lightning_source.sql":      {},
-	"35_cex_provider_fee_units.sql":                        {},
-	"36_repair_legacy_varchar_directions.sql":              {},
+	"28_transactional_liquidity_target_direction.sql": {},
+	"29_lsp_channel_config.sql":                       {},
+	"30_submarine_swaps.sql":                          {},
+	"31_dex_taken_funding_review.sql":                 {},
+	"32_submarine_swap_reservation_id.sql":            {},
+	"33_authoritative_snapshot_routing.sql":           {},
+	"33_cex_provider_fees.sql":                        {},
+	"34_payment_method_chat_template_directions.sql":  {},
+	"34_transactional_liquidity_lightning_source.sql": {},
+	"35_cex_provider_fee_units.sql":                   {},
+	"36_repair_legacy_varchar_directions.sql":         {},
 }
 
 var timestampMigrationFilename = regexp.MustCompile(`^\d{14}_[a-z0-9_]+\.sql$`)
@@ -158,6 +158,22 @@ func TestEnsureUnifiedSchemaAppliesLightningLiquiditySourceMigration(t *testing.
 	}
 	if source != "own_channels" {
 		t.Errorf("lightning liquidity source = %q, want own_channels", source)
+	}
+}
+
+func TestEnsureUnifiedSchemaAppliesSupportedRoutingProfilesMigration(t *testing.T) {
+	db := testdb.Open(t)
+
+	var matches bool
+	if err := db.QueryRow(`
+		SELECT supported_routing_profiles = ARRAY['Direct_main2main', 'Hub_main2main', 'Swap_main2lightning']::TEXT[]
+		FROM transactional_liquidity_settings
+		WHERE id = 1
+	`).Scan(&matches); err != nil {
+		t.Fatalf("read supported routing profiles: %v", err)
+	}
+	if !matches {
+		t.Fatal("supported_routing_profiles default is not all three canonical profiles")
 	}
 }
 
