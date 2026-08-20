@@ -185,6 +185,7 @@ func TestSnapshotLogKeepsHardFailedExchangeAtZero(t *testing.T) {
 		Count   int      `json:"count"`
 		IDs     []string `json:"ids"`
 		Offline bool     `json:"offline"`
+		Status  string   `json:"status"`
 	}
 	if err := json.Unmarshal(payload, &got); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
@@ -198,6 +199,9 @@ func TestSnapshotLogKeepsHardFailedExchangeAtZero(t *testing.T) {
 	}
 	if !bisq.Offline {
 		t.Fatal("bisq offline flag = false, want true")
+	}
+	if bisq.Status != "failed" {
+		t.Fatalf("bisq status = %q, want failed", bisq.Status)
 	}
 	if bisq.IDs == nil || len(bisq.IDs) != 0 {
 		t.Fatalf("bisq ids = %#v, want empty JSON array", bisq.IDs)
@@ -764,6 +768,24 @@ func TestFilterDustOffersAllDustKeepsExchangeOnline(t *testing.T) {
 	}
 	if _, ok := exchangeData["peachbitcoin"]; !ok {
 		t.Fatal("peachbitcoin exchange missing from snapshot data after all-dust filter")
+	}
+}
+
+func TestFilterDustOffersDoesNotChangeFetchStatus(t *testing.T) {
+	incomplete := incompleteFetch(60000, []offer{
+		{OfferID: "d1", FiatMax: intPtr(0), BTCMax: floatPtr(0.000008), Price: 60000},
+		{OfferID: "ok", FiatMax: intPtr(100), BTCMax: floatPtr(0.01), Price: 60000},
+	})
+	incomplete.Offers = filterDustOffers(incomplete.Offers)
+	if incomplete.status() != fetchStatusIncomplete {
+		t.Fatalf("status = %q after dust filter, want incomplete", incomplete.status())
+	}
+	completeAllDust := completeFetch(60000, []offer{
+		{OfferID: "d1", FiatMax: intPtr(0), BTCMax: floatPtr(0.000008), Price: 60000},
+	})
+	completeAllDust.Offers = filterDustOffers(completeAllDust.Offers)
+	if completeAllDust.status() != fetchStatusComplete || len(completeAllDust.Offers) != 0 {
+		t.Fatalf("complete all-dust = status %q len %d, want complete empty", completeAllDust.status(), len(completeAllDust.Offers))
 	}
 }
 

@@ -700,6 +700,8 @@ type LiveHub struct {
 
 	subsMu      sync.Mutex
 	subscribers map[chan []byte]liveSubscription
+	payloadMu   sync.Mutex
+	payloads    map[liveSubscription][]byte
 
 	capabilitiesMu     sync.RWMutex
 	excludedSpotCEXes  string
@@ -1187,9 +1189,27 @@ func (h *LiveHub) computePayload(price float64, sub liveSubscription) []byte {
 	data, err := json.Marshal(result)
 	if err != nil {
 		fmt.Printf("[LiveHub] marshal error: %v\n", err)
-		return nil
+		return h.cachedPayload(sub)
 	}
+	h.storePayload(sub, data)
 	return data
+}
+
+func (h *LiveHub) storePayload(sub liveSubscription, data []byte) {
+	h.payloadMu.Lock()
+	defer h.payloadMu.Unlock()
+	if h.payloads == nil {
+		h.payloads = make(map[liveSubscription][]byte)
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	h.payloads[sub] = cp
+}
+
+func (h *LiveHub) cachedPayload(sub liveSubscription) []byte {
+	h.payloadMu.Lock()
+	defer h.payloadMu.Unlock()
+	return h.payloads[sub]
 }
 
 func handleLiveOfferLifecycleREST(w http.ResponseWriter, r *http.Request) {

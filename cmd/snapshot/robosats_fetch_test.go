@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -60,6 +61,9 @@ func TestFetchRobosatsFallsBackAcrossCoordinatorFailures(t *testing.T) {
 	if len(result.Offers) != 1 || result.Offers[0].OfferID != "42" {
 		t.Fatalf("offers = %#v, want order 42", result.Offers)
 	}
+	if result.status() != fetchStatusIncomplete {
+		t.Fatalf("status = %q, want incomplete after coordinator failures", result.status())
+	}
 	if failedHits.Load() != 1 || unknownHits.Load() != 1 || successHits.Load() != 1 {
 		t.Fatalf("hits failed=%d unknown=%d success=%d, want 1 each", failedHits.Load(), unknownHits.Load(), successHits.Load())
 	}
@@ -72,6 +76,71 @@ func TestFetchRobosatsNotFoundObjectIsEmptyBook(t *testing.T) {
 	result := fetchRobosatsCurrencyFrom("bid", "GBP", 50000, client, []string{"http://empty.test"})
 	if result == nil {
 		t.Fatal("result = nil, want successful empty book")
+	}
+	if len(result.Offers) != 0 {
+		t.Fatalf("offers = %d, want 0", len(result.Offers))
+	}
+	if result.status() != fetchStatusComplete {
+		t.Fatalf("status = %q, want complete empty book", result.status())
+	}
+}
+
+func TestFetchRobosatsUnionsCoordinatorsAndKeepsGoingAfterNotFound(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "empty.test":
+			return jsonResponse(http.StatusOK, `{"not_found":"No orders found"}`), nil
+		case "book.test":
+			return jsonResponse(http.StatusOK, `[{
+			"id": 7,
+			"price": 61000,
+			"premium": 0,
+			"amount": 400,
+			"min_amount": 0,
+			"max_amount": 0,
+			"payment_method": "SEPA",
+			"bond_size": 3
+		}]`), nil
+		default:
+			t.Fatalf("unexpected host: %s", req.URL.Host)
+			return nil, errors.New("unexpected host")
+		}
+	})}
+
+	result := fetchRobosatsCurrencyFrom(
+		"ask",
+		"EUR",
+		60000,
+		client,
+		[]string{"http://empty.test", "http://book.test"},
+	)
+	if result == nil || result.status() != fetchStatusComplete {
+		t.Fatalf("result = %#v, want complete union", result)
+	}
+	if len(result.Offers) != 1 || result.Offers[0].OfferID != "7" {
+		t.Fatalf("offers = %#v, want order 7 from second coordinator", result.Offers)
+	}
+}
+
+func TestFetchRobosatsNotFoundThenFailureIsIncomplete(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "empty.test":
+			return jsonResponse(http.StatusOK, `{"not_found":"No orders found"}`), nil
+		default:
+			return jsonResponse(http.StatusBadGateway, `{"detail":"down"}`), nil
+		}
+	})}
+
+	result := fetchRobosatsCurrencyFrom(
+		"bid",
+		"EUR",
+		60000,
+		client,
+		[]string{"http://empty.test", "http://down.test"},
+	)
+	if result == nil || result.status() != fetchStatusIncomplete {
+		t.Fatalf("result = %#v, want incomplete empty book", result)
 	}
 	if len(result.Offers) != 0 {
 		t.Fatalf("offers = %d, want 0", len(result.Offers))

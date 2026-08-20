@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"commons/exchangecredentials"
 	"commons/fiat"
 	"commons/logging"
@@ -22,6 +23,7 @@ import (
 	"dexunifiedapi/internal/paymentnotifications"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -427,8 +429,7 @@ func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := hub.computePayload(getCexPrice(sub.cex), sub)
 	if payload == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
+		http.Error(w, "live offers unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -487,8 +488,6 @@ func writeLifecycleEntries(ctx context.Context, offers []liveOutOffer) {
 	}
 }
 
-// handleInternalLiveOffers receives the live offer list from the snapshot tool,
-// updates the hub, and persists lifecycle to the DB.
 // maxInternalBodyBytes bounds the internal ingest request bodies so a caller
 // can't stream an unbounded payload into memory before decoding.
 const maxInternalBodyBytes = 4 << 20 // 4 MiB
@@ -519,29 +518,31 @@ func internalSecretGate(next http.Handler) http.Handler {
 	})
 }
 
+// handleInternalLiveOffers is the snapshot worker's refresh trigger. Membership
+// is loaded from PostgreSQL (WHERE is_live = TRUE). The body is optional: empty,
+// {}, {"ok":true}, or a legacy offer array are all accepted.
 func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	if !internalSecretAuthorized(r.Header.Get("X-Internal-Secret"), internalAPISecret) {
 		http.Error(w, "unauthorized internal secret", http.StatusUnauthorized)
 		return
 	}
 
-	var offers []LiveOffer
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxInternalBodyBytes)).Decode(&offers); err != nil {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxInternalBodyBytes))
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Bound the DB work to the request: the snapshot client's POST has a 15s deadline,
-	// so if it gives up we stop too instead of running on under context.Background().
+	offers, err := decodeLiveRefreshBody(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	appMetrics.observePush()
 	if err := refreshSnapshotRoutingContext(ctx); err != nil {
 		slog.ErrorContext(ctx, "refresh routing context for snapshot; routing fail-closed", "err", err)
 	}
-	// We deliberately do NOT preload every live offer's full lifecycle history into the
-	// hub here. That unbounded bulk load (all order_lifecycle rows for all live offers)
-	// is what OOM-killed this service; the per-offer lifecycle endpoint lazy-loads on
-	// demand instead.
 	if err := refreshLiveHub(ctx, offers); err != nil {
 		slog.WarnContext(ctx, "live book refresh failed; retaining cached book", "err", err)
 		http.Error(w, "live book refresh failed", http.StatusServiceUnavailable)
@@ -551,12 +552,32 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	price := getCexPrice(defaultCEX)
 	outOffers := hub.computeOutOffers(price, liveSubscription{cex: defaultCEX})
 	writeLifecycleEntries(ctx, outOffers)
-	// Look up Peach seller ratings only for net-profitable offers, in the
-	// background — Peach's per-maker API is slow/rate-limited and must not block
-	// the snapshot's push (which has its own short deadline).
 	go resolveAndApplyPeachRatings(context.Background(), refreshedOffers, outOffers)
 	fmt.Printf("[LiveHub] refreshed with %d live offers from PostgreSQL\n", len(refreshedOffers))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func decodeLiveRefreshBody(body []byte) ([]LiveOffer, error) {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 || string(body) == "null" {
+		return nil, nil
+	}
+	switch body[0] {
+	case '[':
+		var offers []LiveOffer
+		if err := json.Unmarshal(body, &offers); err != nil {
+			return nil, err
+		}
+		return offers, nil
+	case '{':
+		var probe map[string]any
+		if err := json.Unmarshal(body, &probe); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("invalid live refresh body")
+	}
 }
 
 func handleTradeCostConfig(w http.ResponseWriter, r *http.Request) {

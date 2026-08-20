@@ -44,7 +44,8 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			o.security_deposit_pct,
 			o.seller_rating_score,
 			o.seller_rating_confidence,
-			o.seller_rating_raw
+			o.seller_rating_raw,
+			COALESCE(o.maker_id, '')
 		FROM offers o
 		LEFT JOIN LATERAL (
 			SELECT ol.ref_price
@@ -89,6 +90,7 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			&o.SellerRatingScore,
 			&o.SellerRatingConfidence,
 			&ratingRaw,
+			&o.MakerID,
 		); err != nil {
 			return nil, fmt.Errorf("scan live offer: %w", err)
 		}

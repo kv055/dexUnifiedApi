@@ -955,3 +955,84 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 	assertFloat(t, networkFee, 0.00005) // bisq bid is a single on-chain tx
 	assertFloat(t, dexFee, 0.0001)
 }
+
+func TestInternalLiveOffersAcceptsRefreshTrigger(t *testing.T) {
+	oldDB := db
+	oldHub := hub
+	t.Cleanup(func() {
+		db = oldDB
+		hub = oldHub
+	})
+	testDB := testdb.Open(t)
+	if _, err := testDB.Exec(`
+		INSERT INTO offers (id, exchange, fiat_currency, direction, price, is_live, maker_id)
+		VALUES (11, 'peachbitcoin', 'EUR', 'bid', 61000, TRUE, 'peach-maker-1')
+	`); err != nil {
+		t.Fatalf("insert offer: %v", err)
+	}
+	db = testDB
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/live_offers", bytes.NewReader([]byte(`{}`)))
+	rec := httptest.NewRecorder()
+	handleInternalLiveOffers(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	offers := hub.getOffers()
+	if len(offers) != 1 || offers[0].MakerID != "peach-maker-1" {
+		t.Fatalf("hub offers = %#v, want peach maker id from postgres", offers)
+	}
+}
+
+func TestLiveHubKeepsLastPayloadOnMarshalError(t *testing.T) {
+	oldHub := hub
+	t.Cleanup(func() { hub = oldHub })
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	hub.setOffers([]LiveOffer{{
+		ID: 1, Exchange: "bisq", FiatCurrency: "EUR", Direction: "bid",
+		Price: 100, ReferencePrice: 100,
+	}})
+	sub := liveSubscription{cex: "kraken", fiat: "EUR"}
+	first := hub.computePayload(100, sub)
+	if first == nil || !bytes.Contains(first, []byte(`"id":1`)) {
+		t.Fatalf("first payload = %s", first)
+	}
+	hub.setOffers([]LiveOffer{{
+		ID: 1, Exchange: "bisq", FiatCurrency: "EUR", Direction: "bid",
+		Price: math.Inf(1), ReferencePrice: 100,
+	}})
+	second := hub.computePayload(100, sub)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("marshal failure replaced last payload")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?fiat=EUR", nil)
+	rec := httptest.NewRecorder()
+	handleLiveOffersREST(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want cached 200", rec.Code)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), first) {
+		t.Fatalf("REST body changed after marshal failure")
+	}
+}
+
+func TestLiveOffersRESTReturns503WhenPayloadUnavailable(t *testing.T) {
+	oldHub := hub
+	t.Cleanup(func() { hub = oldHub })
+	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	hub.setOffers([]LiveOffer{{
+		ID: 1, Exchange: "bisq", FiatCurrency: "EUR", Direction: "bid",
+		Price: math.Inf(1), ReferencePrice: 100,
+	}})
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?fiat=EUR", nil)
+	rec := httptest.NewRecorder()
+	handleLiveOffersREST(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if rec.Body.String() == "[]\n" || rec.Body.String() == "[]" {
+		t.Fatal("REST marshal failure returned empty offer list")
+	}
+}

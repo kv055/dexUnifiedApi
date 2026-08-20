@@ -157,9 +157,38 @@ func applyRating(o *offer, s sellerrating.Score) {
 	o.SellerRatingRaw = s.Raw
 }
 
+// fetchStatus is whether a market census can be used to close absent offers.
+// Complete is the only status that may confirm a market empty or missing ids.
+type fetchStatus string
+
+const (
+	fetchStatusComplete   fetchStatus = "complete"
+	fetchStatusIncomplete fetchStatus = "incomplete"
+	fetchStatusFailed     fetchStatus = "failed"
+)
+
 type fetchResult struct {
 	BTCPrice float64
 	Offers   []offer
+	Status   fetchStatus
+}
+
+func completeFetch(price float64, offers []offer) *fetchResult {
+	return &fetchResult{BTCPrice: price, Offers: offers, Status: fetchStatusComplete}
+}
+
+func incompleteFetch(price float64, offers []offer) *fetchResult {
+	return &fetchResult{BTCPrice: price, Offers: offers, Status: fetchStatusIncomplete}
+}
+
+func (r *fetchResult) status() fetchStatus {
+	if r == nil || r.Status == fetchStatusFailed {
+		return fetchStatusFailed
+	}
+	if r.Status == fetchStatusIncomplete {
+		return fetchStatusIncomplete
+	}
+	return fetchStatusComplete
 }
 
 // externalOfferDirection translates the canonical stored side to the legacy
@@ -291,7 +320,7 @@ func fetchBisqCurrency(direction, currency string, btcPrice int) *fetchResult {
 	}
 
 	fmt.Printf("[Bisq] Found %d %s offers\n", len(offers), direction)
-	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+	return completeFetch(float64(btcPrice), offers)
 }
 
 // mapBisqOffer converts a bisq v1 gRPC OfferInfo into our offer struct.
@@ -490,7 +519,7 @@ func fetchBisq2Currency(direction, currency string, btcPrice int) *fetchResult {
 	}
 
 	fmt.Printf("[Bisq2] Found %d %s offers\n", len(offers), direction)
-	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+	return completeFetch(float64(btcPrice), offers)
 }
 
 // hodlHodlTrader is the maker reputation nested per-offer in the HodlHodl offer
@@ -585,14 +614,26 @@ func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
 }
 
 func fetchHodlHodlCurrency(direction, currency string, btcPrice int) *fetchResult {
-	reqURL := fmt.Sprintf("https://hodlhodl.com/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", externalOfferDirection(direction), url.QueryEscape(currency))
-	resp, err := clearnetClient().Get(reqURL)
+	return fetchHodlHodlCurrencyFrom(clearnetClient(), "https://hodlhodl.com", direction, currency, btcPrice)
+}
+
+func fetchHodlHodlCurrencyFrom(client *http.Client, baseURL, direction, currency string, btcPrice int) *fetchResult {
+	reqURL := fmt.Sprintf("%s/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", strings.TrimRight(baseURL, "/"), externalOfferDirection(direction), url.QueryEscape(currency))
+	resp, err := client.Get(reqURL)
 	if err != nil {
 		fmt.Printf("[HodlHodl] Error: %v\n", err)
 		return nil
 	}
 	defer resp.Body.Close()
-	body, _ := readAllLimited(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[HodlHodl] Unexpected status %d\n", resp.StatusCode)
+		return nil
+	}
+	body, err := readAllLimited(resp.Body)
+	if err != nil {
+		fmt.Printf("[HodlHodl] Response read error: %v\n", err)
+		return nil
+	}
 
 	var data struct {
 		Offers []struct {
@@ -655,7 +696,7 @@ func fetchHodlHodlCurrency(direction, currency string, btcPrice int) *fetchResul
 	}
 
 	fmt.Printf("[HodlHodl] Found %d %s offers\n", len(offers), direction)
-	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+	return completeFetch(float64(btcPrice), offers)
 }
 
 // normalizePeachMethod converts a Peach Bitcoin payment-method identifier
@@ -797,13 +838,22 @@ type peachOffer struct {
 	} `json:"user"`
 }
 
+const (
+	peachSearchPageSize = 100
+	// peachSearchMaxPages bounds a stuck remaining>0 book so we neither loop
+	// forever nor publish a truncated result as authoritative.
+	peachSearchMaxPages = 50
+)
+
 func fetchPeachBitcoinCurrency(direction, currency string, btcPrice int) *fetchResult {
+	return fetchPeachBitcoinCurrencyFrom(clearnetClient(), "https://api.peachbitcoin.com", direction, currency, btcPrice)
+}
+
+func fetchPeachBitcoinCurrencyFrom(client *http.Client, baseURL, direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[PeachBitcoin] Could not get reference price")
 		return nil
 	}
-
-	peachType := direction
 
 	type peachResponse struct {
 		Offers    []peachOffer `json:"offers"`
@@ -812,49 +862,67 @@ func fetchPeachBitcoinCurrency(direction, currency string, btcPrice int) *fetchR
 	}
 
 	var allOffers []peachOffer
-	for page := 0; ; page++ {
-		reqURL := fmt.Sprintf("https://api.peachbitcoin.com/v1/offer/search?page=%d&size=100&sortBy=lowestPremium", page)
-		body, err := json.Marshal(map[string]any{"type": peachType})
+	complete := false
+	for page := 0; page < peachSearchMaxPages; page++ {
+		reqURL := fmt.Sprintf("%s/v1/offer/search?page=%d&size=%d&sortBy=lowestPremium",
+			strings.TrimRight(baseURL, "/"), page, peachSearchPageSize)
+		body, err := json.Marshal(map[string]any{"type": direction})
 		if err != nil {
 			fmt.Printf("[PeachBitcoin] marshal error: %v\n", err)
-			break
+			return peachResult(allOffers, direction, currency, btcPrice, false)
 		}
 
-		resp, err := clearnetClient().Post(reqURL, "application/json", strings.NewReader(string(body)))
+		resp, err := client.Post(reqURL, "application/json", strings.NewReader(string(body)))
 		if err != nil {
 			fmt.Printf("[PeachBitcoin] Error: %v\n", err)
-			break
+			return peachResult(allOffers, direction, currency, btcPrice, false)
 		}
-		respBody, _ := readAllLimited(resp.Body)
+		respBody, readErr := readAllLimited(resp.Body)
 		resp.Body.Close()
+		if readErr != nil {
+			fmt.Printf("[PeachBitcoin] Response read error: %v\n", readErr)
+			return peachResult(allOffers, direction, currency, btcPrice, false)
+		}
 
-		if resp.StatusCode != 200 {
+		if resp.StatusCode != http.StatusOK {
 			fmt.Printf("[PeachBitcoin] HTTP %d: %s\n", resp.StatusCode, string(respBody))
-			break
+			return peachResult(allOffers, direction, currency, btcPrice, false)
 		}
 
 		var pr peachResponse
 		if err := json.Unmarshal(respBody, &pr); err != nil {
 			fmt.Printf("[PeachBitcoin] Parse error: %v — body: %s\n", err, string(respBody))
-			break
+			return peachResult(allOffers, direction, currency, btcPrice, false)
 		}
 		allOffers = append(allOffers, pr.Offers...)
 		if pr.Remaining <= 0 {
+			complete = true
 			break
 		}
 	}
+	if !complete {
+		fmt.Printf("[PeachBitcoin] pagination incomplete after %d pages\n", peachSearchMaxPages)
+	}
+	return peachResult(allOffers, direction, currency, btcPrice, complete)
+}
 
+func peachResult(all []peachOffer, direction, currency string, btcPrice int, complete bool) *fetchResult {
+	if !complete && len(all) == 0 {
+		return nil
+	}
 	var offers []offer
-	for _, o := range allOffers {
+	for _, o := range all {
 		mapped, ok := mapPeachOfferCurrency(o, direction, currency, btcPrice)
 		if !ok {
 			continue
 		}
 		offers = append(offers, mapped)
 	}
-
 	fmt.Printf("[PeachBitcoin] Found %d %s offers\n", len(offers), direction)
-	return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
+	if complete {
+		return completeFetch(float64(btcPrice), offers)
+	}
+	return incompleteFetch(float64(btcPrice), offers)
 }
 
 func fetchRobosatsCurrency(direction, currency string, btcPrice int) *fetchResult {
@@ -892,120 +960,137 @@ func fetchRobosatsCurrencyFrom(direction, currency string, btcPrice int, client 
 		offerType = 0
 	}
 
+	byID := make(map[string]offer)
+	okCount := 0
+	failCount := 0
 	for _, onion := range coordinators {
 		reqURL := fmt.Sprintf("%s/api/book/?currency=%d&type=%d", onion, currencyID, offerType)
 		resp, err := client.Get(reqURL)
 		if err != nil {
 			fmt.Printf("[Robosats] coordinator=%s request failed: %v, trying next...\n", onion, err)
+			failCount++
 			continue
 		}
 		body, readErr := readAllLimited(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
 			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=read_error: %v, trying next...\n", onion, resp.StatusCode, readErr)
+			failCount++
 			continue
 		}
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=http_error, trying next...\n", onion, resp.StatusCode)
+			failCount++
 			continue
 		}
 
 		rawOffers, responseType, err := decodeRobosatsBook(body)
 		if err != nil {
 			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=%s: %v, trying next...\n", onion, resp.StatusCode, responseType, err)
+			failCount++
 			continue
 		}
 
-		var offers []offer
-		for _, raw := range rawOffers {
-			var s string
-			if json.Unmarshal(raw, &s) == nil && s == "not_found" {
-				break
-			}
-
-			var line struct {
-				ID            json.Number  `json:"id"`
-				Price         json.Number  `json:"price"`
-				Premium       json.Number  `json:"premium"`
-				Amount        *json.Number `json:"amount"`
-				MinAmount     json.Number  `json:"min_amount"`
-				MaxAmount     json.Number  `json:"max_amount"`
-				PaymentMethod string       `json:"payment_method"`
-				// BondSize is the maker's bond as a percent (e.g. 3.0 for 3%);
-				// it applies symmetrically to the taker.
-				BondSize json.Number `json:"bond_size"`
-			}
-			if err := json.Unmarshal(raw, &line); err != nil {
+		offers := parseRobosatsOffers(rawOffers, currency, btcPrice)
+		for _, o := range offers {
+			if o.OfferID == "" {
 				continue
 			}
-
-			price, err := line.Price.Float64()
-			if err != nil {
-				continue
-			}
-			// RoboSats sometimes returns price=0 with only a premium percentage.
-			// Derive absolute price from the reference BTC price in that case.
-			pt := priceTypeFixed()
-			if price == 0 {
-				premium, _ := line.Premium.Float64()
-				if premium == 0 || btcPrice == 0 {
-					continue
-				}
-				price = float64(btcPrice) * (1 + premium/100)
-				pt = priceTypeFloating()
-			}
-
-			var fiatMin, fiatMax int
-			if line.Amount != nil {
-				v, _ := line.Amount.Float64()
-				fiatMin = int(v)
-				fiatMax = int(v)
-			} else {
-				minV, _ := line.MinAmount.Float64()
-				maxV, _ := line.MaxAmount.Float64()
-				fiatMin = int(minV)
-				fiatMax = int(maxV)
-			}
-
-			btcMin := round8(float64(fiatMin) / price)
-			btcMax := round8(float64(fiatMax) / price)
-
-			// bond_size is a percent, not an absolute amount; derive the BTC
-			// figure from the trade size since the book listing carries no
-			// sats value (the order-detail endpoint does, but fetching it
-			// per-order would mean N+1 calls per snapshot cycle over Tor).
-			bondPct, _ := line.BondSize.Float64()
-			depositPct := bondPct / 100
-			depositBTC := round8(depositPct * btcMax)
-
-			newOffer := offer{
-				OfferID:            line.ID.String(),
-				FiatCurrency:       currency,
-				Price:              price,
-				BTCMin:             &btcMin,
-				BTCMax:             &btcMax,
-				FiatMin:            &fiatMin,
-				FiatMax:            &fiatMax,
-				PaymentMethods:     []string{line.PaymentMethod},
-				PriceType:          pt,
-				SecurityDepositBTC: &depositBTC,
-				SecurityDepositPct: &depositPct,
-			}
-			// RoboSats has no persistent maker identity or peer feedback by
-			// design — the fidelity bond the maker locks is the only trust
-			// signal, so we use the bond percentage as a stake-based proxy over
-			// its documented ~2-15% range.
-			bondRaw, _ := json.Marshal(map[string]any{"bond_size_pct": bondPct})
-			applyRating(&newOffer, sellerrating.NormalizeStakeBond(bondPct, robosatsBondMinPct, robosatsBondMaxPct, bondRaw))
-			offers = append(offers, newOffer)
+			byID[o.OfferID] = o
 		}
-
+		okCount++
 		fmt.Printf("[Robosats] Found %d %s offers (coordinator=%s status=%d response_type=%s)\n", len(offers), direction, onion, resp.StatusCode, responseType)
-		return &fetchResult{BTCPrice: float64(btcPrice), Offers: offers}
 	}
 
-	fmt.Println("[Robosats] All onion addresses failed")
-	return nil
+	if okCount == 0 {
+		fmt.Println("[Robosats] All onion addresses failed")
+		return nil
+	}
+
+	offers := make([]offer, 0, len(byID))
+	for _, o := range byID {
+		offers = append(offers, o)
+	}
+	sort.Slice(offers, func(i, j int) bool { return offers[i].OfferID < offers[j].OfferID })
+	if failCount > 0 {
+		return incompleteFetch(float64(btcPrice), offers)
+	}
+	return completeFetch(float64(btcPrice), offers)
+}
+
+func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice int) []offer {
+	var offers []offer
+	for _, raw := range rawOffers {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s == "not_found" {
+			break
+		}
+
+		var line struct {
+			ID            json.Number  `json:"id"`
+			Price         json.Number  `json:"price"`
+			Premium       json.Number  `json:"premium"`
+			Amount        *json.Number `json:"amount"`
+			MinAmount     json.Number  `json:"min_amount"`
+			MaxAmount     json.Number  `json:"max_amount"`
+			PaymentMethod string       `json:"payment_method"`
+			BondSize      json.Number  `json:"bond_size"`
+		}
+		if err := json.Unmarshal(raw, &line); err != nil {
+			continue
+		}
+
+		price, err := line.Price.Float64()
+		if err != nil {
+			continue
+		}
+		pt := priceTypeFixed()
+		if price == 0 {
+			premium, _ := line.Premium.Float64()
+			if premium == 0 || btcPrice == 0 {
+				continue
+			}
+			price = float64(btcPrice) * (1 + premium/100)
+			pt = priceTypeFloating()
+		}
+
+		var fiatMin, fiatMax int
+		if line.Amount != nil {
+			v, _ := line.Amount.Float64()
+			fiatMin = int(v)
+			fiatMax = int(v)
+		} else {
+			minV, _ := line.MinAmount.Float64()
+			maxV, _ := line.MaxAmount.Float64()
+			fiatMin = int(minV)
+			fiatMax = int(maxV)
+		}
+
+		btcMin := round8(float64(fiatMin) / price)
+		btcMax := round8(float64(fiatMax) / price)
+
+		bondPct, _ := line.BondSize.Float64()
+		depositPct := bondPct / 100
+		depositBTC := round8(depositPct * btcMax)
+
+		newOffer := offer{
+			OfferID:            line.ID.String(),
+			FiatCurrency:       currency,
+			Price:              price,
+			BTCMin:             &btcMin,
+			BTCMax:             &btcMax,
+			FiatMin:            &fiatMin,
+			FiatMax:            &fiatMax,
+			PaymentMethods:     []string{line.PaymentMethod},
+			PriceType:          pt,
+			SecurityDepositBTC: &depositBTC,
+			SecurityDepositPct: &depositPct,
+		}
+		bondRaw, _ := json.Marshal(map[string]any{"bond_size_pct": bondPct})
+		applyRating(&newOffer, sellerrating.NormalizeStakeBond(bondPct, robosatsBondMinPct, robosatsBondMaxPct, bondRaw))
+		offers = append(offers, newOffer)
+	}
+	return offers
 }
 
 // --- Database ---
@@ -1292,22 +1377,24 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				security_deposit_pct = ?,
 				seller_rating_score = ?,
 				seller_rating_confidence = ?,
-				seller_rating_raw = ?::jsonb
+				seller_rating_raw = ?::jsonb,
+				maker_id = COALESCE(?, maker_id)
 				WHERE id = ?
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
 				o.SecurityDepositBTC, o.SecurityDepositPct,
-				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw), existingID,
+				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
+				nilIfEmpty(o.MakerID), existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		} else {
 			upsertErr = tx.QueryRow(`INSERT INTO offers
 				(exchange, fiat_currency, direction, btc_min, btc_max,
 				 fiat_min, fiat_max, payment_methods, offer_id, price_type, price,
 				 security_deposit_btc, security_deposit_pct,
-				 seller_rating_score, seller_rating_confidence, seller_rating_raw)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+				 seller_rating_score, seller_rating_confidence, seller_rating_raw, maker_id)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
@@ -1315,6 +1402,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
+				nilIfEmpty(o.MakerID),
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		}
 		if upsertErr != nil {
@@ -1416,12 +1504,18 @@ const clearLiveOfferClosureFields = `
 		avg_min_btc_amount = NULL,
 		min_volume_analyzed = FALSE`
 
-// reconcileLiveOfferStatus updates live state from persisted market snapshots.
-// Only a successfully fetched and committed market can immediately close offers
-// missing from it. Markets that could not be fetched retain their last known
-// offers until the stale grace expires.
+// reconcileLiveOfferStatus updates live state from persisted market snapshots
+// in a single transaction. Only a Complete committed market can immediately
+// close offers missing from it. Incomplete and Failed markets keep their last
+// known offers until no Complete observation falls inside stale grace.
 func reconcileLiveOfferStatus(sdb *dbutil.DB, snapshotStart time.Time, confirmed map[liveMarket]struct{}, staleGrace time.Duration) error {
-	if _, err := sdb.Exec(`UPDATE offers SET
+	tx, err := sdb.Begin()
+	if err != nil {
+		return fmt.Errorf("begin live-status reconcile: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE offers SET
 		is_live = TRUE,
 		duration = NULL,`+clearLiveOfferClosureFields+`
 		WHERE last_seen >= ?`, snapshotStart); err != nil {
@@ -1429,7 +1523,14 @@ func reconcileLiveOfferStatus(sdb *dbutil.DB, snapshotStart time.Time, confirmed
 	}
 
 	for market := range confirmed {
-		if _, err := sdb.Exec(`UPDATE offers SET
+		if _, err := tx.Exec(`INSERT INTO live_market_observation (exchange, fiat_currency, direction, last_complete_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (exchange, fiat_currency, direction)
+			DO UPDATE SET last_complete_at = EXCLUDED.last_complete_at`,
+			market.exchange, market.fiat, market.direction, snapshotStart); err != nil {
+			return fmt.Errorf("record complete observation for %s/%s/%s: %w", market.exchange, market.fiat, market.direction, err)
+		}
+		if _, err := tx.Exec(`UPDATE offers SET
 			is_live = FALSE,
 			duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
 			WHERE is_live = TRUE
@@ -1441,11 +1542,22 @@ func reconcileLiveOfferStatus(sdb *dbutil.DB, snapshotStart time.Time, confirmed
 	}
 
 	staleCutoff := snapshotStart.Add(-staleGrace)
-	if _, err := sdb.Exec(`UPDATE offers SET
+	if _, err := tx.Exec(`UPDATE offers o SET
 		is_live = FALSE,
-		duration = EXTRACT(EPOCH FROM (last_seen - first_seen))::BIGINT
-		WHERE is_live = TRUE AND last_seen < ?`, staleCutoff); err != nil {
+		duration = EXTRACT(EPOCH FROM (o.last_seen - o.first_seen))::BIGINT
+		WHERE o.is_live = TRUE
+		  AND o.last_seen < ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM live_market_observation m
+			WHERE m.exchange = o.exchange
+			  AND m.fiat_currency = o.fiat_currency
+			  AND m.direction = o.direction
+			  AND m.last_complete_at >= ?
+		  )`, staleCutoff, staleCutoff); err != nil {
 		return fmt.Errorf("expire stale live offers: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit live-status reconcile: %w", err)
 	}
 	return nil
 }
@@ -1455,12 +1567,53 @@ func reconcileLiveOfferStatus(sdb *dbutil.DB, snapshotStart time.Time, confirmed
 // worker exits after each run, so these land in snapshot_log and are exposed
 // as gauges by unified-api's dbmetrics collector instead of local counters.
 type fetchTimings struct {
-	durationMS map[string]int64
-	failures   map[string]int
+	durationMS   map[string]int64
+	failures     map[string]int
+	statusCounts map[string]*exchangeStatusCounts
+}
+
+type exchangeStatusCounts struct {
+	complete   int
+	incomplete int
+	failed     int
 }
 
 func newFetchTimings() *fetchTimings {
-	return &fetchTimings{durationMS: make(map[string]int64), failures: make(map[string]int)}
+	return &fetchTimings{
+		durationMS:   make(map[string]int64),
+		failures:     make(map[string]int),
+		statusCounts: make(map[string]*exchangeStatusCounts),
+	}
+}
+
+func (t *fetchTimings) addStatus(exchange string, status fetchStatus) {
+	counts := t.statusCounts[exchange]
+	if counts == nil {
+		counts = &exchangeStatusCounts{}
+		t.statusCounts[exchange] = counts
+	}
+	switch status {
+	case fetchStatusComplete:
+		counts.complete++
+	case fetchStatusIncomplete:
+		counts.incomplete++
+	default:
+		counts.failed++
+	}
+}
+
+func (t *fetchTimings) captureStatus(exchange string) fetchStatus {
+	counts := t.statusCounts[exchange]
+	if counts == nil {
+		return fetchStatusComplete
+	}
+	if counts.failed > 0 && counts.complete == 0 && counts.incomplete == 0 {
+		return fetchStatusFailed
+	}
+	if counts.incomplete > 0 || counts.failed > 0 {
+		return fetchStatusIncomplete
+	}
+	return fetchStatusComplete
 }
 
 func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string, timings *fetchTimings) ([]byte, int, error) {
@@ -1476,6 +1629,7 @@ func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string
 			"count":       len(ids),
 			"ids":         idList,
 			"duration_ms": timings.durationMS[ex],
+			"status":      string(timings.captureStatus(ex)),
 		}
 		total += len(ids)
 	}
@@ -1489,6 +1643,7 @@ func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string
 				"count":       0,
 				"ids":         []string{},
 				"offline":     true,
+				"status":      string(fetchStatusFailed),
 				"duration_ms": timings.durationMS[ex],
 			}
 		}
@@ -1646,8 +1801,10 @@ func main() {
 					fetchStart := time.Now()
 					result := f.fn(direction, currency, refPrice)
 					timings.durationMS[f.name] += time.Since(fetchStart).Milliseconds()
-					if result == nil {
+					status := result.status()
+					if status == fetchStatusFailed {
 						timings.failures[f.name]++
+						timings.addStatus(f.name, fetchStatusFailed)
 						continue
 					}
 					market := liveMarket{exchange: f.name, fiat: currency, direction: direction}
@@ -1657,26 +1814,30 @@ func main() {
 						slog.InfoContext(ctx, "dust offers filtered", "exchange", f.name, "direction", direction, "dropped", dropped)
 					}
 					if !recordFetchResult(exchangeData, f.name, result) {
+						timings.addStatus(f.name, fetchStatusFailed)
 						continue
 					}
-					// A decoded empty response is a successful, authoritative snapshot:
-					// it proves this market is empty. Non-empty responses need a
-					// committed DB transaction before they get the same authority.
+					confirm := false
 					if len(result.Offers) == 0 {
+						confirm = status == fetchStatusComplete
+					} else {
+						price := result.BTCPrice
+						if price == 0 {
+							price = float64(refPrice)
+						}
+						persisted, ok := saveSnapshotPersisted(sdb, f.name, currency, direction, price, result.Offers)
+						if !ok {
+							slog.WarnContext(ctx, "market snapshot was not persisted; retaining prior live offers", "exchange", f.name, "fiat", currency, "direction", direction)
+							status = fetchStatusIncomplete
+						} else {
+							liveOffers = append(liveOffers, persisted...)
+							confirm = status == fetchStatusComplete
+						}
+					}
+					timings.addStatus(f.name, status)
+					if confirm {
 						confirmedMarkets[market] = struct{}{}
-						continue
 					}
-					price := result.BTCPrice
-					if price == 0 {
-						price = float64(refPrice)
-					}
-					persisted, ok := saveSnapshotPersisted(sdb, f.name, currency, direction, price, result.Offers)
-					if !ok {
-						slog.WarnContext(ctx, "market snapshot was not persisted; retaining prior live offers", "exchange", f.name, "fiat", currency, "direction", direction)
-						continue
-					}
-					liveOffers = append(liveOffers, persisted...)
-					confirmedMarkets[market] = struct{}{}
 				}
 			}
 
@@ -1705,9 +1866,9 @@ func main() {
 	// with cost fields when it processes the push below.
 	stage(ctx, "snapshot.write_baseline_lifecycle", func() { writeBaselineLifecycle(sdb, liveOffers, refPrices) })
 
-	// Push live offers directly to the server's in-memory hub. ctx carries the
-	// trace context so the POST continues this run's trace into unified-api.
-	pushLiveOffersToServer(ctx, liveOffers, serverURL)
+	// Ask the API to reload the live hub from Postgres. Membership is is_live,
+	// not this POST body; the body is only a refresh trigger.
+	pushLiveRefreshToServer(ctx, serverURL)
 
 	// Settle closed offers: compute avg_ref_price from historical OHLC.
 	// Keep this after the live push so the server can persist the latest
@@ -1896,26 +2057,16 @@ func writeBaselineLifecycle(sdb *dbutil.DB, offers []livePayload, refPrices map[
 	fmt.Printf("[Lifecycle] wrote %d baseline rows\n", len(baselines))
 }
 
-// pushLiveOffersToServer posts the freshly fetched live offers to the server's
-// /internal/live_offers endpoint so the hub can serve them from memory without
-// any DB reads.
-func pushLiveOffersToServer(ctx context.Context, offers []livePayload, serverURL string) {
-	body, err := json.Marshal(offers)
-	if err != nil {
-		slog.ErrorContext(ctx, "live push: marshal error", "err", err)
-		return
-	}
-
-	// NewRequestWithContext + the traced client propagate this run's trace into
-	// unified-api, so the snapshot run and the resulting ingest are one trace.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL+"/internal/live_offers", strings.NewReader(string(body)))
+// pushLiveRefreshToServer tells the unified-api to reload the live hub from
+// Postgres after this run's persist and reconcile. The POST body is not the
+// live book; membership is WHERE is_live = TRUE.
+func pushLiveRefreshToServer(ctx context.Context, serverURL string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL+"/internal/live_offers", strings.NewReader(`{}`))
 	if err != nil {
 		slog.ErrorContext(ctx, "live push: request build failed (non-fatal)", "err", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// Authenticate the internal ingest call when a shared secret is configured;
-	// the server enforces it via X-Internal-Secret. Empty secret = open (dev).
 	if secret := strings.TrimSpace(os.Getenv("INTERNAL_API_SECRET")); secret != "" {
 		req.Header.Set("X-Internal-Secret", secret)
 	}
@@ -1932,7 +2083,7 @@ func pushLiveOffersToServer(ctx context.Context, offers []livePayload, serverURL
 	case resp.StatusCode >= 300:
 		slog.ErrorContext(ctx, "live push: server returned error status (lifecycle enrichment skipped this cycle)", "status", resp.StatusCode)
 	default:
-		slog.InfoContext(ctx, "live push: pushed live offers to server", "count", len(offers))
+		slog.InfoContext(ctx, "live push: requested live hub refresh from PostgreSQL")
 	}
 }
 

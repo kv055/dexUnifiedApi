@@ -138,3 +138,46 @@ func TestReconcileLiveOfferStatusExpiresFailedMarketAfterGrace(t *testing.T) {
 		t.Fatal("offer from failed market remained live after grace")
 	}
 }
+
+func TestReconcileLiveOfferStatusKeepsIncompleteAbsentsWithinCompleteGrace(t *testing.T) {
+	db := openLiveStatusDB(t)
+	snapshotStart := time.Now().UTC()
+	id := insertLiveOffer(t, db, "robosats", "EUR", "bid", snapshotStart.Add(-6*time.Minute))
+	if _, err := db.Exec(`
+		INSERT INTO live_market_observation (exchange, fiat_currency, direction, last_complete_at)
+		VALUES ('robosats', 'EUR', 'bid', ?)
+	`, snapshotStart.Add(-2*time.Minute)); err != nil {
+		t.Fatalf("insert complete observation: %v", err)
+	}
+
+	if err := reconcileLiveOfferStatus(db, snapshotStart, nil, 5*time.Minute); err != nil {
+		t.Fatalf("reconcile incomplete market: %v", err)
+	}
+	if !offerIsLive(t, db, id) {
+		t.Fatal("offer aged out while last complete observation was inside grace")
+	}
+}
+
+func TestReconcileLiveOfferStatusCompleteEmptyClosesAbsents(t *testing.T) {
+	db := openLiveStatusDB(t)
+	snapshotStart := time.Now().UTC()
+	id := insertLiveOffer(t, db, "peachbitcoin", "CHF", "ask", snapshotStart.Add(-time.Minute))
+	confirmed := map[liveMarket]struct{}{{exchange: "peachbitcoin", fiat: "CHF", direction: "ask"}: {}}
+
+	if err := reconcileLiveOfferStatus(db, snapshotStart, confirmed, 5*time.Minute); err != nil {
+		t.Fatalf("reconcile complete empty: %v", err)
+	}
+	if offerIsLive(t, db, id) {
+		t.Fatal("offer missing from a complete empty market remained live")
+	}
+	var lastComplete time.Time
+	if err := db.QueryRow(`
+		SELECT last_complete_at FROM live_market_observation
+		WHERE exchange = 'peachbitcoin' AND fiat_currency = 'CHF' AND direction = 'ask'
+	`).Scan(&lastComplete); err != nil {
+		t.Fatalf("select last complete: %v", err)
+	}
+	if lastComplete.UTC().Sub(snapshotStart) > time.Second || snapshotStart.Sub(lastComplete.UTC()) > time.Second {
+		t.Fatalf("last_complete_at = %s, want snapshotStart %s", lastComplete, snapshotStart)
+	}
+}
