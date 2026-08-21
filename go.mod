@@ -20,7 +20,12 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/alexedwards/scs/postgresstore v0.0.0-20251002162104-209de6e426de // indirect
 	github.com/alexedwards/scs/v2 v2.9.0 // indirect
+	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/binance/binance-connector-go/clients/derivativestradingusdsfutures v1.14.0 // indirect
+	github.com/binance/binance-connector-go/clients/spot v1.11.0 // indirect
+	github.com/binance/binance-connector-go/clients/wallet v1.11.0 // indirect
+	github.com/binance/binance-connector-go/common/v2 v2.6.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -43,6 +48,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect
 	github.com/jackc/puddle/v2 v2.2.1 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
+	github.com/krakenfx/api-go/v2 v2.0.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
@@ -68,6 +74,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.42.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
+	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.66.0 // indirect

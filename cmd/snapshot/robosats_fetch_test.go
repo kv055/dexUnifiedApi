@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -144,5 +148,89 @@ func TestFetchRobosatsNotFoundThenFailureIsIncomplete(t *testing.T) {
 	}
 	if len(result.Offers) != 0 {
 		t.Fatalf("offers = %d, want 0", len(result.Offers))
+	}
+}
+
+func TestFetchRobosatsFederationUsesOnlyValidFederatedMainnetOnions(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"temple": {"federated": true, "mainnet": {"onion": "http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion"}},
+			"bazaar": {"federated": true, "mainnet": {"onion": "http://librebazovfmmkyi2jekraxsuso3mh622avuuzqpejixdl5dhuhb4tid.onion"}},
+			"duplicate": {"federated": true, "mainnet": {"onion": "http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion"}},
+			"not-federated": {"federated": false, "mainnet": {"onion": "http://alice7bqexhtnkiqhtgkuwgtzzfkishw23ac4sfwpznrwlmnipxlomyd.onion"}},
+			"invalid": {"federated": true, "mainnet": {"onion": "https://example.com"}}
+		}`)
+	}))
+	defer server.Close()
+
+	onions, err := fetchRobosatsFederation(context.Background(), server.Client(), server.URL)
+	if err != nil {
+		t.Fatalf("fetchRobosatsFederation: %v", err)
+	}
+	want := "http://librebazovfmmkyi2jekraxsuso3mh622avuuzqpejixdl5dhuhb4tid.onion,http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion"
+	if got := strings.Join(onions, ","); got != want {
+		t.Fatalf("onions = %q, want %q", got, want)
+	}
+}
+
+func TestLoadRobosatsCoordinatorsFallsBackOnRegistryFailure(t *testing.T) {
+	fallback := []string{"http://fallbackaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("registry unavailable")
+	})}
+
+	got := loadRobosatsCoordinators(context.Background(), client, "https://registry.test/federation.json", filepath.Join(t.TempDir(), "federation.json"), time.Hour, fallback)
+	if strings.Join(got, ",") != strings.Join(fallback, ",") {
+		t.Fatalf("coordinators = %v, want fallback %v", got, fallback)
+	}
+	got[0] = "changed"
+	if fallback[0] == "changed" {
+		t.Fatal("fallback slice was not copied")
+	}
+}
+
+func TestLoadRobosatsCoordinatorsUsesFreshCacheWithoutRequest(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "federation.json")
+	cached := []string{"http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion"}
+	if err := writeRobosatsFederationCache(cachePath, robosatsFederationCache{FetchedAt: time.Now().UTC(), Onions: cached}); err != nil {
+		t.Fatalf("writeRobosatsFederationCache: %v", err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("fresh cache should not make a registry request")
+		return nil, nil
+	})}
+
+	got := loadRobosatsCoordinators(context.Background(), client, "https://registry.test/federation.json", cachePath, time.Hour, nil)
+	if strings.Join(got, ",") != strings.Join(cached, ",") {
+		t.Fatalf("coordinators = %v, want cache %v", got, cached)
+	}
+}
+
+func TestLoadRobosatsCoordinatorsRevalidatesStaleCacheWithETag(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "federation.json")
+	cached := []string{"http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion"}
+	if err := writeRobosatsFederationCache(cachePath, robosatsFederationCache{FetchedAt: time.Now().UTC().Add(-2 * time.Hour), ETag: `"old-etag"`, Onions: cached}); err != nil {
+		t.Fatalf("writeRobosatsFederationCache: %v", err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("If-None-Match"); got != `"old-etag"` {
+			t.Fatalf("If-None-Match = %q, want old ETag", got)
+		}
+		return jsonResponse(http.StatusNotModified, ""), nil
+	})}
+
+	got := loadRobosatsCoordinators(context.Background(), client, "https://registry.test/federation.json", cachePath, time.Hour, nil)
+	if strings.Join(got, ",") != strings.Join(cached, ",") {
+		t.Fatalf("coordinators = %v, want revalidated cache %v", got, cached)
+	}
+	refreshed, err := readRobosatsFederationCache(cachePath)
+	if err != nil || refreshed.FetchedAt.Before(time.Now().UTC().Add(-time.Minute)) {
+		t.Fatalf("cache was not refreshed: cache=%+v err=%v", refreshed, err)
+	}
+}
+
+func TestFetchRobosatsFederationRejectsInvalidRegistryURL(t *testing.T) {
+	if _, err := fetchRobosatsFederation(context.Background(), http.DefaultClient, "http://registry.test/federation.json"); err == nil {
+		t.Fatal("expected HTTP registry URL to be rejected")
 	}
 }
