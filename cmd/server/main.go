@@ -634,6 +634,7 @@ func buildCEXCapabilityExchange(ctx context.Context, state mmcapabilities.Provid
 	result := cexCapabilityExchange{ProviderState: state}
 	fees, err := cextrading.ReadPersistedFees(ctx, db.DB, state.Exchange)
 	if err != nil {
+		slog.ErrorContext(ctx, "CEX fee snapshot status unavailable", "exchange", state.Exchange, "err", err)
 		result.FeeSnapshot.LastError = "fee snapshot status is unavailable"
 		return result
 	}
