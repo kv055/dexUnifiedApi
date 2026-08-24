@@ -51,6 +51,45 @@ func TestHandleInternalPaymentNotificationsAcceptsValidPayload(t *testing.T) {
 	}
 }
 
+func TestRegisteredInternalPaymentNotificationsPassesResponseValidation(t *testing.T) {
+	oldService := paymentNotifications
+	oldSecret := paymentNotificationSecret
+	paymentNotifications = paymentnotifications.NewService(10)
+	paymentNotificationSecret = "secret"
+	t.Cleanup(func() {
+		paymentNotifications = oldService
+		paymentNotificationSecret = oldSecret
+	})
+
+	body, err := json.Marshal(paymentnotifications.Notification{
+		Amount:        12.5,
+		Currency:      "EUR",
+		Type:          paymentnotifications.Incoming,
+		TransactionID: "tx-validated",
+		DEX:           "Bisq",
+		Connector:     "paypal",
+		Timestamp:     time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	registerRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/internal/payment_notifications", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Webhook-Secret", "secret")
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("validated route status = %d, want %d (body=%s)", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("validated route content type = %q, want application/json", got)
+	}
+}
+
 func TestHandleInternalPaymentNotificationsRejectsInvalidPayload(t *testing.T) {
 	oldSecret := paymentNotificationSecret
 	paymentNotificationSecret = ""

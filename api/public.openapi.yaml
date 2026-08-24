@@ -1,0 +1,247 @@
+openapi: 3.1.0
+info:
+  title: dexUnifiedApi public API
+  version: 1.0.0
+  description: Externally or browser-facing contract. This handwritten specification is the source of truth.
+  contact:
+    name: dexArbTrading maintainers
+    url: https://github.com/kv055/dexArbTrading
+servers:
+  - url: http://localhost:5010
+tags:
+  - name: cex-permissions
+  - name: live-offers
+  - name: payment-notifications
+  - name: raw
+  - name: trade-cost-config
+paths:
+  /api/cex_permissions:
+    get:
+      operationId: getApiCexPermissions
+      tags:
+        - cex-permissions
+      summary: GET /api/cex_permissions
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /api/cex_permissions
+      security:
+        - dashboardSession: []
+  /api/cex_permissions/{provider}:
+    put:
+      operationId: putApiCexPermissionsProvider
+      tags:
+        - cex-permissions
+      summary: PUT /api/cex_permissions/{provider}
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: PUT /api/cex_permissions/{provider}
+      security:
+        - dashboardSession: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /api/live_offers:
+    get:
+      operationId: getApiLiveOffers
+      tags:
+        - live-offers
+      summary: GET /api/live_offers
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /api/live_offers
+      security:
+        - dashboardSession: []
+  /api/live_offers/{id}/lifecycle:
+    get:
+      operationId: getApiLiveOffersIdLifecycle
+      tags:
+        - live-offers
+      summary: GET /api/live_offers/{id}/lifecycle
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /api/live_offers/{id}/lifecycle
+      security:
+        - dashboardSession: []
+  /api/payment_notifications:
+    get:
+      operationId: getApiPaymentNotifications
+      tags:
+        - payment-notifications
+      summary: GET /api/payment_notifications
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /api/payment_notifications
+      security:
+        - dashboardSession: []
+  /api/trade_cost_config:
+    get:
+      operationId: getApiTradeCostConfig
+      tags:
+        - trade-cost-config
+      summary: GET /api/trade_cost_config
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /api/trade_cost_config
+      security:
+        - dashboardSession: []
+  /ws/live_offers:
+    get:
+      operationId: getWsLiveOffers
+      tags:
+        - raw
+      summary: GET /ws/live_offers
+      responses:
+        "101":
+          description: WebSocket protocol upgrade
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /ws/live_offers
+      security:
+        - dashboardSession: []
+      x-raw-reason: WebSocket upgrade and frame streaming require the raw response writer.
+components:
+  securitySchemes:
+    dashboardSession:
+      type: apiKey
+      in: cookie
+      name: dex_session
+    internalSecret:
+      type: apiKey
+      in: header
+      name: X-Internal-Secret
+    webhookSecret:
+      type: apiKey
+      in: header
+      name: X-Webhook-Secret
+    bearerWebhook:
+      type: http
+      scheme: bearer
+    telegramSecret:
+      type: apiKey
+      in: header
+      name: X-Telegram-Bot-Api-Secret-Token
+  schemas:
+    APIError:
+      $ref: ../../commons/api/openapi/APIError.yaml
+    Health:
+      $ref: ../../commons/api/openapi/Health.yaml

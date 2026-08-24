@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -814,13 +815,18 @@ func TestInternalLiveOffersWSGate(t *testing.T) {
 	oldSecret := internalAPISecret
 	oldHub := hub
 	internalAPISecret = "topsecret"
-	hub = &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	testHub := &LiveHub{subscribers: map[chan []byte]liveSubscription{}}
+	hub = testHub
 	t.Cleanup(func() {
 		internalAPISecret = oldSecret
 		hub = oldHub
 	})
 
-	handler := internalSecretGate(http.HandlerFunc(handleLiveOffersWS))
+	handlerDone := make(chan struct{})
+	handler := internalSecretGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		handleLiveOffersWS(w, r)
+	}))
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/internal/ws/live_offers"
@@ -855,6 +861,15 @@ func TestInternalLiveOffersWSGate(t *testing.T) {
 		t.Fatalf("correct secret: status = %d, want %d", resp.StatusCode, http.StatusSwitchingProtocols)
 	}
 	conn.Close()
+
+	// Wait for the upgraded handler itself to return before cleanup restores
+	// globals. Subscriber-count polling can observe the initial zero value and
+	// return before the handler has even registered its subscription.
+	select {
+	case <-handlerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WebSocket handler did not return after connection close")
+	}
 }
 
 func respStatus(resp *http.Response) int {

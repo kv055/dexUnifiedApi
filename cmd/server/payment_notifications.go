@@ -39,6 +39,7 @@ func handleInternalPaymentNotifications(w http.ResponseWriter, r *http.Request) 
 		stored.Event.DEX,
 	)
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, map[string]any{
 		"accepted":    true,

@@ -1243,6 +1243,10 @@ func handleLiveOfferLifecycleREST(w http.ResponseWriter, r *http.Request) {
 // Routing query parameters are intentionally ignored; only fiat filtering is
 // client-controlled.
 func handleLiveOffersWS(w http.ResponseWriter, r *http.Request) {
+	// Capture the hub before the upgrade so the handler stays on one hub
+	// even if tests swap the global between connection setup and teardown.
+	liveHub := hub
+
 	sub := liveSubscription{
 		cex:  queryCex(r),
 		fiat: queryFiat(r),
@@ -1255,8 +1259,8 @@ func handleLiveOffersWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	ch := hub.subscribe(sub)
-	defer hub.unsubscribe(ch)
+	ch := liveHub.subscribe(sub)
+	defer liveHub.unsubscribe(ch)
 
 	// Respond to pings so the browser doesn't drop the connection.
 	ws.SetPongHandler(func(string) error {
@@ -1276,7 +1280,7 @@ func handleLiveOffersWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Send current state immediately on connect.
-	if payload := hub.computePayload(getCexPrice(sub.cex), sub); payload != nil {
+	if payload := liveHub.computePayload(getCexPrice(sub.cex), sub); payload != nil {
 		if err := ws.WriteMessage(websocket.TextMessage, payload); err != nil {
 			return
 		}

@@ -1,0 +1,235 @@
+openapi: 3.1.0
+info:
+  title: dexUnifiedApi internal API
+  version: 1.0.0
+  description: Private service and operational contract. This handwritten specification is the source of truth.
+  contact:
+    name: dexArbTrading maintainers
+    url: https://github.com/kv055/dexArbTrading
+servers:
+  - url: http://localhost:5010
+tags:
+  - name: accounts
+  - name: cex-permissions
+  - name: health
+  - name: live-offers
+  - name: payment-notifications
+  - name: raw
+paths:
+  /api/accounts/health_check:
+    post:
+      operationId: postApiAccountsHealthCheck
+      tags:
+        - accounts
+      summary: POST /api/accounts/health_check
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: POST /api/accounts/health_check
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /health:
+    get:
+      operationId: getHealth
+      tags:
+        - health
+      summary: GET /health
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: Core database tables are not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /health
+      security: []
+  /internal/cex_permissions:
+    get:
+      operationId: getInternalCexPermissions
+      tags:
+        - cex-permissions
+      summary: GET /internal/cex_permissions
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /internal/cex_permissions
+      security:
+        - internalSecret: []
+  /internal/live_offers:
+    post:
+      operationId: postInternalLiveOffers
+      tags:
+        - live-offers
+      summary: POST /internal/live_offers
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "204":
+          description: Live-offer refresh accepted with no response body
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: POST /internal/live_offers
+      security:
+        - internalSecret: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /internal/payment_notifications:
+    post:
+      operationId: postInternalPaymentNotifications
+      tags:
+        - payment-notifications
+      summary: POST /internal/payment_notifications
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "202":
+          description: Payment notification accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: POST /internal/payment_notifications
+      security:
+        - internalSecret: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+  /internal/ws/live_offers:
+    get:
+      operationId: getInternalWsLiveOffers
+      tags:
+        - raw
+      summary: GET /internal/ws/live_offers
+      responses:
+        "101":
+          description: WebSocket protocol upgrade
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: GET /internal/ws/live_offers
+      security:
+        - internalSecret: []
+      x-raw-reason: Internal WebSocket upgrade and frame streaming require the raw response writer.
+components:
+  securitySchemes:
+    dashboardSession:
+      type: apiKey
+      in: cookie
+      name: dex_session
+    internalSecret:
+      type: apiKey
+      in: header
+      name: X-Internal-Secret
+    webhookSecret:
+      type: apiKey
+      in: header
+      name: X-Webhook-Secret
+    bearerWebhook:
+      type: http
+      scheme: bearer
+    telegramSecret:
+      type: apiKey
+      in: header
+      name: X-Telegram-Bot-Api-Secret-Token
+  schemas:
+    APIError:
+      $ref: ../../commons/api/openapi/APIError.yaml
+    Health:
+      $ref: ../../commons/api/openapi/Health.yaml

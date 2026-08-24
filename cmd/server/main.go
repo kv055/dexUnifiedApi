@@ -897,6 +897,7 @@ func handleAccountHealthCheck(w http.ResponseWriter, r *http.Request) {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !coreTablesReady() {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		writeJSON(w, map[string]string{
 			"status":    "starting",
