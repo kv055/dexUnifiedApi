@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -34,6 +35,44 @@ func TestRegisterRoutes(t *testing.T) {
 			_, got := mux.Handler(req)
 			if got != tt.pattern {
 				t.Fatalf("matched pattern %q, want %q", got, tt.pattern)
+			}
+		})
+	}
+}
+
+// TestOpenAPIRegisteredLiveOfferResponses exercises the established handlers
+// through the generated strict router. Handler-only tests cannot catch a valid
+// response whose top-level JSON shape disagrees with the OpenAPI contract.
+func TestOpenAPIRegisteredLiveOfferResponses(t *testing.T) {
+	previousHub := hub
+	t.Cleanup(func() { hub = previousHub })
+	hub = &LiveHub{
+		lifecycle:   map[int64][]LifecyclePoint{},
+		subscribers: map[chan []byte]liveSubscription{},
+	}
+
+	mux := http.NewServeMux()
+	registerRoutes(mux)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "live offers", path: "/api/live_offers?cex=kraken&fiat=EUR"},
+		{name: "offer lifecycle", path: "/api/live_offers/42/lifecycle"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("registered route status = %d, want %d (body=%s)", response.Code, http.StatusOK, response.Body.String())
+			}
+			var payload []json.RawMessage
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("registered route response is not a JSON array: %v (body=%s)", err, response.Body.String())
 			}
 		})
 	}

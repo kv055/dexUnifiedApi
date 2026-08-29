@@ -34,7 +34,7 @@ func TestSharedServiceSchemaContract(t *testing.T) {
 			"sources", "currencies", "popularity",
 		},
 		"transactions": {
-			"id", "direction", "fiat_amount", "fiat_currency", "cex", "dex", "status", "payment_method",
+			"id", "direction", "fiat_amount", "fiat_currency", "cex", "dex", "status", "status_reason", "payment_method",
 			"dex_offer_id", "dex_offer_db_id", "dex_fiat_arrival", "transaction_complete",
 			"created_at", "updated_at", "deleted_at",
 		},

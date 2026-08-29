@@ -9,24 +9,41 @@ import (
 	"testing"
 )
 
-func TestLegacyStrictServerRejectsContractViolation(t *testing.T) {
-	server, err := newLegacyStrictServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("null"))
-	}))
-	if err != nil {
-		t.Fatalf("newLegacyStrictServer() error = %v", err)
+func TestLegacyStrictServerRejectsContractViolationForEveryJSONSuccess(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{name: "getApiCexPermissions", method: "GET", path: "/api/cex_permissions", status: 200},
+		{name: "putApiCexPermissionsProvider", method: "PUT", path: "/api/cex_permissions/1", status: 200},
+		{name: "getApiLiveOffers", method: "GET", path: "/api/live_offers", status: 200},
+		{name: "getApiLiveOffersIdLifecycle", method: "GET", path: "/api/live_offers/1/lifecycle", status: 200},
+		{name: "getApiPaymentNotifications", method: "GET", path: "/api/payment_notifications", status: 200},
+		{name: "getApiTradeCostConfig", method: "GET", path: "/api/trade_cost_config", status: 200},
 	}
-	request := httptest.NewRequest("GET", "/api/cex_permissions", nil)
-	response := httptest.NewRecorder()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, err := newLegacyStrictServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte("null"))
+			}))
+			if err != nil {
+				t.Fatalf("newLegacyStrictServer() error = %v", err)
+			}
+			request := httptest.NewRequest(test.method, test.path, nil)
+			response := httptest.NewRecorder()
 
-	err = server.serveLegacy(response, &legacyRequest{request: request})
-	if err == nil || !strings.Contains(err.Error(), "violates generated OpenAPI contract") {
-		t.Fatalf("serveLegacy() error = %v, want contract violation", err)
-	}
-	if response.Body.Len() != 0 || response.Header().Get("Content-Type") != "" {
-		t.Fatalf("invalid response leaked to client: headers = %v, body = %q", response.Header(), response.Body.String())
+			err = server.serveLegacy(response, &legacyRequest{request: request})
+			if err == nil || !strings.Contains(err.Error(), "violates generated OpenAPI contract") {
+				t.Fatalf("serveLegacy() error = %v, want contract violation", err)
+			}
+			if response.Body.Len() != 0 || response.Header().Get("Content-Type") != "" {
+				t.Fatalf("invalid response leaked to client: headers = %v, body = %q", response.Header(), response.Body.String())
+			}
+		})
 	}
 }
 

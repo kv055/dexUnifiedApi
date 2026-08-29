@@ -94,8 +94,9 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                type: array
+                items:
+                  $ref: "#/components/schemas/LiveOffer"
         default:
           description: Error response
           content:
@@ -127,8 +128,9 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                type: array
+                items:
+                  $ref: "#/components/schemas/LifecyclePoint"
         default:
           description: Error response
           content:
@@ -241,6 +243,30 @@ components:
       in: header
       name: X-Telegram-Bot-Api-Secret-Token
   schemas:
+    LiveOffer:
+      description: Enriched live DEX offer returned by the unified routing book.
+      type: object
+      additionalProperties: true
+      required:
+        - id
+        - exchange
+        - direction
+        - payment_methods
+    LifecyclePoint:
+      type: object
+      additionalProperties: false
+      required:
+        - time
+        - price
+      properties:
+        time:
+          type: string
+        price:
+          type: number
+        net_premium_pct:
+          type:
+            - number
+            - "null"
     APIError:
       $ref: ../../commons/api/openapi/APIError.yaml
     Health:

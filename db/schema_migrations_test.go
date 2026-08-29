@@ -284,3 +284,64 @@ func TestEnsureUnifiedSchemaRepairsLegacyVarcharDirections(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureUnifiedSchemaCanonicalizesTransactionStatuses(t *testing.T) {
+	db := testdb.OpenUninitialized(t)
+	if _, err := db.Exec(`
+		CREATE TABLE transactions (
+			id BIGSERIAL PRIMARY KEY,
+			status VARCHAR(32),
+			transaction_complete BOOLEAN NOT NULL DEFAULT FALSE,
+			CONSTRAINT transactions_status_check CHECK (
+				status IS NULL OR status IN (
+					'FiatToCexInitiated', 'FiatToCexArrived',
+					'CexTradeSucessfull', 'DexPositionOpen'
+				)
+			)
+		);
+		INSERT INTO transactions (status) VALUES
+			(NULL), ('FiatToCexInitiated'), ('FiatToCexArrived'),
+			('CexTradeSucessfull'), ('DexPositionOpen');
+	`); err != nil {
+		t.Fatalf("create legacy transaction statuses: %v", err)
+	}
+	markExistingSchemaFilesApplied(t, db)
+	markExistingMigrationFilesAppliedExcept(t, db, "20260829210000_transaction_status_contract.sql")
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("apply transaction status migration: %v", err)
+	}
+
+	rows, err := db.Query(`SELECT status, COALESCE(status_reason, '') FROM transactions ORDER BY id`)
+	if err != nil {
+		t.Fatalf("read migrated transaction statuses: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var status, reason string
+		if err := rows.Scan(&status, &reason); err != nil {
+			t.Fatalf("scan migrated transaction status: %v", err)
+		}
+		got = append(got, status+"|"+reason)
+	}
+	want := []string{
+		"TransactionNeedsReview|Migrated from legacy NULL transaction status",
+		"TransactionNeedsReview|Migrated from legacy transaction status FiatToCexInitiated",
+		"TransactionNeedsReview|Migrated from legacy transaction status FiatToCexArrived",
+		"CexTradeSuccessful|",
+		"DexPositionTaken|",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("migrated statuses:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if _, err := db.Exec(`INSERT INTO transactions (status) VALUES ('HedgelessPreparationFailed'), ('LiquidityPreparationNeedsReview')`); err != nil {
+		t.Fatalf("canonical review statuses rejected: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO transactions (status) VALUES ('DexPositionOpen')`); err == nil {
+		t.Fatal("removed DexPositionOpen status was accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO transactions (status) VALUES (NULL)`); err == nil {
+		t.Fatal("NULL transaction status was accepted")
+	}
+}
