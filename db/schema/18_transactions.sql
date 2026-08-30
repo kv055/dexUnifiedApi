@@ -6,8 +6,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     cex cex_provider,
     cex_hedging_position cex_provider,
     dex dex_provider,
-    status VARCHAR(32) NOT NULL,
-    status_reason TEXT,
+    status VARCHAR(32),
     payment_method TEXT,
     trade_mode transaction_trade_mode,
     btc_pool_target_btc DOUBLE PRECISION CHECK (btc_pool_target_btc IS NULL OR btc_pool_target_btc >= 0),
@@ -48,15 +47,14 @@ CREATE TABLE IF NOT EXISTS transactions (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMPTZ,
     CONSTRAINT transactions_status_check CHECK (
-        status IN (
-            'TransactionNeedsReview',
+        status IS NULL OR status IN (
+            'FiatToCexInitiated', 'FiatToCexArrived',
             'CexTradeflowStarted', 'HedgeFailedNeedsReview', 'CexTradeflowNeedsReview',
-            'HedgelessTradeStarted', 'HedgelessPreparationFailed',
-            'LiquidityPreparationNeedsReview', 'HedgelessFundingInitiated',
-            'HedgelessFundingNeedsReview', 'DexTakenFundingNeedsReview',
-            'CexTradeSuccessful',
+            'HedgelessTradeStarted', 'HedgelessFundingInitiated', 'HedgelessFundingNeedsReview',
+			'DexTakenFundingNeedsReview',
+            'CexTradeSucessfull',
             'CexCryptoWithdrawalInitiated', 'CexCryptoWithdrawalArrived',
-            'DexPositionTaken', 'DexFiatHasArrived',
+            'DexPositionOpen', 'DexPositionTaken', 'DexFiatHasArrived',
             'DexPositionReleased'
         )
     )
