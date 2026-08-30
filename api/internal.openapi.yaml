@@ -121,6 +121,8 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        "202":
+          description: Live-offer refresh accepted; enrichment continues in the background
         "204":
           description: Live-offer refresh accepted with no response body
         default:

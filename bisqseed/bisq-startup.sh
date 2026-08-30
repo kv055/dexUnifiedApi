@@ -182,6 +182,7 @@ fi
 
 su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -Xmx2400m \
+  -XX:+ExitOnOutOfMemoryError \
   -XX:MaxMetaspaceSize=256m \
   -XX:ReservedCodeCacheSize=128m \
   -XX:MaxDirectMemorySize=128m \

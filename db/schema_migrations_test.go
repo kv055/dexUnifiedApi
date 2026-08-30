@@ -345,3 +345,85 @@ func TestEnsureUnifiedSchemaCanonicalizesTransactionStatuses(t *testing.T) {
 		t.Fatal("NULL transaction status was accepted")
 	}
 }
+
+func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
+	db := testdb.OpenUninitialized(t)
+	if _, err := db.Exec(`
+		CREATE TYPE dex_provider AS ENUM ('bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin');
+		CREATE TYPE trade_direction AS ENUM ('bid', 'ask');
+		CREATE TYPE fiat_currency AS ENUM ('EUR', 'USD', 'GBP', 'AUD', 'CHF', 'SEK', 'NOK', 'CAD');
+		CREATE TABLE offers (
+			id BIGSERIAL PRIMARY KEY,
+			exchange VARCHAR(32) NOT NULL,
+			direction VARCHAR(8) NOT NULL,
+			fiat_currency CHAR(3) NOT NULL,
+			CONSTRAINT offers_direction_check CHECK (direction IN ('bid', 'ask'))
+		);
+		CREATE TABLE snapshots (
+			id BIGSERIAL PRIMARY KEY,
+			exchange VARCHAR(32) NOT NULL,
+			direction VARCHAR(8) NOT NULL,
+			fiat_currency CHAR(3) NOT NULL
+		);
+		CREATE TABLE transactions (
+			id BIGSERIAL PRIMARY KEY,
+			dex VARCHAR(32) NOT NULL,
+			direction VARCHAR(8) NOT NULL,
+			fiat_currency CHAR(3) NOT NULL
+		);
+		CREATE TABLE ohlc (
+			id BIGSERIAL PRIMARY KEY,
+			fiat_currency CHAR(3) NOT NULL
+		);
+		CREATE TABLE payment_method_chat_templates (
+			id BIGSERIAL PRIMARY KEY,
+			exchange TEXT NOT NULL
+		);
+		INSERT INTO offers (exchange, direction, fiat_currency) VALUES ('bisq', 'bid', 'EUR');
+		INSERT INTO snapshots (exchange, direction, fiat_currency) VALUES ('peachbitcoin', 'ask', 'USD');
+		INSERT INTO transactions (dex, direction, fiat_currency) VALUES ('hodlhodl', 'bid', 'GBP');
+		INSERT INTO ohlc (fiat_currency) VALUES ('CHF');
+		INSERT INTO payment_method_chat_templates (exchange) VALUES ('robosats');
+	`); err != nil {
+		t.Fatalf("create legacy varchar enum tables: %v", err)
+	}
+	markExistingSchemaFilesApplied(t, db)
+	markExistingMigrationFilesAppliedExcept(t, db, "20260830153000_repair_legacy_varchar_enums.sql")
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("apply varchar enum repair: %v", err)
+	}
+
+	want := []struct {
+		table  string
+		column string
+		udt    string
+	}{
+		{"offers", "exchange", "dex_provider"},
+		{"offers", "direction", "trade_direction"},
+		{"offers", "fiat_currency", "fiat_currency"},
+		{"snapshots", "exchange", "dex_provider"},
+		{"snapshots", "direction", "trade_direction"},
+		{"snapshots", "fiat_currency", "fiat_currency"},
+		{"transactions", "dex", "dex_provider"},
+		{"transactions", "direction", "trade_direction"},
+		{"transactions", "fiat_currency", "fiat_currency"},
+		{"ohlc", "fiat_currency", "fiat_currency"},
+		{"payment_method_chat_templates", "exchange", "dex_provider"},
+	}
+	for _, col := range want {
+		var udt string
+		if err := db.QueryRow(`
+			SELECT udt_name FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+		`, col.table, col.column).Scan(&udt); err != nil {
+			t.Fatalf("read %s.%s type: %v", col.table, col.column, err)
+		}
+		if udt != col.udt {
+			t.Errorf("%s.%s type = %q, want %q", col.table, col.column, udt, col.udt)
+		}
+	}
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("reapply varchar enum repair: %v", err)
+	}
+}

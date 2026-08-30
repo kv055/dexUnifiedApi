@@ -2094,6 +2094,7 @@ func main() {
 	// lifecycle snapshot before we decide whether a closed offer has history.
 	stage(ctx, "snapshot.settle_closed_offers", func() { settleClosedOffers(sdb) })
 	stage(ctx, "snapshot.analyze_closed_offers", func() { analyzeClosedOffers(sdb) })
+	stage(ctx, "snapshot.prune_order_lifecycle", func() { pruneOrderLifecycle(sdb) })
 
 	writeSnapshotLog(sdb, exchangeData, offline, timings, time.Since(cycleStart))
 	total := 0

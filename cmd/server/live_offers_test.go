@@ -893,6 +893,10 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 		tradeCostEstimators = oldEstimators
 	})
 
+	oldSecret := internalAPISecret
+	internalAPISecret = ""
+	t.Cleanup(func() { internalAPISecret = oldSecret })
+
 	testDB := testdb.Open(t)
 	if _, err := testDB.Exec(`
 		INSERT INTO offers (id, exchange, fiat_currency, direction, price, btc_min, btc_max, is_live)
@@ -935,8 +939,11 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handleInternalLiveOffers(rec, req)
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if !waitLiveRefreshIdle(5 * time.Second) {
+		t.Fatal("live refresh did not finish")
 	}
 	// Enriched in place — still one row, with cost fields now filled and premium
 	// untouched (net derived from the stored premium).
@@ -974,9 +981,12 @@ func TestInternalLiveOffersEnrichesLifecycleBeforeReturning(t *testing.T) {
 func TestInternalLiveOffersAcceptsRefreshTrigger(t *testing.T) {
 	oldDB := db
 	oldHub := hub
+	oldSecret := internalAPISecret
+	internalAPISecret = ""
 	t.Cleanup(func() {
 		db = oldDB
 		hub = oldHub
+		internalAPISecret = oldSecret
 	})
 	testDB := testdb.Open(t)
 	if _, err := testDB.Exec(`
@@ -991,12 +1001,36 @@ func TestInternalLiveOffersAcceptsRefreshTrigger(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/internal/live_offers", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	handleInternalLiveOffers(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if !waitLiveRefreshIdle(5 * time.Second) {
+		t.Fatal("live refresh did not finish")
 	}
 	offers := hub.getOffers()
 	if len(offers) != 1 || offers[0].MakerID != "peach-maker-1" {
 		t.Fatalf("hub offers = %#v, want peach maker id from postgres", offers)
+	}
+}
+
+func TestInternalLiveOffersSkipsWhenRefreshInProgress(t *testing.T) {
+	oldSecret := internalAPISecret
+	internalAPISecret = ""
+	t.Cleanup(func() { internalAPISecret = oldSecret })
+
+	if !liveRefreshInProgress.CompareAndSwap(false, true) {
+		t.Fatal("refresh already running")
+	}
+	t.Cleanup(func() { liveRefreshInProgress.Store(false) })
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/live_offers", bytes.NewReader([]byte(`{}`)))
+	rec := httptest.NewRecorder()
+	handleInternalLiveOffers(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if !liveRefreshInProgress.Load() {
+		t.Fatal("skipped request cleared the in-progress flag")
 	}
 }
 

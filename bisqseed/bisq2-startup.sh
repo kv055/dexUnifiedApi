@@ -59,6 +59,7 @@ ensure_account_row_in_database
 # publish in docker-compose.yml; bind.host=0.0.0.0 below is container-internal.
 su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -Xmx2g \
+  -XX:+ExitOnOutOfMemoryError \
   -XX:MaxMetaspaceSize=256m \
   -XX:ReservedCodeCacheSize=128m \
   -XX:MaxDirectMemorySize=128m \

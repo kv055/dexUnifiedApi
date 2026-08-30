@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -518,9 +519,17 @@ func internalSecretGate(next http.Handler) http.Handler {
 	})
 }
 
+const liveRefreshTimeout = 5 * time.Minute
+
+// liveRefreshInProgress prevents overlapping hub refresh + lifecycle
+// enrichment. A second trigger while one is running is accepted and dropped
+// so the snapshot worker never waits on the previous cycle.
+var liveRefreshInProgress atomic.Bool
+
 // handleInternalLiveOffers is the snapshot worker's refresh trigger. Membership
 // is loaded from PostgreSQL (WHERE is_live = TRUE). The body is optional: empty,
-// {}, {"ok":true}, or a legacy offer array are all accepted.
+// {}, {"ok":true}, or a legacy offer array are all accepted. Enrichment is
+// detached from the request so the worker's 15s client timeout cannot cancel it.
 func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	if !internalSecretAuthorized(r.Header.Get("X-Internal-Secret"), internalAPISecret) {
 		http.Error(w, "unauthorized internal secret", http.StatusUnauthorized)
@@ -537,15 +546,27 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
 	appMetrics.observePush()
+	if !liveRefreshInProgress.CompareAndSwap(false, true) {
+		slog.InfoContext(r.Context(), "live book refresh already in progress; skipping duplicate trigger")
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), liveRefreshTimeout)
+	go func() {
+		defer cancel()
+		defer liveRefreshInProgress.Store(false)
+		runInternalLiveRefresh(ctx, offers)
+	}()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func runInternalLiveRefresh(ctx context.Context, offers []LiveOffer) {
 	if err := refreshSnapshotRoutingContext(ctx); err != nil {
 		slog.ErrorContext(ctx, "refresh routing context for snapshot; routing fail-closed", "err", err)
 	}
 	if err := refreshLiveHub(ctx, offers); err != nil {
 		slog.WarnContext(ctx, "live book refresh failed; retaining cached book", "err", err)
-		http.Error(w, "live book refresh failed", http.StatusServiceUnavailable)
 		return
 	}
 	refreshedOffers := hub.getOffers()
@@ -554,7 +575,17 @@ func handleInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	writeLifecycleEntries(ctx, outOffers)
 	go resolveAndApplyPeachRatings(context.Background(), refreshedOffers, outOffers)
 	fmt.Printf("[LiveHub] refreshed with %d live offers from PostgreSQL\n", len(refreshedOffers))
-	w.WriteHeader(http.StatusNoContent)
+}
+
+func waitLiveRefreshIdle(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for liveRefreshInProgress.Load() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return true
 }
 
 func decodeLiveRefreshBody(body []byte) ([]LiveOffer, error) {
