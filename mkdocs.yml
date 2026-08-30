@@ -15,6 +15,7 @@ nav:
       - snapshot:
           - Overview: cmd/snapshot/README.md
           - closed_offer_analysis.go: cmd/snapshot/closed_offer_analysis.md
+          - fetch_scheduler.go: cmd/snapshot/fetch_scheduler.md
           - main.go: cmd/snapshot/main.md
   - db:
       - Overview: db/README.md

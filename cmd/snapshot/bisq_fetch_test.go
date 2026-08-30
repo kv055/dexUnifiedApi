@@ -161,7 +161,7 @@ func TestFetchBisqMapsOffersFromWire(t *testing.T) {
 		},
 	}})
 
-	result := fetchBisq("ask", 54000)
+	result := fetchBisq(context.Background(), "ask", 54000)
 	if result == nil {
 		t.Fatal("fetchBisq returned nil, want a populated result")
 	}
@@ -180,7 +180,7 @@ func TestFetchBisqSendsUpperCaseDirectionAndEUR(t *testing.T) {
 	impl := &fakeOffersServer{}
 	startFakeBisqDaemon(t, impl)
 
-	if result := fetchBisq("bid", 54000); result == nil {
+	if result := fetchBisq(context.Background(), "bid", 54000); result == nil {
 		t.Fatal("fetchBisq returned nil for a healthy empty daemon")
 	}
 	if impl.gotReq == nil {
@@ -201,7 +201,7 @@ func TestFetchBisqSendsUpperCaseDirectionAndEUR(t *testing.T) {
 func TestFetchBisqEmptyBookIsOnlineWithZeroOffers(t *testing.T) {
 	startFakeBisqDaemon(t, &fakeOffersServer{})
 
-	result := fetchBisq("ask", 54000)
+	result := fetchBisq(context.Background(), "ask", 54000)
 	if result == nil {
 		t.Fatal("fetchBisq returned nil for reachable daemon with empty book, want zero-offer result")
 	}
@@ -213,13 +213,13 @@ func TestFetchBisqEmptyBookIsOnlineWithZeroOffers(t *testing.T) {
 func TestFetchBisqRPCErrorReturnsNil(t *testing.T) {
 	startFakeBisqDaemon(t, &fakeOffersServer{err: errors.New("daemon exploded")})
 
-	if result := fetchBisq("ask", 54000); result != nil {
+	if result := fetchBisq(context.Background(), "ask", 54000); result != nil {
 		t.Fatalf("fetchBisq = %+v, want nil on RPC error", result)
 	}
 }
 
 func TestFetchBisqZeroReferencePriceReturnsNil(t *testing.T) {
-	if result := fetchBisq("ask", 0); result != nil {
+	if result := fetchBisq(context.Background(), "ask", 0); result != nil {
 		t.Fatalf("fetchBisq = %+v, want nil when reference price unavailable", result)
 	}
 }

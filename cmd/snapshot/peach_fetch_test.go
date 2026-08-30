@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -14,7 +15,7 @@ func TestFetchPeachRejectsNonOKResponse(t *testing.T) {
 				return jsonResponse(status, `{"error":"temporarily unavailable"}`), nil
 			})}
 
-			if result := fetchPeachBitcoinCurrencyFrom(client, "https://peach.test", "ask", "EUR", 60000); result != nil {
+			if result := fetchPeachBitcoinCurrencyFrom(context.Background(), client, "https://peach.test", "ask", "EUR", 60000); result != nil {
 				t.Fatalf("result = %#v, want nil for HTTP %d", result, status)
 			}
 		})
@@ -31,7 +32,7 @@ func TestFetchPeachRejectsMidPaginationFailure(t *testing.T) {
 			}
 			return nil, errors.New("upstream reset")
 		})}
-		if result := fetchPeachBitcoinCurrencyFrom(client, "https://peach.test", "ask", "EUR", 60000); result == nil || result.status() != fetchStatusIncomplete {
+		if result := fetchPeachBitcoinCurrencyFrom(context.Background(), client, "https://peach.test", "ask", "EUR", 60000); result == nil || result.status() != fetchStatusIncomplete {
 			t.Fatalf("result = %#v, want incomplete after page-1 transport error", result)
 		} else if len(result.Offers) != 1 || result.Offers[0].OfferID != "p-1" {
 			t.Fatalf("offers = %#v, want page-0 offer kept", result.Offers)
@@ -45,7 +46,7 @@ func TestFetchPeachRejectsMidPaginationFailure(t *testing.T) {
 			}
 			return jsonResponse(http.StatusOK, `{not-json`), nil
 		})}
-		if result := fetchPeachBitcoinCurrencyFrom(client, "https://peach.test", "ask", "EUR", 60000); result == nil || result.status() != fetchStatusIncomplete {
+		if result := fetchPeachBitcoinCurrencyFrom(context.Background(), client, "https://peach.test", "ask", "EUR", 60000); result == nil || result.status() != fetchStatusIncomplete {
 			t.Fatalf("result = %#v, want incomplete after page-1 parse error", result)
 		} else if len(result.Offers) != 1 || result.Offers[0].OfferID != "p-1" {
 			t.Fatalf("offers = %#v, want page-0 offer kept", result.Offers)
@@ -62,7 +63,7 @@ func TestFetchPeachRejectsResponseReadFailure(t *testing.T) {
 		}, nil
 	})}
 
-	if result := fetchPeachBitcoinCurrencyFrom(client, "https://peach.test", "ask", "EUR", 60000); result != nil {
+	if result := fetchPeachBitcoinCurrencyFrom(context.Background(), client, "https://peach.test", "ask", "EUR", 60000); result != nil {
 		t.Fatalf("result = %#v, want nil after body read failure", result)
 	}
 }
@@ -72,7 +73,7 @@ func TestFetchPeachAcceptsConfirmedEmptyBook(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"offers":[],"remaining":0}`), nil
 	})}
 
-	result := fetchPeachBitcoinCurrencyFrom(client, "https://peach.test", "bid", "GBP", 50000)
+	result := fetchPeachBitcoinCurrencyFrom(context.Background(), client, "https://peach.test", "bid", "GBP", 50000)
 	if result == nil {
 		t.Fatal("result = nil, want successful empty book")
 	}
@@ -97,7 +98,7 @@ func TestFetchPeachMapsOfferFromSecondPage(t *testing.T) {
 		}
 	})}
 
-	result := fetchPeachBitcoinCurrencyFrom(client, "https://peach.test/", "ask", "EUR", 60000)
+	result := fetchPeachBitcoinCurrencyFrom(context.Background(), client, "https://peach.test/", "ask", "EUR", 60000)
 	if result == nil || len(result.Offers) != 1 {
 		t.Fatalf("result = %#v, want one offer from page 1", result)
 	}
@@ -111,7 +112,7 @@ func TestFetchPeachCurrencyMissIsEmptyBook(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"offers":[{"id":"p-eur","amount":30000,"meansOfPayment":{"EUR":["revolut"]},"prices":{"EUR":17}}],"remaining":0}`), nil
 	})}
 
-	result := fetchPeachBitcoinCurrencyFrom(client, "https://peach.test", "ask", "CHF", 60000)
+	result := fetchPeachBitcoinCurrencyFrom(context.Background(), client, "https://peach.test", "ask", "CHF", 60000)
 	if result == nil {
 		t.Fatal("result = nil, want successful empty book for currency miss")
 	}

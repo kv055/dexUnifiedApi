@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -14,7 +15,7 @@ func TestFetchHodlHodlRejectsNonOKResponse(t *testing.T) {
 				return jsonResponse(status, `{"error":"temporarily unavailable"}`), nil
 			})}
 
-			if result := fetchHodlHodlCurrencyFrom(client, "https://hodlhodl.test", "ask", "EUR", 60000); result != nil {
+			if result := fetchHodlHodlCurrencyFrom(context.Background(), client, "https://hodlhodl.test", "ask", "EUR", 60000); result != nil {
 				t.Fatalf("result = %#v, want nil for HTTP %d", result, status)
 			}
 		})
@@ -26,7 +27,7 @@ func TestFetchHodlHodlAcceptsConfirmedEmptyBook(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"offers":[]}`), nil
 	})}
 
-	result := fetchHodlHodlCurrencyFrom(client, "https://hodlhodl.test", "bid", "GBP", 50000)
+	result := fetchHodlHodlCurrencyFrom(context.Background(), client, "https://hodlhodl.test", "bid", "GBP", 50000)
 	if result == nil {
 		t.Fatal("result = nil, want successful empty book")
 	}
@@ -43,7 +44,7 @@ func TestFetchHodlHodlMapsSuccessfulOffer(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"offers":[{"id":"hh-1","price":"60000","price_source":"fixed_value","min_amount":"300","max_amount":"600","payment_method_instructions":[{"payment_method_name":"SEPA"}],"trader":{"trades_count":10,"rating":0.98}}]}`), nil
 	})}
 
-	result := fetchHodlHodlCurrencyFrom(client, "https://hodlhodl.test/", "ask", "EUR", 60000)
+	result := fetchHodlHodlCurrencyFrom(context.Background(), client, "https://hodlhodl.test/", "ask", "EUR", 60000)
 	if result == nil || len(result.Offers) != 1 {
 		t.Fatalf("result = %#v, want one offer", result)
 	}
@@ -66,7 +67,7 @@ func TestFetchHodlHodlRejectsResponseReadFailure(t *testing.T) {
 		}, nil
 	})}
 
-	if result := fetchHodlHodlCurrencyFrom(client, "https://hodlhodl.test", "ask", "EUR", 60000); result != nil {
+	if result := fetchHodlHodlCurrencyFrom(context.Background(), client, "https://hodlhodl.test", "ask", "EUR", 60000); result != nil {
 		t.Fatalf("result = %#v, want nil after body read failure", result)
 	}
 }

@@ -209,7 +209,7 @@ func externalOfferDirection(direction string) string {
 
 type exchFetcher struct {
 	name string
-	fn   func(string, string, int) *fetchResult
+	fn   func(context.Context, string, string, int) *fetchResult
 }
 
 type exchangeSnapshotData map[string]map[string]bool
@@ -285,17 +285,17 @@ func clearnetClient() *http.Client {
 
 // --- Exchange fetchers ---
 
-func fetchBisq(direction string, btcPrice int) *fetchResult {
-	return fetchBisqCurrency(direction, "EUR", btcPrice)
+func fetchBisq(ctx context.Context, direction string, btcPrice int) *fetchResult {
+	return fetchBisqCurrency(ctx, direction, "EUR", btcPrice)
 }
 
-func fetchBisqCurrency(direction, currency string, btcPrice int) *fetchResult {
+func fetchBisqCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[Bisq] Could not get reference price")
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	conn, err := grpc.NewClient(bisqGRPCHost,
@@ -375,7 +375,7 @@ func mapBisqOffer(o *bisqgrpc.OfferInfo, direction string, now time.Time) offer 
 	return newOffer
 }
 
-func fetchBisq2Currency(direction, currency string, btcPrice int) *fetchResult {
+func fetchBisq2Currency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[Bisq2] Could not get reference price")
 		return nil
@@ -384,7 +384,7 @@ func fetchBisq2Currency(direction, currency string, btcPrice int) *fetchResult {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	reqURL := fmt.Sprintf("http://%s/api/v1/offerbook/markets/%s/offers", bisq2RESTHost, url.PathEscape(currency))
@@ -620,13 +620,18 @@ func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
 	return s
 }
 
-func fetchHodlHodlCurrency(direction, currency string, btcPrice int) *fetchResult {
-	return fetchHodlHodlCurrencyFrom(clearnetClient(), "https://hodlhodl.com", direction, currency, btcPrice)
+func fetchHodlHodlCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
+	return fetchHodlHodlCurrencyFrom(ctx, clearnetClient(), "https://hodlhodl.com", direction, currency, btcPrice)
 }
 
-func fetchHodlHodlCurrencyFrom(client *http.Client, baseURL, direction, currency string, btcPrice int) *fetchResult {
+func fetchHodlHodlCurrencyFrom(ctx context.Context, client *http.Client, baseURL, direction, currency string, btcPrice int) *fetchResult {
 	reqURL := fmt.Sprintf("%s/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", strings.TrimRight(baseURL, "/"), externalOfferDirection(direction), url.QueryEscape(currency))
-	resp, err := client.Get(reqURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		fmt.Printf("[HodlHodl] Request error: %v\n", err)
+		return nil
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("[HodlHodl] Error: %v\n", err)
 		return nil
@@ -852,11 +857,11 @@ const (
 	peachSearchMaxPages = 50
 )
 
-func fetchPeachBitcoinCurrency(direction, currency string, btcPrice int) *fetchResult {
-	return fetchPeachBitcoinCurrencyFrom(clearnetClient(), "https://api.peachbitcoin.com", direction, currency, btcPrice)
+func fetchPeachBitcoinCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
+	return fetchPeachBitcoinCurrencyFrom(ctx, clearnetClient(), "https://api.peachbitcoin.com", direction, currency, btcPrice)
 }
 
-func fetchPeachBitcoinCurrencyFrom(client *http.Client, baseURL, direction, currency string, btcPrice int) *fetchResult {
+func fetchPeachBitcoinCurrencyFrom(ctx context.Context, client *http.Client, baseURL, direction, currency string, btcPrice int) *fetchResult {
 	if btcPrice == 0 {
 		fmt.Println("[PeachBitcoin] Could not get reference price")
 		return nil
@@ -879,7 +884,13 @@ func fetchPeachBitcoinCurrencyFrom(client *http.Client, baseURL, direction, curr
 			return peachResult(allOffers, direction, currency, btcPrice, false)
 		}
 
-		resp, err := client.Post(reqURL, "application/json", strings.NewReader(string(body)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, strings.NewReader(string(body)))
+		if err != nil {
+			fmt.Printf("[PeachBitcoin] Request error: %v\n", err)
+			return peachResult(allOffers, direction, currency, btcPrice, false)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
 		if err != nil {
 			fmt.Printf("[PeachBitcoin] Error: %v\n", err)
 			return peachResult(allOffers, direction, currency, btcPrice, false)
@@ -932,8 +943,8 @@ func peachResult(all []peachOffer, direction, currency string, btcPrice int, com
 	return incompleteFetch(float64(btcPrice), offers)
 }
 
-func fetchRobosatsCurrency(direction, currency string, btcPrice int) *fetchResult {
-	return fetchRobosatsCurrencyFrom(direction, currency, btcPrice, torClient(), robosatsOnions)
+func fetchRobosatsCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
+	return fetchRobosatsCurrencyFrom(ctx, direction, currency, btcPrice, torClient(), robosatsOnions)
 }
 
 // robosatsFederationEntry is the subset of the upstream federation registry
@@ -1156,7 +1167,7 @@ func decodeRobosatsBook(body []byte) ([]json.RawMessage, string, error) {
 	return nil, "error_object", fmt.Errorf("unknown response object keys: %s", strings.Join(keys, ","))
 }
 
-func fetchRobosatsCurrencyFrom(direction, currency string, btcPrice int, client *http.Client, coordinators []string) *fetchResult {
+func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, btcPrice int, client *http.Client, coordinators []string) *fetchResult {
 	currencyID := fiat.RoboSatsCurrencyID(currency)
 	if currencyID == 0 {
 		return nil
@@ -1171,7 +1182,13 @@ func fetchRobosatsCurrencyFrom(direction, currency string, btcPrice int, client 
 	failCount := 0
 	for _, onion := range coordinators {
 		reqURL := fmt.Sprintf("%s/api/book/?currency=%d&type=%d", onion, currencyID, offerType)
-		resp, err := client.Get(reqURL)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			fmt.Printf("[Robosats] coordinator=%s request build failed: %v, trying next...\n", onion, err)
+			failCount++
+			continue
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			fmt.Printf("[Robosats] coordinator=%s request failed: %v, trying next...\n", onion, err)
 			failCount++
@@ -1768,10 +1785,10 @@ func reconcileLiveOfferStatus(sdb *dbutil.DB, snapshotStart time.Time, confirmed
 	return nil
 }
 
-// fetchTimings accumulates per-exchange fetch effort across both directions of
-// one run: total wall time and how many direction-fetches came back nil. The
-// worker exits after each run, so these land in snapshot_log and are exposed
-// as gauges by unified-api's dbmetrics collector instead of local counters.
+// fetchTimings accumulates per-exchange fetch effort across all markets in one
+// run: summed market duration, outcomes and hard failures. Concurrent market
+// durations intentionally remain summed effort rather than cycle wall time;
+// snapshot_log.cycle_ms records the latter.
 type fetchTimings struct {
 	durationMS   map[string]int64
 	failures     map[string]int
@@ -1998,60 +2015,51 @@ func main() {
 	}
 
 	stage(ctx, "snapshot.fetch_offers", func() {
-		for _, currency := range fiat.Enabled {
-			refPrice, ok := refPrices[currency]
-			if !ok {
+		jobs := buildMarketFetchJobs(refPrices, fetchers)
+		for _, fetched := range fetchMarkets(ctx, jobs) {
+			job := fetched.job
+			f := job.fetcher
+			currency := job.market.fiat
+			direction := job.market.direction
+			refPrice := job.referencePrice
+			result := fetched.result
+			timings.durationMS[f.name] += fetched.duration.Milliseconds()
+			status := result.status()
+			if status == fetchStatusFailed {
+				timings.failures[f.name]++
+				timings.addStatus(f.name, fetchStatusFailed)
 				continue
 			}
-			for _, direction := range []string{"ask", "bid"} {
-				slog.InfoContext(ctx, "fetching offers", "direction", direction, "fiat", currency)
-				for _, f := range fetchers {
-					if !fiat.SupportsDEX(f.name, currency) {
-						continue
-					}
-					fetchStart := time.Now()
-					result := f.fn(direction, currency, refPrice)
-					timings.durationMS[f.name] += time.Since(fetchStart).Milliseconds()
-					status := result.status()
-					if status == fetchStatusFailed {
-						timings.failures[f.name]++
-						timings.addStatus(f.name, fetchStatusFailed)
-						continue
-					}
-					market := liveMarket{exchange: f.name, fiat: currency, direction: direction}
-					before := len(result.Offers)
-					result.Offers = filterDustOffers(result.Offers)
-					if dropped := before - len(result.Offers); dropped > 0 {
-						slog.InfoContext(ctx, "dust offers filtered", "exchange", f.name, "direction", direction, "dropped", dropped)
-					}
-					if !recordFetchResult(exchangeData, f.name, result) {
-						timings.addStatus(f.name, fetchStatusFailed)
-						continue
-					}
-					confirm := false
-					if len(result.Offers) == 0 {
-						confirm = status == fetchStatusComplete
-					} else {
-						price := result.BTCPrice
-						if price == 0 {
-							price = float64(refPrice)
-						}
-						persisted, ok := saveSnapshotPersisted(sdb, f.name, currency, direction, price, result.Offers)
-						if !ok {
-							slog.WarnContext(ctx, "market snapshot was not persisted; retaining prior live offers", "exchange", f.name, "fiat", currency, "direction", direction)
-							status = fetchStatusIncomplete
-						} else {
-							liveOffers = append(liveOffers, persisted...)
-							confirm = status == fetchStatusComplete
-						}
-					}
-					timings.addStatus(f.name, status)
-					if confirm {
-						confirmedMarkets[market] = struct{}{}
-					}
+			before := len(result.Offers)
+			result.Offers = filterDustOffers(result.Offers)
+			if dropped := before - len(result.Offers); dropped > 0 {
+				slog.InfoContext(ctx, "dust offers filtered", "exchange", f.name, "fiat", currency, "direction", direction, "dropped", dropped)
+			}
+			if !recordFetchResult(exchangeData, f.name, result) {
+				timings.addStatus(f.name, fetchStatusFailed)
+				continue
+			}
+			confirm := false
+			if len(result.Offers) == 0 {
+				confirm = status == fetchStatusComplete
+			} else {
+				price := result.BTCPrice
+				if price == 0 {
+					price = float64(refPrice)
+				}
+				persisted, ok := saveSnapshotPersisted(sdb, f.name, currency, direction, price, result.Offers)
+				if !ok {
+					slog.WarnContext(ctx, "market snapshot was not persisted; retaining prior live offers", "exchange", f.name, "fiat", currency, "direction", direction)
+					status = fetchStatusIncomplete
+				} else {
+					liveOffers = append(liveOffers, persisted...)
+					confirm = status == fetchStatusComplete
 				}
 			}
-
+			timings.addStatus(f.name, status)
+			if confirm {
+				confirmedMarkets[job.market] = struct{}{}
+			}
 		}
 	})
 

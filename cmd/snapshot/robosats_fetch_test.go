@@ -53,6 +53,7 @@ func TestFetchRobosatsFallsBackAcrossCoordinatorFailures(t *testing.T) {
 	})}
 
 	result := fetchRobosatsCurrencyFrom(
+		context.Background(),
 		"ask",
 		"EUR",
 		60000,
@@ -77,7 +78,7 @@ func TestFetchRobosatsNotFoundObjectIsEmptyBook(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return jsonResponse(http.StatusOK, `{"not_found":"No orders found"}`), nil
 	})}
-	result := fetchRobosatsCurrencyFrom("bid", "GBP", 50000, client, []string{"http://empty.test"})
+	result := fetchRobosatsCurrencyFrom(context.Background(), "bid", "GBP", 50000, client, []string{"http://empty.test"})
 	if result == nil {
 		t.Fatal("result = nil, want successful empty book")
 	}
@@ -112,6 +113,7 @@ func TestFetchRobosatsUnionsCoordinatorsAndKeepsGoingAfterNotFound(t *testing.T)
 	})}
 
 	result := fetchRobosatsCurrencyFrom(
+		context.Background(),
 		"ask",
 		"EUR",
 		60000,
@@ -137,6 +139,7 @@ func TestFetchRobosatsNotFoundThenFailureIsIncomplete(t *testing.T) {
 	})}
 
 	result := fetchRobosatsCurrencyFrom(
+		context.Background(),
 		"bid",
 		"EUR",
 		60000,
