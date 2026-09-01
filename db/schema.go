@@ -1,6 +1,7 @@
 package dbutil
 
 import (
+	"database/sql"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -100,12 +101,8 @@ func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[str
 		if err != nil {
 			return fmt.Errorf("begin %s/%s: %w", dir, filename, err)
 		}
-		if dir == "migrations" && filename == "20260830153000_repair_legacy_varchar_enums.sql" {
-			// Legacy installations define ohlc.fiat_currency as CHAR(3) with a
-			// bpchar-typed EUR default. PostgreSQL cannot implicitly convert that
-			// default while the immutable migration changes the column to the
-			// fiat_currency enum, so remove and restore it in the same transaction.
-			if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency DROP DEFAULT`); err != nil {
+		if dir == "migrations" && filename == legacyVarcharEnumRepairFile {
+			if err := prepareLegacyVarcharEnumRepair(tx); err != nil {
 				_ = tx.Rollback()
 				return fmt.Errorf("prepare %s/%s: %w", dir, filename, err)
 			}
@@ -115,7 +112,7 @@ func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[str
 			_ = tx.Rollback()
 			return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
 		}
-		if dir == "migrations" && filename == "20260830153000_repair_legacy_varchar_enums.sql" {
+		if dir == "migrations" && filename == legacyVarcharEnumRepairFile {
 			if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency SET DEFAULT 'EUR'::fiat_currency`); err != nil {
 				_ = tx.Rollback()
 				return fmt.Errorf("finalize %s/%s: %w", dir, filename, err)
@@ -133,6 +130,75 @@ func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[str
 	}
 
 	return nil
+}
+
+const legacyVarcharEnumRepairFile = "20260830153000_repair_legacy_varchar_enums.sql"
+
+// prepareLegacyVarcharEnumRepair runs in the same transaction as the immutable
+// varchar-to-enum repair. Prod still stores display-case leftovers such as
+// RoboSats; the SQL file only accepts exact enum labels, so fold case-only
+// aliases onto those labels first. Also drop the bpchar EUR default on ohlc
+// that PostgreSQL cannot coerce during the type change.
+func prepareLegacyVarcharEnumRepair(tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency DROP DEFAULT`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+DO $$
+DECLARE
+    rec RECORD;
+    current_type OID;
+    target_type OID;
+BEGIN
+    IF to_regtype('dex_provider') IS NULL THEN
+        RETURN;
+    END IF;
+    FOR rec IN
+        SELECT * FROM (VALUES
+            ('offers', 'exchange'),
+            ('snapshots', 'exchange'),
+            ('transactions', 'dex'),
+            ('payment_method_chat_templates', 'exchange')
+        ) AS t(table_name, column_name)
+    LOOP
+        IF to_regclass(format('%I', rec.table_name)) IS NULL THEN
+            CONTINUE;
+        END IF;
+
+        SELECT a.atttypid
+        INTO current_type
+        FROM pg_attribute a
+        WHERE a.attrelid = rec.table_name::regclass
+          AND a.attname = rec.column_name
+          AND a.attnum > 0
+          AND NOT a.attisdropped;
+
+        IF current_type IS NULL THEN
+            CONTINUE;
+        END IF;
+
+        target_type := 'dex_provider'::regtype;
+        IF current_type = target_type THEN
+            CONTINUE;
+        END IF;
+
+        EXECUTE format(
+            'UPDATE %I SET %I = lower(trim(%I::text))
+             WHERE %I IS NOT NULL
+               AND lower(trim(%I::text)) IN (
+                   SELECT enumlabel FROM pg_enum WHERE enumtypid = %L::regtype
+               )
+               AND trim(%I::text) NOT IN (
+                   SELECT enumlabel FROM pg_enum WHERE enumtypid = %L::regtype
+               )',
+            rec.table_name, rec.column_name, rec.column_name,
+            rec.column_name, rec.column_name, 'dex_provider',
+            rec.column_name, 'dex_provider'
+        );
+    END LOOP;
+END $$;
+`)
+	return err
 }
 
 // appliedSchemaFiles returns the set of schema filenames already recorded in

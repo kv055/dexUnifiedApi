@@ -384,6 +384,8 @@ func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
 		INSERT INTO transactions (dex, direction, fiat_currency) VALUES ('hodlhodl', 'bid', 'GBP');
 		INSERT INTO ohlc (fiat_currency) VALUES ('CHF');
 		INSERT INTO payment_method_chat_templates (exchange) VALUES ('robosats');
+		INSERT INTO payment_method_chat_templates (exchange) VALUES ('RoboSats');
+		INSERT INTO payment_method_chat_templates (exchange) VALUES ('Bisq2');
 	`); err != nil {
 		t.Fatalf("create legacy varchar enum tables: %v", err)
 	}
@@ -432,6 +434,31 @@ func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
 	}
 	if defaultCurrency != "EUR" {
 		t.Errorf("ohlc fiat_currency default = %q, want EUR", defaultCurrency)
+	}
+	rows, err := db.Query(`SELECT exchange::text FROM payment_method_chat_templates ORDER BY id`)
+	if err != nil {
+		t.Fatalf("read remapped chat template exchanges: %v", err)
+	}
+	defer rows.Close()
+	var exchanges []string
+	for rows.Next() {
+		var exchange string
+		if err := rows.Scan(&exchange); err != nil {
+			t.Fatalf("scan remapped chat template exchange: %v", err)
+		}
+		exchanges = append(exchanges, exchange)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate remapped chat template exchanges: %v", err)
+	}
+	wantExchanges := []string{"robosats", "robosats", "bisq2"}
+	if len(exchanges) != len(wantExchanges) {
+		t.Fatalf("chat template exchanges = %v, want %v", exchanges, wantExchanges)
+	}
+	for i, got := range exchanges {
+		if got != wantExchanges[i] {
+			t.Errorf("chat template exchange[%d] = %q, want %q", i, got, wantExchanges[i])
+		}
 	}
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		t.Fatalf("reapply varchar enum repair: %v", err)
