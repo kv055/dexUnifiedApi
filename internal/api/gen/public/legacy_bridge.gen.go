@@ -168,6 +168,15 @@ func (response legacyGetApiLiveOffersResponse) VisitGetApiLiveOffersResponse(w h
 	return response.server.serveLegacy(w, response.request)
 }
 
+type legacyGetApiLiveOffersCountsResponse struct {
+	server  *LegacyStrictServer
+	request *legacyRequest
+}
+
+func (response legacyGetApiLiveOffersCountsResponse) VisitGetApiLiveOffersCountsResponse(w http.ResponseWriter) error {
+	return response.server.serveLegacy(w, response.request)
+}
+
 type legacyGetApiLiveOffersIdLifecycleResponse struct {
 	server  *LegacyStrictServer
 	request *legacyRequest
@@ -215,6 +224,13 @@ func (server *LegacyStrictServer) GetApiLiveOffers(ctx context.Context, _ GetApi
 		return nil, err
 	}
 	return legacyGetApiLiveOffersResponse{server: server, request: request}, nil
+}
+func (server *LegacyStrictServer) GetApiLiveOffersCounts(ctx context.Context, _ GetApiLiveOffersCountsRequestObject) (GetApiLiveOffersCountsResponseObject, error) {
+	request, err := legacyRequestFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return legacyGetApiLiveOffersCountsResponse{server: server, request: request}, nil
 }
 func (server *LegacyStrictServer) GetApiLiveOffersIdLifecycle(ctx context.Context, _ GetApiLiveOffersIdLifecycleRequestObject) (GetApiLiveOffersIdLifecycleResponseObject, error) {
 	request, err := legacyRequestFromContext(ctx)

@@ -14,19 +14,14 @@ import (
 )
 
 // Peach is the only integrated exchange whose offer listing does NOT include the
-// maker's reputation — it lives behind a separate GET /v1/user/:id call. Fetching
-// that for every Peach offer each snapshot cycle rate-limits us, so we only look
-// it up for offers the server marks net-profitable at full volume
-// (NetPremiumPct > 0), which is a handful. A tiny in-memory cache keeps the same
-// profitable maker from being refetched every push.
+// maker's reputation — it lives behind a separate GET /v1/user/:id call. We look
+// it up for every live Peach offer that carries a maker id, with a 6h in-memory
+// cache and a per-cycle fetch cap so a large book cannot stampede Peach's API.
+// Remainder makers fill in on later snapshot cycles.
 
 const (
 	peachExchangeName = "peachbitcoin"
 
-	// Shrinkage parameters for Peach's peer-feedback rating (mirrors HodlHodl).
-	peachRatingPriorMean   = 0.85
-	peachRatingPriorWeight = 10
-	peachVerifiedThreshold = 5
 	// peachDisputePenaltyPts is subtracted per lost dispute, since a rolling
 	// rating average alone can under-weight a clear-cut dispute loss.
 	peachDisputePenaltyPts = 5.0
@@ -34,9 +29,11 @@ const (
 	// peachUserFetchTimeout bounds a single per-maker lookup.
 	peachUserFetchTimeout = 8 * time.Second
 	// peachReputationTTL is how long an in-memory cached maker reputation is
-	// reused before refetching. Volume is tiny (profitable offers only), so this
-	// only avoids refetching the same maker on every 1-minute push.
+	// reused before refetching.
 	peachReputationTTL = 6 * time.Hour
+	// peachUncachedFetchCap bounds how many cache-miss HTTP lookups run in one
+	// snapshot cycle (sequential). Cached makers are not counted.
+	peachUncachedFetchCap = 15
 )
 
 var peachHTTPClient = &http.Client{Timeout: 15 * time.Second}
@@ -54,19 +51,24 @@ type peachUserReputation struct {
 }
 
 // mapPeachReputation normalizes a Peach maker profile into a Score. Peach's
-// rating is -1..1, so it is rescaled to 0..1 before the shared feedback formula,
-// then a bounded penalty is applied per lost dispute. Pure — unit-testable.
+// rating is -1..1 (sentinel -1 means "no rating yet"), so a real rating is
+// rescaled to 0..1 before the shared feedback formula, then a bounded penalty
+// is applied per lost dispute. Empty samples and the -1 sentinel are
+// Unavailable() — we do not mint a prior-only score. Pure — unit-testable.
 func mapPeachReputation(r peachUserReputation) sellerrating.Score {
-	rescaled := (r.Rating + 1) / 2
 	raw, _ := json.Marshal(map[string]any{
 		"rating":        r.Rating,
 		"rating_count":  r.RatingCount,
 		"trades":        r.Trades,
 		"disputes_lost": r.Disputes.Lost,
 	})
+	if r.RatingCount <= 0 || r.Rating < 0 {
+		return sellerrating.Score{Value: nil, Confidence: sellerrating.ConfidenceUnavailable, Raw: raw}
+	}
+	rescaled := (r.Rating + 1) / 2
 	s := sellerrating.NormalizeFeedbackRating(
 		&rescaled, r.RatingCount,
-		peachRatingPriorMean, peachRatingPriorWeight, peachVerifiedThreshold,
+		sellerrating.DefaultFeedbackPriorMean, sellerrating.DefaultFeedbackPriorWeight, sellerrating.DefaultFeedbackVerifiedThreshold,
 		raw,
 	)
 	return sellerrating.ApplyDisputePenalty(s, r.Disputes.Lost, peachDisputePenaltyPts)
@@ -115,18 +117,25 @@ func newPeachReputationCache(ttl time.Duration) *peachReputationCache {
 
 var peachReputations = newPeachReputationCache(peachReputationTTL)
 
+func (c *peachReputationCache) peekFresh(makerID string, now time.Time) (sellerrating.Score, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[makerID]
+	if !ok || now.Sub(e.fetchedAt) >= c.ttl {
+		return sellerrating.Score{}, false
+	}
+	return e.score, true
+}
+
 // Resolve returns a maker's reputation, using the cache when fresh and otherwise
 // fetching. On a fetch failure it falls back to any stale cached value; ok is
 // false only when there is no value at all (so the offer keeps no rating rather
 // than a wrong one).
 func (c *peachReputationCache) Resolve(ctx context.Context, makerID string) (sellerrating.Score, bool) {
 	now := time.Now()
-	c.mu.Lock()
-	if e, ok := c.entries[makerID]; ok && now.Sub(e.fetchedAt) < c.ttl {
-		c.mu.Unlock()
-		return e.score, true
+	if s, ok := c.peekFresh(makerID, now); ok {
+		return s, true
 	}
-	c.mu.Unlock()
 
 	fctx, cancel := context.WithTimeout(ctx, peachUserFetchTimeout)
 	rep, err := fetchPeachUserReputation(fctx, makerID)
@@ -148,14 +157,14 @@ func (c *peachReputationCache) Resolve(ctx context.Context, makerID string) (sel
 	return score, true
 }
 
-// profitablePeachMakers returns offerID→makerID for the Peach offers that are
-// net-profitable at full volume (NetPremiumPct > 0) and carry a maker id.
-// makerByID maps every pushed offer's id to its maker id (empty for non-Peach).
+// peachMakersWithID returns offerID→makerID for every live Peach offer that
+// carries a maker id. Unlike the old profitable-only filter, unprofitable
+// Peach offers are included so the monitor can show a rating on the whole book.
 // Pure — unit-testable.
-func profitablePeachMakers(outOffers []liveOutOffer, makerByID map[int64]string) map[int64]string {
+func peachMakersWithID(outOffers []liveOutOffer, makerByID map[int64]string) map[int64]string {
 	out := make(map[int64]string)
 	for _, o := range outOffers {
-		if o.Exchange != peachExchangeName || o.NetPremiumPct <= 0 {
+		if o.Exchange != peachExchangeName {
 			continue
 		}
 		if mid := makerByID[o.ID]; mid != "" {
@@ -165,10 +174,35 @@ func profitablePeachMakers(outOffers []liveOutOffer, makerByID map[int64]string)
 	return out
 }
 
-// resolveAndApplyPeachRatings looks up reputations for net-profitable Peach
-// offers, then patches them onto the live hub and persists them to the offers
+// pickPeachFetchQueue returns uncached maker IDs to fetch this cycle, at most
+// cap, first-seen order, de-duplicated. Cached makers are skipped. Pure.
+func pickPeachFetchQueue(orderedMakers []string, isCached func(string) bool, cap int) []string {
+	out := make([]string, 0, cap)
+	seen := make(map[string]struct{})
+	for _, id := range orderedMakers {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if isCached(id) {
+			continue
+		}
+		out = append(out, id)
+		if cap >= 0 && len(out) >= cap {
+			break
+		}
+	}
+	return out
+}
+
+// resolveAndApplyPeachRatings looks up reputations for live Peach offers with a
+// maker id, then patches them onto the live hub and persists them to the offers
 // table. Meant to run in a background goroutine so the snapshot's push is never
-// blocked on Peach's (slow, rate-limited) API.
+// blocked on Peach's (slow, rate-limited) API. Cache hits are applied every
+// cycle; uncached makers are fetched sequentially up to peachUncachedFetchCap.
 func resolveAndApplyPeachRatings(ctx context.Context, offers []LiveOffer, outOffers []liveOutOffer) {
 	makerByID := make(map[int64]string, len(offers))
 	for _, o := range offers {
@@ -176,17 +210,29 @@ func resolveAndApplyPeachRatings(ctx context.Context, offers []LiveOffer, outOff
 			makerByID[o.ID] = o.MakerID
 		}
 	}
-	targets := profitablePeachMakers(outOffers, makerByID)
+	targets := peachMakersWithID(outOffers, makerByID)
 	if len(targets) == 0 {
 		return
 	}
 
-	// Resolve once per distinct maker, then fan back out to their offers.
+	now := time.Now()
 	scoreByMaker := make(map[string]sellerrating.Score)
+	ordered := make([]string, 0, len(targets))
 	for _, makerID := range targets {
+		ordered = append(ordered, makerID)
 		if _, done := scoreByMaker[makerID]; done {
 			continue
 		}
+		if s, ok := peachReputations.peekFresh(makerID, now); ok {
+			scoreByMaker[makerID] = s
+		}
+	}
+
+	toFetch := pickPeachFetchQueue(ordered, func(id string) bool {
+		_, ok := scoreByMaker[id]
+		return ok
+	}, peachUncachedFetchCap)
+	for _, makerID := range toFetch {
 		if s, ok := peachReputations.Resolve(ctx, makerID); ok {
 			scoreByMaker[makerID] = s
 		}

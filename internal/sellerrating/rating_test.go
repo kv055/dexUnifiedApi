@@ -37,11 +37,9 @@ func TestUnavailable(t *testing.T) {
 }
 
 func TestNormalizeFeedbackRating(t *testing.T) {
-	const (
-		priorMean   = 0.85
-		priorWeight = 10
-		threshold   = 5
-	)
+	priorMean := DefaultFeedbackPriorMean
+	priorWeight := DefaultFeedbackPriorWeight
+	threshold := DefaultFeedbackVerifiedThreshold
 	tests := []struct {
 		name      string
 		rating    *float64
@@ -49,19 +47,21 @@ func TestNormalizeFeedbackRating(t *testing.T) {
 		wantValue *float64
 		wantConf  Confidence
 	}{
-		// No sample at all: score is exactly the prior, tagged new.
-		{"no ratings yet (nil)", nil, 0, fptr(85), ConfidenceFeedbackNew},
-		// A single lucky perfect rating is pulled hard toward the prior, NOT ~100:
-		// (1.0*1 + 0.85*10) / 11 = 0.8636... -> 86.36.
-		{"one perfect trade stays near prior", fptr(1.0), 1, fptr(86.36), ConfidenceFeedbackNew},
-		// Below threshold: still "new".
-		{"four good trades below threshold", fptr(1.0), 4, fptr(89.29), ConfidenceFeedbackNew},
-		// At threshold: flips to verified. (0.95*5 + 0.85*10)/15 = 0.8833 -> 88.33.
-		{"five trades reaches verified", fptr(0.95), 5, fptr(88.33), ConfidenceFeedbackVerified},
-		// Large sample dominates the prior: (0.6*200 + 0.85*10)/210 = 0.6119 -> 61.19.
-		{"large sample tracks the real rating", fptr(0.6), 200, fptr(61.19), ConfidenceFeedbackVerified},
+		// No sample at all: unavailable, not a prior-only 50/85.
+		{"no ratings yet (nil)", nil, 0, nil, ConfidenceUnavailable},
+		{"zero samples with a rating pointer", fptr(1.0), 0, nil, ConfidenceUnavailable},
+		// A single lucky perfect rating is pulled toward the conservative prior, NOT ~100:
+		// (1.0*1 + 0.50*20) / 21 = 0.5238... -> 52.38.
+		{"one perfect trade stays near prior", fptr(1.0), 1, fptr(52.38), ConfidenceFeedbackNew},
+		// Below threshold: still "new". (1.0*4 + 0.50*20)/24 = 0.5833 -> 58.33.
+		{"four good trades below threshold", fptr(1.0), 4, fptr(58.33), ConfidenceFeedbackNew},
+		// At threshold: flips to verified. (0.95*20 + 0.50*20)/40 = 0.725 -> 72.50.
+		{"twenty trades reaches verified", fptr(0.95), 20, fptr(72.50), ConfidenceFeedbackVerified},
+		// Large sample dominates the prior: (0.6*200 + 0.50*20)/220 = 0.5909 -> 59.09.
+		{"large sample tracks the real rating", fptr(0.6), 200, fptr(59.09), ConfidenceFeedbackVerified},
 		// A genuinely bad rating with enough samples scores low, not near the prior.
-		{"bad rating verified", fptr(0.1), 100, fptr(16.82), ConfidenceFeedbackVerified},
+		// (0.1*100 + 0.50*20)/120 = 0.1667 -> 16.67.
+		{"bad rating verified", fptr(0.1), 100, fptr(16.67), ConfidenceFeedbackVerified},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,6 +99,42 @@ func TestNormalizeStakeBond(t *testing.T) {
 	// Degenerate range must not divide by zero.
 	if s := NormalizeStakeBond(5, 10, 10, nil); s.Value == nil {
 		t.Fatal("degenerate range: Value = nil, want a number")
+	}
+}
+
+func TestNormalizeBisq2TotalScore(t *testing.T) {
+	tests := []struct {
+		name      string
+		total     int64
+		wantValue *float64
+		wantConf  Confidence
+	}{
+		{"zero stake is unavailable, not score 0", 0, nil, ConfidenceUnavailable},
+		{"negative is unavailable", -1, nil, ConfidenceUnavailable},
+		{"dust below 1200", 1, fptr(20), ConfidenceReputationBonded},
+		{"just below 1200", 1199, fptr(20), ConfidenceReputationBonded},
+		{"1200 bucket", 1200, fptr(35), ConfidenceReputationBonded},
+		{"4999 still 35", 4999, fptr(35), ConfidenceReputationBonded},
+		{"5000 bucket", 5000, fptr(50), ConfidenceReputationBonded},
+		{"15000 bucket", 15000, fptr(62), ConfidenceReputationBonded},
+		{"25000 bucket", 25000, fptr(72), ConfidenceReputationBonded},
+		{"40000 bucket", 40000, fptr(82), ConfidenceReputationBonded},
+		{"80000 bucket", 80000, fptr(92), ConfidenceReputationBonded},
+		{"199999 still 92", 199999, fptr(92), ConfidenceReputationBonded},
+		{"200000 caps at 100", 200000, fptr(100), ConfidenceReputationBonded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"total_score":1}`)
+			s := NormalizeBisq2TotalScore(tt.total, raw)
+			wantValue(t, tt.name, s, tt.wantValue)
+			if s.Confidence != tt.wantConf {
+				t.Fatalf("Confidence = %q, want %q", s.Confidence, tt.wantConf)
+			}
+			if string(s.Raw) != string(raw) {
+				t.Fatalf("Raw = %s, want passthrough", s.Raw)
+			}
+		})
 	}
 }
 
@@ -201,9 +237,11 @@ func TestNormalizeBisqAccountSigning(t *testing.T) {
 func TestValueAlwaysInRange(t *testing.T) {
 	scores := []Score{
 		Unavailable(),
-		NormalizeFeedbackRating(nil, 0, 0.85, 10, 5, nil),
-		NormalizeFeedbackRating(fptr(1.0), 1000, 0.85, 10, 5, nil),
-		NormalizeFeedbackRating(fptr(0.0), 1000, 0.85, 10, 5, nil),
+		NormalizeFeedbackRating(nil, 0, DefaultFeedbackPriorMean, DefaultFeedbackPriorWeight, DefaultFeedbackVerifiedThreshold, nil),
+		NormalizeFeedbackRating(fptr(1.0), 1000, DefaultFeedbackPriorMean, DefaultFeedbackPriorWeight, DefaultFeedbackVerifiedThreshold, nil),
+		NormalizeFeedbackRating(fptr(0.0), 1000, DefaultFeedbackPriorMean, DefaultFeedbackPriorWeight, DefaultFeedbackVerifiedThreshold, nil),
+		NormalizeBisq2TotalScore(0, nil),
+		NormalizeBisq2TotalScore(200000, nil),
 		NormalizeStakeBond(-5, 2, 15, nil),
 		NormalizeStakeBond(99, 2, 15, nil),
 		NormalizeReputationScore(9, 5, nil),
@@ -225,7 +263,7 @@ func TestValueAlwaysInRange(t *testing.T) {
 // TestRawPassthrough confirms the Raw blob is carried through verbatim.
 func TestRawPassthrough(t *testing.T) {
 	raw := json.RawMessage(`{"rating":0.9,"trades":42}`)
-	s := NormalizeFeedbackRating(fptr(0.9), 42, 0.85, 10, 5, raw)
+	s := NormalizeFeedbackRating(fptr(0.9), 42, DefaultFeedbackPriorMean, DefaultFeedbackPriorWeight, DefaultFeedbackVerifiedThreshold, raw)
 	if string(s.Raw) != string(raw) {
 		t.Fatalf("Raw = %s, want %s", s.Raw, raw)
 	}

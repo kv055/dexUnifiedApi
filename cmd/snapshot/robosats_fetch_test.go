@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"dexunifiedapi/internal/sellerrating"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -235,5 +238,33 @@ func TestLoadRobosatsCoordinatorsRevalidatesStaleCacheWithETag(t *testing.T) {
 func TestFetchRobosatsFederationRejectsInvalidRegistryURL(t *testing.T) {
 	if _, err := fetchRobosatsFederation(context.Background(), http.DefaultClient, "http://registry.test/federation.json"); err == nil {
 		t.Fatal("expected HTTP registry URL to be rejected")
+	}
+}
+
+func TestParseRobosatsOffersLeavesRatingUnavailable(t *testing.T) {
+	t.Parallel()
+	raw := []json.RawMessage{[]byte(`{
+		"id": 42,
+		"price": 60000,
+		"premium": 0,
+		"amount": 600,
+		"min_amount": 0,
+		"max_amount": 0,
+		"payment_method": "SEPA",
+		"bond_size": 3
+	}`)}
+	offers := parseRobosatsOffers(raw, "EUR", 60000)
+	if len(offers) != 1 {
+		t.Fatalf("len(offers) = %d, want 1", len(offers))
+	}
+	got := offers[0]
+	if got.SellerRatingScore != nil {
+		t.Fatalf("SellerRatingScore = %v, want nil (bond is not reputation)", *got.SellerRatingScore)
+	}
+	if got.SellerRatingConfidence == nil || *got.SellerRatingConfidence != string(sellerrating.ConfidenceUnavailable) {
+		t.Fatalf("SellerRatingConfidence = %v, want unavailable", got.SellerRatingConfidence)
+	}
+	if got.SecurityDepositPct == nil || *got.SecurityDepositPct != 0.03 {
+		t.Fatalf("SecurityDepositPct = %v, want 0.03 from bond_size 3", got.SecurityDepositPct)
 	}
 }

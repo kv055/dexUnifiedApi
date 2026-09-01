@@ -100,10 +100,26 @@ func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[str
 		if err != nil {
 			return fmt.Errorf("begin %s/%s: %w", dir, filename, err)
 		}
+		if dir == "migrations" && filename == "20260830153000_repair_legacy_varchar_enums.sql" {
+			// Legacy installations define ohlc.fiat_currency as CHAR(3) with a
+			// bpchar-typed EUR default. PostgreSQL cannot implicitly convert that
+			// default while the immutable migration changes the column to the
+			// fiat_currency enum, so remove and restore it in the same transaction.
+			if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency DROP DEFAULT`); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("prepare %s/%s: %w", dir, filename, err)
+			}
+		}
 
 		if _, err := tx.Exec(string(sqlBytes)); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
+		}
+		if dir == "migrations" && filename == "20260830153000_repair_legacy_varchar_enums.sql" {
+			if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency SET DEFAULT 'EUR'::fiat_currency`); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("finalize %s/%s: %w", dir, filename, err)
+			}
 		}
 		if _, err := tx.Exec(`INSERT INTO `+migrationTable+` (filename) VALUES ($1)`, filename); err != nil {
 			_ = tx.Rollback()

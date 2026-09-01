@@ -67,12 +67,6 @@ const (
 	defaultRobosatsFederationURL             = "https://raw.githubusercontent.com/RoboSats/robosats/main/frontend/static/federation.json"
 	defaultRobosatsFederationRefreshInterval = 6 * time.Hour
 	defaultRobosatsFederationCachePath       = "/tmp/robosats-federation.json"
-
-	// robosatsBondMin/MaxPct bound the documented RoboSats fidelity-bond range
-	// (default ~3%, maker-customizable 2-15%), used to scale the bond into a
-	// 0-100 stake-based reputation proxy.
-	robosatsBondMinPct = 2.0
-	robosatsBondMaxPct = 15.0
 )
 
 func init() {
@@ -142,16 +136,16 @@ type offer struct {
 	SecurityDepositBTC *float64 `json:"security_deposit_btc,omitempty"`
 	SecurityDepositPct *float64 `json:"security_deposit_pct,omitempty"`
 	// SellerRating* are the maker's reputation normalized across exchanges by
-	// commons/sellerrating. Score is 0-100 (nil when no signal is obtainable,
-	// e.g. bisq v1); Confidence records which methodology produced it; Raw
-	// preserves the exchange-specific inputs. Set via applyRating.
+	// internal/sellerrating. Score is 0-100 (nil when no signal is obtainable,
+	// e.g. RoboSats, unstaked Bisq 2, empty feedback); Confidence records which
+	// methodology produced it; Raw preserves the exchange-specific inputs.
+	// Set via applyRating.
 	SellerRatingScore      *float64        `json:"seller_rating_score,omitempty"`
 	SellerRatingConfidence *string         `json:"seller_rating_confidence,omitempty"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
 	// MakerID is the exchange's seller identity, sent to the unified-api server
-	// so it can look up a per-maker reputation for offers it marks profitable.
-	// Only Peach sets it (its listing omits the rating); not persisted to the
-	// offers table.
+	// so it can look up a per-maker reputation for live Peach offers (the
+	// listing omits the rating).
 	MakerID string `json:"maker_id,omitempty"`
 }
 
@@ -246,8 +240,8 @@ type livePayload struct {
 	SellerRatingScore      *float64        `json:"seller_rating_score"`
 	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
-	// MakerID lets the server look up a per-maker reputation for offers it marks
-	// profitable (Peach only; its listing omits the rating).
+	// MakerID lets the server look up a per-maker reputation for live Peach
+	// offers (its listing omits the rating).
 	MakerID string `json:"maker_id,omitempty"`
 }
 
@@ -521,7 +515,7 @@ func fetchBisq2Currency(ctx context.Context, direction, currency string, btcPric
 			"five_system_score": rep.FiveSystemScore,
 			"ranking":           rep.Ranking,
 		})
-		applyRating(&newOffer, sellerrating.NormalizeReputationScore(rep.FiveSystemScore, 5.0, repRaw))
+		applyRating(&newOffer, sellerrating.NormalizeBisq2TotalScore(rep.TotalScore, repRaw))
 		offers = append(offers, newOffer)
 	}
 
@@ -580,34 +574,28 @@ func (t *hodlHodlTrader) UnmarshalJSON(data []byte) error {
 }
 
 const (
-	// Shrinkage parameters for HodlHodl's peer-feedback rating. priorMean is a
-	// mildly-optimistic neutral rating; priorWeight is how many prior
-	// observations a new maker starts with (so a lone lucky trade can't dominate).
-	hodlHodlRatingPriorMean   = 0.85
-	hodlHodlRatingPriorWeight = 10
-	// verifiedThreshold is the trade count at which the score is trusted enough
-	// to tag feedback_verified rather than feedback_new.
-	hodlHodlVerifiedThreshold = 5
 	// strongHodlerBonus is a small bounded credit for the community "Strong
-	// Hodler" vouch, capped so Value never exceeds 100.
+	// Hodler" vouch, capped so Value never exceeds 100. Only applied when a
+	// real rating exists.
 	hodlHodlStrongHodlerBonus = 2.0
 )
 
 // mapHodlHodlTrader normalizes a HodlHodl maker's reputation into a Score. Kept
 // separate from the network call so it is unit-testable. Rating is already a
 // 0-1 fraction, so no rescale is needed before the shared feedback formula.
+// Nil or malformed ratings are Unavailable() — we do not mint a prior-only score.
 func mapHodlHodlTrader(t hodlHodlTrader) sellerrating.Score {
 	raw, _ := json.Marshal(map[string]any{
 		"rating":        t.Rating,
 		"trades_count":  t.TradesCount,
 		"strong_hodler": t.StrongHodler,
 	})
-	if t.ratingMalformed {
+	if t.ratingMalformed || t.Rating == nil {
 		return sellerrating.Unavailable()
 	}
 	s := sellerrating.NormalizeFeedbackRating(
 		t.Rating, t.TradesCount,
-		hodlHodlRatingPriorMean, hodlHodlRatingPriorWeight, hodlHodlVerifiedThreshold,
+		sellerrating.DefaultFeedbackPriorMean, sellerrating.DefaultFeedbackPriorWeight, sellerrating.DefaultFeedbackVerifiedThreshold,
 		raw,
 	)
 	if t.StrongHodler && s.Value != nil {
@@ -831,8 +819,8 @@ func mapPeachOfferCurrency(o peachOffer, direction, currency string, btcPrice in
 		PaymentMethods: normalizeAllPeachMethods(methods),
 		PriceType:      priceTypeFixed(),
 		// Peach's offer listing has no seller rating; the maker id is carried to
-		// the unified-api server, which looks the rating up only for offers it
-		// marks net-profitable (see cmd/server/peach_reputation.go).
+		// the unified-api server, which looks the rating up for live Peach offers
+		// (see cmd/server/peach_reputation.go).
 		MakerID: o.User.ID,
 	}
 	return result, true
@@ -844,7 +832,7 @@ type peachOffer struct {
 	MeansOfPayment map[string][]string `json:"meansOfPayment"`
 	Prices         map[string]float64  `json:"prices"`
 	// User carries only the maker id inline; reputation lives behind a separate
-	// GET /v1/user/:id call, done by the server for profitable offers.
+	// GET /v1/user/:id call, done by the server for live Peach offers.
 	User struct {
 		ID string `json:"id"`
 	} `json:"user"`
@@ -1309,8 +1297,9 @@ func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice 
 			SecurityDepositBTC: &depositBTC,
 			SecurityDepositPct: &depositPct,
 		}
-		bondRaw, _ := json.Marshal(map[string]any{"bond_size_pct": bondPct})
-		applyRating(&newOffer, sellerrating.NormalizeStakeBond(bondPct, robosatsBondMinPct, robosatsBondMaxPct, bondRaw))
+		// Bond is skin-in-the-game on this offer (security_deposit_*), not a
+		// maker reputation track record. Leave the rating Unavailable().
+		applyRating(&newOffer, sellerrating.Unavailable())
 		offers = append(offers, newOffer)
 	}
 	return offers

@@ -373,7 +373,7 @@ func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
 		);
 		CREATE TABLE ohlc (
 			id BIGSERIAL PRIMARY KEY,
-			fiat_currency CHAR(3) NOT NULL
+			fiat_currency CHAR(3) NOT NULL DEFAULT 'EUR'
 		);
 		CREATE TABLE payment_method_chat_templates (
 			id BIGSERIAL PRIMARY KEY,
@@ -422,6 +422,16 @@ func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
 		if udt != col.udt {
 			t.Errorf("%s.%s type = %q, want %q", col.table, col.column, udt, col.udt)
 		}
+	}
+	var defaultCurrency string
+	if err := db.QueryRow(`
+		INSERT INTO ohlc DEFAULT VALUES
+		RETURNING fiat_currency::text
+	`).Scan(&defaultCurrency); err != nil {
+		t.Fatalf("insert ohlc row with migrated default: %v", err)
+	}
+	if defaultCurrency != "EUR" {
+		t.Errorf("ohlc fiat_currency default = %q, want EUR", defaultCurrency)
 	}
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		t.Fatalf("reapply varchar enum repair: %v", err)

@@ -324,6 +324,14 @@ func TestSaveSnapshotCollapsesIdlessOffersByFingerprint(t *testing.T) {
 
 func TestMapHodlHodlTrader(t *testing.T) {
 	t.Parallel()
+	t.Run("no rating yet (nil) is unavailable", func(t *testing.T) {
+		t.Parallel()
+		s := mapHodlHodlTrader(hodlHodlTrader{TradesCount: 0, Rating: nil})
+		if s.Value != nil || s.Confidence != sellerrating.ConfidenceUnavailable {
+			t.Fatalf("got value=%v conf=%q, want nil/unavailable", s.Value, s.Confidence)
+		}
+	})
+
 	tests := []struct {
 		name     string
 		trader   hodlHodlTrader
@@ -332,22 +340,16 @@ func TestMapHodlHodlTrader(t *testing.T) {
 		wantMin, wantMax float64
 	}{
 		{
-			name:     "no rating yet (nil) sits near the prior, tagged new",
-			trader:   hodlHodlTrader{TradesCount: 0, Rating: floatPtr(0)}, // Rating ignored when nil; use nil below
-			wantConf: sellerrating.ConfidenceFeedbackNew,
-			wantMin:  80, wantMax: 90,
-		},
-		{
-			name:     "few good trades stay new",
+			name:     "few good trades stay new near the conservative prior",
 			trader:   hodlHodlTrader{TradesCount: 3, Rating: floatPtr(1.0)},
 			wantConf: sellerrating.ConfidenceFeedbackNew,
-			wantMin:  85, wantMax: 92,
+			wantMin:  50, wantMax: 60,
 		},
 		{
 			name:     "many good trades verified",
 			trader:   hodlHodlTrader{TradesCount: 200, Rating: floatPtr(0.98)},
 			wantConf: sellerrating.ConfidenceFeedbackVerified,
-			wantMin:  95, wantMax: 100,
+			wantMin:  90, wantMax: 100,
 		},
 		{
 			name:     "strong hodler bonus applied, capped at 100",
@@ -356,8 +358,6 @@ func TestMapHodlHodlTrader(t *testing.T) {
 			wantMin:  99, wantMax: 100,
 		},
 	}
-	// First case exercises the genuine nil-rating path.
-	tests[0].trader.Rating = nil
 
 	for _, tc := range tests {
 		tc := tc
@@ -387,7 +387,7 @@ func TestHodlHodlTraderRatingDecoding(t *testing.T) {
 	}{
 		{name: "number", ratingJSON: `0.96`, wantRating: floatPtr(0.96)},
 		{name: "numeric string", ratingJSON: `"0.91"`, wantRating: floatPtr(0.91)},
-		{name: "null", ratingJSON: `null`, wantRating: nil},
+		{name: "null", ratingJSON: `null`, wantRating: nil, wantUnavailable: true},
 		{name: "malformed", ratingJSON: `{"bad":true}`, wantUnavailable: true},
 	}
 	for _, tc := range tests {

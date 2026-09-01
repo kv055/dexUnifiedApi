@@ -78,6 +78,53 @@ func TestRefreshLiveHubLoadsCompleteMultiFiatBookAndRetainsItOnFailure(t *testin
 	}
 }
 
+func TestLiveHubRawPremiumLiveCountsByFiat(t *testing.T) {
+	oldHub := hub
+	oldPrices := cexPrices
+	t.Cleanup(func() {
+		hub = oldHub
+		cexPrices = oldPrices
+	})
+	hub = &LiveHub{
+		offers: []LiveOffer{
+			{ID: 1, Exchange: "bisq", FiatCurrency: "EUR", Direction: "bid", Price: 61000, ReferencePrice: 60000},
+			{ID: 2, Exchange: "hodlhodl", FiatCurrency: "USD", Direction: "ask", Price: 67000, ReferencePrice: 66500},
+			{ID: 3, Exchange: "bisq", FiatCurrency: "USD", Direction: "bid", Price: 68000, ReferencePrice: 66500},
+			{ID: 4, Exchange: "bisq", FiatCurrency: "GBP", Direction: "bid", Price: 50000, ReferencePrice: 51000},
+			{ID: 5, Exchange: "bisq", FiatCurrency: "EUR", Direction: "bid", Price: 60000, ReferencePrice: 60000},
+		},
+		lifecycle:   make(map[int64][]LifecyclePoint),
+		subscribers: make(map[chan []byte]liveSubscription),
+	}
+	cexPrices = map[string]float64{"kraken": 60000}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/live_offers/counts", nil)
+	rec := httptest.NewRecorder()
+	handleLiveOffersCountsREST(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		RawPremium map[string]int `json:"raw_premium"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.RawPremium["EUR"] != 1 {
+		t.Fatalf("EUR raw-premium live count = %d, want 1", payload.RawPremium["EUR"])
+	}
+	if payload.RawPremium["USD"] != 1 {
+		t.Fatalf("USD raw-premium live count = %d, want 1", payload.RawPremium["USD"])
+	}
+	if payload.RawPremium["GBP"] != 0 {
+		t.Fatalf("GBP raw-premium live count = %d, want 0", payload.RawPremium["GBP"])
+	}
+	if payload.RawPremium["CHF"] != 0 {
+		t.Fatalf("CHF raw-premium live count = %d, want 0", payload.RawPremium["CHF"])
+	}
+}
+
 func TestLiveHubFiltersSubscriptionsByFiatAndUsesStoredReferencePrice(t *testing.T) {
 	oldHub := hub
 	oldPrices := cexPrices

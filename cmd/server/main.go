@@ -437,6 +437,12 @@ func handleLiveOffersREST(w http.ResponseWriter, r *http.Request) {
 	w.Write(payload)
 }
 
+func handleLiveOffersCountsREST(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]map[string]int{
+		"raw_premium": hub.rawPremiumLiveCountsByFiat(),
+	})
+}
+
 // fetchOfferLifecycle returns lifecycle (snapshot_time, price) points grouped by offer_db_id.
 func fetchOfferLifecycle(ctx context.Context, ids []int64) map[int64][]LifecyclePoint {
 	result := make(map[int64][]LifecyclePoint, len(ids))
@@ -642,18 +648,34 @@ type cexCapabilitiesResponse struct {
 }
 
 type cexFeeSnapshotStatus struct {
-	SpotTakerFeePercent         *float64   `json:"spot_taker_fee_percent"`
-	WithdrawalFeeBTC            *float64   `json:"withdrawal_fee_btc"`
-	FuturesOpenTakerFeePercent  *float64   `json:"futures_open_taker_fee_percent"`
-	FuturesCloseTakerFeePercent *float64   `json:"futures_close_taker_fee_percent"`
-	FuturesFundingFeePercent    *float64   `json:"futures_funding_fee_percent"`
-	FuturesFundingIntervalSecs  *int64     `json:"futures_funding_interval_seconds"`
-	SpotAvailable               bool       `json:"spot_available"`
-	HedgeAvailable              bool       `json:"hedge_available"`
-	Stale                       bool       `json:"stale"`
-	FetchedAt                   *time.Time `json:"fetched_at,omitempty"`
-	LastAttemptedAt             *time.Time `json:"last_attempted_at,omitempty"`
-	LastError                   string     `json:"last_error,omitempty"`
+	SpotTakerFeePercent         *float64              `json:"spot_taker_fee_percent"`
+	WithdrawalFeeBTC            *float64              `json:"withdrawal_fee_btc"`
+	FuturesOpenTakerFeePercent  *float64              `json:"futures_open_taker_fee_percent"`
+	FuturesCloseTakerFeePercent *float64              `json:"futures_close_taker_fee_percent"`
+	FuturesFundingFeePercent    *float64              `json:"futures_funding_fee_percent"`
+	FuturesFundingIntervalSecs  *int64                `json:"futures_funding_interval_seconds"`
+	SpotAvailable               bool                  `json:"spot_available"`
+	AskAvailable                bool                  `json:"ask_available"`
+	BidAvailable                bool                  `json:"bid_available"`
+	HedgeAvailable              bool                  `json:"hedge_available"`
+	Stale                       bool                  `json:"stale"`
+	FetchedAt                   *time.Time            `json:"fetched_at,omitempty"`
+	LastAttemptedAt             *time.Time            `json:"last_attempted_at,omitempty"`
+	LastError                   string                `json:"last_error,omitempty"`
+	Spot                        cexFeeComponentStatus `json:"spot"`
+	Withdrawal                  cexFeeComponentStatus `json:"withdrawal"`
+	Hedge                       cexFeeComponentStatus `json:"hedge"`
+}
+
+type cexFeeComponentStatus struct {
+	Available       bool       `json:"available"`
+	Stale           bool       `json:"stale"`
+	FetchedAt       *time.Time `json:"fetched_at,omitempty"`
+	LastAttemptedAt *time.Time `json:"last_attempted_at,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	Source          string     `json:"source,omitempty"`
+	ObservedFeeBTC  *float64   `json:"observed_fee_btc,omitempty"`
+	ObservedAt      *time.Time `json:"observed_at,omitempty"`
 }
 
 type cexCapabilityExchange struct {
@@ -674,7 +696,11 @@ func buildCEXCapabilityExchange(ctx context.Context, state mmcapabilities.Provid
 		result.FeeSnapshot.SpotTakerFeePercent = &fees.SpotTakerFeeRate.Float64
 	}
 	if fees.BTCWithdrawalFeeBTC.Valid {
-		result.FeeSnapshot.WithdrawalFeeBTC = &fees.BTCWithdrawalFeeBTC.Float64
+		value := fees.BTCWithdrawalFeeBTC.Float64
+		if state.Exchange == "coinbase" && tradeCostEstimators["coinbase"] != nil {
+			value, result.FeeSnapshot.Withdrawal.Source = tradeCostEstimators["coinbase"].CoinbaseWithdrawalReserve(value)
+		}
+		result.FeeSnapshot.WithdrawalFeeBTC = &value
 	}
 	if fees.FuturesOpenTakerRate.Valid {
 		result.FeeSnapshot.FuturesOpenTakerFeePercent = &fees.FuturesOpenTakerRate.Float64
@@ -688,9 +714,31 @@ func buildCEXCapabilityExchange(ctx context.Context, state mmcapabilities.Provid
 	if fees.FundingIntervalSeconds.Valid {
 		result.FeeSnapshot.FuturesFundingIntervalSecs = &fees.FundingIntervalSeconds.Int64
 	}
-	result.FeeSnapshot.SpotAvailable = fees.SpotTakerFeeRate.Valid && fees.BTCWithdrawalFeeBTC.Valid && fees.FetchedAt.Valid
-	result.FeeSnapshot.HedgeAvailable = fees.FuturesOpenTakerRate.Valid && fees.FuturesCloseTakerRate.Valid && fees.FuturesFundingRate.Valid && fees.FundingIntervalSeconds.Valid && fees.FundingIntervalSeconds.Int64 > 0 && fees.FetchedAt.Valid
-	result.FeeSnapshot.Stale = fees.Stale(now)
+	result.FeeSnapshot.AskAvailable = fees.SpotTakerFeeRate.Valid && (fees.SpotFetchedAt.Valid || fees.FetchedAt.Valid)
+	result.FeeSnapshot.BidAvailable = result.FeeSnapshot.AskAvailable && fees.BTCWithdrawalFeeBTC.Valid && (fees.WithdrawalFetchedAt.Valid || fees.FetchedAt.Valid)
+	result.FeeSnapshot.SpotAvailable = result.FeeSnapshot.BidAvailable
+	result.FeeSnapshot.HedgeAvailable = fees.FuturesOpenTakerRate.Valid && fees.FuturesCloseTakerRate.Valid && fees.FuturesFundingRate.Valid && fees.FundingIntervalSeconds.Valid && fees.FundingIntervalSeconds.Int64 > 0 && (fees.HedgeFetchedAt.Valid || fees.FetchedAt.Valid)
+	result.FeeSnapshot.Spot = feeComponentStatus(result.FeeSnapshot.AskAvailable, fees.SpotStale(now), fees.SpotFetchedAt, fees.SpotLastAttemptedAt, fees.SpotLastError)
+	withdrawalSource := strings.TrimSpace(fees.WithdrawalFeeSource.String)
+	if result.FeeSnapshot.Withdrawal.Source == "" {
+		result.FeeSnapshot.Withdrawal.Source = withdrawalSource
+	}
+	result.FeeSnapshot.Withdrawal = feeComponentStatus(fees.BTCWithdrawalFeeBTC.Valid && (fees.WithdrawalFetchedAt.Valid || fees.FetchedAt.Valid), fees.WithdrawalStale(now), fees.WithdrawalFetchedAt, fees.WithdrawalLastAttemptedAt, fees.WithdrawalLastError)
+	if state.Exchange == "coinbase" && tradeCostEstimators["coinbase"] != nil && result.FeeSnapshot.WithdrawalFeeBTC != nil {
+		_, result.FeeSnapshot.Withdrawal.Source = tradeCostEstimators["coinbase"].CoinbaseWithdrawalReserve(fees.BTCWithdrawalFeeBTC.Float64)
+	} else {
+		result.FeeSnapshot.Withdrawal.Source = withdrawalSource
+	}
+	if fees.WithdrawalFeeObservedBTC.Valid {
+		value := fees.WithdrawalFeeObservedBTC.Float64
+		result.FeeSnapshot.Withdrawal.ObservedFeeBTC = &value
+	}
+	if fees.WithdrawalFeeObservedAt.Valid {
+		value := fees.WithdrawalFeeObservedAt.Time.UTC()
+		result.FeeSnapshot.Withdrawal.ObservedAt = &value
+	}
+	result.FeeSnapshot.Hedge = feeComponentStatus(result.FeeSnapshot.HedgeAvailable, fees.HedgeStale(now), fees.HedgeFetchedAt, fees.HedgeLastAttemptedAt, fees.HedgeLastError)
+	result.FeeSnapshot.Stale = result.FeeSnapshot.Spot.Stale || result.FeeSnapshot.Withdrawal.Stale || (state.Hedge.Supported && result.FeeSnapshot.Hedge.Stale)
 	if fees.FetchedAt.Valid {
 		value := fees.FetchedAt.Time.UTC()
 		result.FeeSnapshot.FetchedAt = &value
@@ -701,6 +749,19 @@ func buildCEXCapabilityExchange(ctx context.Context, state mmcapabilities.Provid
 	}
 	result.FeeSnapshot.LastError = strings.TrimSpace(fees.LastError.String)
 	return result
+}
+
+func feeComponentStatus(available, stale bool, fetched, attempted sql.NullTime, lastError sql.NullString) cexFeeComponentStatus {
+	status := cexFeeComponentStatus{Available: available, Stale: stale, LastError: strings.TrimSpace(lastError.String)}
+	if fetched.Valid {
+		value := fetched.Time.UTC()
+		status.FetchedAt = &value
+	}
+	if attempted.Valid {
+		value := attempted.Time.UTC()
+		status.LastAttemptedAt = &value
+	}
+	return status
 }
 
 func currentCapabilityStore() *mmcapabilities.Store {

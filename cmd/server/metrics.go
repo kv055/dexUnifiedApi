@@ -21,6 +21,8 @@ type serverMetrics struct {
 	healthCheckDur   *prometheus.HistogramVec
 	healthChecks     *prometheus.CounterVec
 	routeResolutions *prometheus.CounterVec
+	cexFeeRefreshes  *prometheus.CounterVec
+	cexFeeValues     *prometheus.GaugeVec
 }
 
 // newServerMetrics registers the unified-api instruments on reg.
@@ -55,10 +57,35 @@ func newServerMetrics(reg prometheus.Registerer) *serverMetrics {
 			Name: "dex_snapshot_route_resolutions_total",
 			Help: "Offers resolved, blocked, or out of scope while building route books.",
 		}, []string{"status", "reason"}),
+		cexFeeRefreshes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dex_cex_fee_refreshes_total",
+			Help: "CEX fee component refreshes by provider, component and result.",
+		}, []string{"provider", "component", "result"}),
+		cexFeeValues: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "dex_cex_fee_value",
+			Help: "Latest CEX fee value as a decimal fraction or BTC amount.",
+		}, []string{"provider", "component", "source"}),
 	}
 	reg.MustRegister(m.wsClients, m.wsBroadcasts, m.liveOffersInHub, m.liveOffersPushed,
-		m.healthCheckDur, m.healthChecks, m.routeResolutions)
+		m.healthCheckDur, m.healthChecks, m.routeResolutions, m.cexFeeRefreshes, m.cexFeeValues)
 	return m
+}
+
+func (m *serverMetrics) observeCEXFeeRefresh(provider, component string, value *float64, source string, err error) {
+	if m == nil {
+		return
+	}
+	result := "ok"
+	if err != nil {
+		result = "fail"
+	}
+	m.cexFeeRefreshes.WithLabelValues(provider, component, result).Inc()
+	if value != nil {
+		if source == "" {
+			source = "exchange_reported"
+		}
+		m.cexFeeValues.WithLabelValues(provider, component, source).Set(*value)
+	}
 }
 
 func (m *serverMetrics) observeRouteResolution(status, reason string) {

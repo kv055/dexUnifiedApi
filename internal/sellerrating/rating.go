@@ -1,16 +1,18 @@
 // Package sellerrating normalizes the seller/maker reputation signals of
-// several P2P exchanges into one comparable 0-100 score plus a confidence tag,
-// mirroring commons/paymentmethods as the established pattern for cross-exchange
+// several P2P exchanges into one 0-100 score plus a confidence tag, mirroring
+// commons/paymentmethods as the established pattern for cross-exchange
 // normalization.
 //
-// Each exchange expresses maker trust differently — a peer-feedback average
-// (HodlHodl, Peach), a platform-computed composite reputation score (Bisq 2),
-// a raw financial bond percentage (RoboSats), or nothing at all (Bisq 1). The
-// functions here take the exchange-specific raw signal and return a Score whose
-// Value is on a single 0-100 scale, whose Confidence records which methodology
-// produced it (so a bond-derived estimate is never silently compared as if it
-// were a verified feedback score), and whose Raw preserves the source inputs so
-// the score can be re-derived later without re-fetching.
+// The 0-100 value is a within-methodology helper, not a cross-venue ranking:
+// a HodlHodl 73 and a Bisq 2 72 are not the same kind of evidence. Confidence
+// records which methodology produced the number (peer feedback, Bisq 2 bonded
+// reputation, Bisq 1 account signing) so a bond or an empty book is never
+// silently compared as if it were verified feedback. Raw preserves the source
+// inputs so the score can be re-derived later without re-fetching.
+//
+// RoboSats fidelity bonds are not mapped onto this axis; fetchers store them
+// on security_deposit_pct and leave the rating Unavailable(). NormalizeStakeBond
+// remains for leftover rows and tests.
 //
 // All functions are pure (no DB/HTTP dependency) and unit-testable.
 package sellerrating
@@ -27,8 +29,8 @@ import (
 type Confidence string
 
 const (
-	// ConfidenceUnavailable means no reputation signal was obtainable at all
-	// (e.g. Bisq 1, whose signal is not exposed by the data we ingest). Paired
+	// ConfidenceUnavailable means no reputation signal was obtainable (empty
+	// feedback sample, unstaked Bisq 2, RoboSats, unpatched Bisq 1). Paired
 	// with a nil Score.Value.
 	ConfidenceUnavailable Confidence = "unavailable"
 	// ConfidenceFeedbackNew is a peer-feedback exchange whose sample count is
@@ -38,7 +40,9 @@ const (
 	// behind the rating to trust it.
 	ConfidenceFeedbackVerified Confidence = "feedback_verified"
 	// ConfidenceStakeBonded is trust derived from a raw financial bond
-	// percentage rather than peer feedback (RoboSats).
+	// percentage rather than peer feedback. Current fetchers no longer write
+	// this (RoboSats bonds stay on security_deposit_pct); the tag remains for
+	// leftover rows until the next snapshot overwrites them.
 	ConfidenceStakeBonded Confidence = "stake_bonded"
 	// ConfidenceReputationBonded is a platform-computed composite reputation
 	// score, backed by economic stake plus history (Bisq 2).
@@ -76,30 +80,39 @@ func Unavailable() Score {
 	return Score{Value: nil, Confidence: ConfidenceUnavailable, Raw: nil}
 }
 
+// Default shrinkage for every peer-feedback exchange (HodlHodl, Peach). A
+// conservative 0.50 prior with weight 20 keeps a lucky first trade near 52
+// rather than minting a green 85; verifiedThreshold 20 is the sample count at
+// which Confidence flips from feedback_new to feedback_verified.
+const (
+	DefaultFeedbackPriorMean         = 0.50
+	DefaultFeedbackPriorWeight       = 20.0
+	DefaultFeedbackVerifiedThreshold = 20
+)
+
 // NormalizeFeedbackRating converts a peer-feedback average (already rescaled by
 // the caller into [0,1]) plus a sample count into a shrinkage-adjusted 0-100
 // score. It is shared by every "feedback average + sample count" exchange
 // (HodlHodl, Peach) — each rescales its own raw range to [0,1] first.
 //
-// rating == nil means "no feedback recorded yet"; the score is still computed
-// from the prior alone (a heavily-shrunk value), which is distinct from the
-// Unavailable() nil case reserved for exchanges with no mechanism. sampleCount
-// is the number of trades/ratings behind rating. priorMean is the neutral prior
-// in [0,1]; priorWeight is the shrinkage strength (how many fictitious prior
-// observations). A brand-new account's lucky first trade is pulled toward the
-// prior so it cannot outrank a long track record. Confidence is
-// ConfidenceFeedbackVerified once sampleCount >= verifiedThreshold, else
-// ConfidenceFeedbackNew. raw is passed through verbatim into Score.Raw.
+// rating == nil or sampleCount <= 0 means no usable feedback: the result is
+// Unavailable() (nil Value) rather than a prior-only 50/85 that would look like
+// a real score. sampleCount is the number of trades/ratings behind rating.
+// priorMean is the conservative prior in [0,1]; priorWeight is the shrinkage
+// strength (how many fictitious prior observations). A brand-new account's
+// lucky first trade is pulled toward the prior so it cannot outrank a long
+// track record. Confidence is ConfidenceFeedbackVerified once sampleCount >=
+// verifiedThreshold, else ConfidenceFeedbackNew. raw is passed through
+// verbatim into Score.Raw, including on the unavailable path.
 func NormalizeFeedbackRating(rating *float64, sampleCount int, priorMean, priorWeight float64, verifiedThreshold int, raw json.RawMessage) Score {
-	effectiveRating := priorMean
-	if rating != nil {
-		effectiveRating = *rating
+	if rating == nil || sampleCount <= 0 {
+		return Score{Value: nil, Confidence: ConfidenceUnavailable, Raw: raw}
 	}
 
 	n := float64(sampleCount)
-	adjusted := priorMean
+	adjusted := *rating
 	if denom := n + priorWeight; denom > 0 {
-		adjusted = (effectiveRating*n + priorMean*priorWeight) / denom
+		adjusted = (*rating*n + priorMean*priorWeight) / denom
 	}
 
 	value := clamp0100(round2(adjusted * 100))
@@ -124,15 +137,67 @@ func NormalizeStakeBond(bondPct, minPct, maxPct float64, raw json.RawMessage) Sc
 }
 
 // NormalizeReputationScore converts a platform-computed star rating (already
-// bucketed by the exchange, e.g. Bisq 2's 0-5 fiveSystemScore) onto 0-100.
-// A stars value of 0 is an honest "no reputation stake" score, distinct from
-// Unavailable(). Always ConfidenceReputationBonded.
+// bucketed by the exchange) onto 0-100. Kept for tests and leftover callers;
+// Bisq 2 ingest uses NormalizeBisq2TotalScore so unstaked makers are
+// Unavailable() rather than an honest 0. Always ConfidenceReputationBonded
+// when a number is produced.
 func NormalizeReputationScore(stars, maxStars float64, raw json.RawMessage) Score {
 	frac := 0.0
 	if maxStars > 0 {
 		frac = stars / maxStars
 	}
 	value := clamp0100(round2(clamp01(frac) * 100))
+	return Score{Value: &value, Confidence: ConfidenceReputationBonded, Raw: raw}
+}
+
+// Bisq Easy five-system buckets (ReputationScore.toFiveSystemScore-style
+// thresholds) mapped onto a conservative 20-100 scale. totalScore <= 0 is not
+// a bucket: that is "no stake yet", returned as Unavailable() so it is not
+// confused with a banned / score-0 maker.
+//
+//	totalScore        score
+//	<= 0              unavailable
+//	1 .. 1_199        20
+//	1_200 .. 4_999    35
+//	5_000 .. 14_999   50
+//	15_000 .. 24_999  62
+//	25_000 .. 39_999  72
+//	40_000 .. 79_999  82
+//	80_000 .. 199_999 92
+//	>= 200_000        100
+func bisq2ScoreForTotal(totalScore int64) (float64, bool) {
+	switch {
+	case totalScore <= 0:
+		return 0, false
+	case totalScore < 1_200:
+		return 20, true
+	case totalScore < 5_000:
+		return 35, true
+	case totalScore < 15_000:
+		return 50, true
+	case totalScore < 25_000:
+		return 62, true
+	case totalScore < 40_000:
+		return 72, true
+	case totalScore < 80_000:
+		return 82, true
+	case totalScore < 200_000:
+		return 92, true
+	default:
+		return 100, true
+	}
+}
+
+// NormalizeBisq2TotalScore maps Bisq 2's bonded-reputation totalScore onto
+// 0-100 using the piecewise table above. fiveSystemScore and ranking belong
+// in raw (callers stash them) but do not drive the number: a 0-star unstaked
+// maker is Unavailable(), not 0. Always ConfidenceReputationBonded when a
+// score is produced.
+func NormalizeBisq2TotalScore(totalScore int64, raw json.RawMessage) Score {
+	value, ok := bisq2ScoreForTotal(totalScore)
+	if !ok {
+		return Score{Value: nil, Confidence: ConfidenceUnavailable, Raw: raw}
+	}
 	return Score{Value: &value, Confidence: ConfidenceReputationBonded, Raw: raw}
 }
 

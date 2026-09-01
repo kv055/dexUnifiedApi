@@ -17,6 +17,7 @@ func TestRegisterRoutes(t *testing.T) {
 		pattern string
 	}{
 		{http.MethodGet, "/api/live_offers", "GET /api/live_offers"},
+		{http.MethodGet, "/api/live_offers/counts", "GET /api/live_offers/counts"},
 		{http.MethodGet, "/api/live_offers/42/lifecycle", "GET /api/live_offers/{id}/lifecycle"},
 		{http.MethodGet, "/api/payment_notifications", "GET /api/payment_notifications"},
 		{http.MethodGet, "/ws/live_offers", "GET /ws/live_offers"},
@@ -75,5 +76,34 @@ func TestOpenAPIRegisteredLiveOfferResponses(t *testing.T) {
 				t.Fatalf("registered route response is not a JSON array: %v (body=%s)", err, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestOpenAPIRegisteredLiveOfferCountsResponse(t *testing.T) {
+	previousHub := hub
+	t.Cleanup(func() { hub = previousHub })
+	hub = &LiveHub{
+		lifecycle:   map[int64][]LifecyclePoint{},
+		subscribers: map[chan []byte]liveSubscription{},
+	}
+
+	mux := http.NewServeMux()
+	registerRoutes(mux)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/live_offers/counts", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("registered route status = %d, want %d (body=%s)", response.Code, http.StatusOK, response.Body.String())
+	}
+	var payload struct {
+		RawPremium map[string]int `json:"raw_premium"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("registered route response is not a counts object: %v (body=%s)", err, response.Body.String())
+	}
+	if payload.RawPremium == nil {
+		t.Fatal("raw_premium is missing")
 	}
 }

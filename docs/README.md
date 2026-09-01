@@ -15,3 +15,4 @@ This documentation mirrors the production Go source tree. Each Markdown file des
 - [internal/config/env.go](internal/config/env.md) - package `config`
 - [internal/lifecycle/lifecycle.go](internal/lifecycle/lifecycle.md) - package `lifecycle`
 - [internal/paymentnotifications/payment_notifications.go](internal/paymentnotifications/payment_notifications.md) - package `paymentnotifications`
+- [internal/sellerrating/rating.go](internal/sellerrating/rating.md) - package `sellerrating`

@@ -35,3 +35,6 @@ nav:
       - paymentnotifications:
           - Overview: internal/paymentnotifications/README.md
           - payment_notifications.go: internal/paymentnotifications/payment_notifications.md
+      - sellerrating:
+          - Overview: internal/sellerrating/README.md
+          - rating.go: internal/sellerrating/rating.md

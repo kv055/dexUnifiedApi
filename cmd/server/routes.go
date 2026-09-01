@@ -26,6 +26,7 @@ func registerRoutes(mux *http.ServeMux) {
 // directly on the generated StrictServerInterface instead of being added here.
 func registerLegacyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/live_offers", handleLiveOffersREST)
+	mux.HandleFunc("GET /api/live_offers/counts", handleLiveOffersCountsREST)
 	mux.HandleFunc("GET /api/live_offers/{id}/lifecycle", handleLiveOfferLifecycleREST)
 	mux.HandleFunc("GET /api/payment_notifications", handlePaymentNotifications)
 	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)

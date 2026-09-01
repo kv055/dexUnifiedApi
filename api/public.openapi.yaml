@@ -110,6 +110,40 @@ paths:
       description: GET /api/live_offers
       security:
         - dashboardSession: []
+  /api/live_offers/counts:
+    get:
+      operationId: getApiLiveOffersCounts
+      tags:
+        - live-offers
+      summary: Live offer counts by fiat
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - raw_premium
+                properties:
+                  raw_premium:
+                    type: object
+                    additionalProperties:
+                      type: integer
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: Counts currently live offers that have a positive raw premium, grouped by fiat currency.
+      security:
+        - dashboardSession: []
   /api/live_offers/{id}/lifecycle:
     get:
       operationId: getApiLiveOffersIdLifecycle

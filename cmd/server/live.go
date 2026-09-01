@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"commons/fiat"
 	"commons/tradecost"
 	"dexunifiedapi/internal/lifecycle"
 
@@ -84,7 +85,7 @@ type LiveOffer struct {
 	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw"`
 	// MakerID is the exchange's seller identity, used to look up a per-maker
-	// reputation for profitable offers (Peach only; its listing omits the rating).
+	// reputation for live Peach offers (its listing omits the rating).
 	MakerID string `json:"maker_id,omitempty"`
 }
 
@@ -808,6 +809,33 @@ func (h *LiveHub) getOffers() []LiveOffer {
 	cp := make([]LiveOffer, len(h.offers))
 	copy(cp, h.offers)
 	return cp
+}
+
+// rawPremiumLiveCountsByFiat counts currently live offers whose directional
+// raw premium is positive, grouped by enabled fiat currency.
+func (h *LiveHub) rawPremiumLiveCountsByFiat() map[string]int {
+	counts := make(map[string]int, len(fiat.Enabled))
+	for _, currency := range fiat.Enabled {
+		counts[currency] = 0
+	}
+	if h == nil {
+		return counts
+	}
+	for _, offer := range h.getOffers() {
+		refPrice := offer.ReferencePrice
+		if refPrice <= 0 {
+			refPrice = getCexPrice(defaultCEX)
+		}
+		if computeDirectionalPremiumPct(offer.Direction, offer.Price, refPrice) <= 0 {
+			continue
+		}
+		currency, ok := fiat.Normalize(offer.FiatCurrency)
+		if !ok {
+			continue
+		}
+		counts[currency]++
+	}
+	return counts
 }
 
 // setCapabilityExclusions updates the server-authoritative routing overlay.

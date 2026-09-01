@@ -50,6 +50,9 @@ type ServerInterface interface {
 	// GetApiLiveOffers GET /api/live_offers
 	// (GET /api/live_offers)
 	GetApiLiveOffers(w http.ResponseWriter, r *http.Request)
+	// GetApiLiveOffersCounts Live offer counts by fiat
+	// (GET /api/live_offers/counts)
+	GetApiLiveOffersCounts(w http.ResponseWriter, r *http.Request)
 	// GetApiLiveOffersIdLifecycle GET /api/live_offers/{id}/lifecycle
 	// (GET /api/live_offers/{id}/lifecycle)
 	GetApiLiveOffersIdLifecycle(w http.ResponseWriter, r *http.Request, id string)
@@ -115,6 +118,20 @@ func (siw *ServerInterfaceWrapper) GetApiLiveOffers(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetApiLiveOffers(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetApiLiveOffersCounts operation middleware
+func (siw *ServerInterfaceWrapper) GetApiLiveOffersCounts(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetApiLiveOffersCounts(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -301,6 +318,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/cex_permissions", wrapper.GetApiCexPermissions)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/cex_permissions/{provider}", wrapper.PutApiCexPermissionsProvider)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/live_offers", wrapper.GetApiLiveOffers)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/live_offers/counts", wrapper.GetApiLiveOffersCounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/live_offers/{id}/lifecycle", wrapper.GetApiLiveOffersIdLifecycle)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/payment_notifications", wrapper.GetApiPaymentNotifications)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/trade_cost_config", wrapper.GetApiTradeCostConfig)
@@ -458,6 +476,60 @@ type GetApiLiveOffersdefaultTextResponse struct {
 }
 
 func (response GetApiLiveOffersdefaultTextResponse) VisitGetApiLiveOffersResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(response.StatusCode)
+
+	_, err := w.Write([]byte(fmt.Sprint(response.Body)))
+	return err
+}
+
+type GetApiLiveOffersCountsRequestObject struct {
+}
+
+type GetApiLiveOffersCountsResponseObject interface {
+	VisitGetApiLiveOffersCountsResponse(w http.ResponseWriter) error
+}
+
+type GetApiLiveOffersCounts200JSONResponse struct {
+	RawPremium map[string]int `json:"raw_premium"`
+}
+
+func (response GetApiLiveOffersCounts200JSONResponse) VisitGetApiLiveOffersCountsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetApiLiveOffersCountsdefaultJSONResponse struct {
+	Body       map[string]interface{}
+	StatusCode int
+}
+
+func (response GetApiLiveOffersCountsdefaultJSONResponse) VisitGetApiLiveOffersCountsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetApiLiveOffersCountsdefaultTextResponse struct {
+	Body       string
+	StatusCode int
+}
+
+func (response GetApiLiveOffersCountsdefaultTextResponse) VisitGetApiLiveOffersCountsResponse(w http.ResponseWriter) error {
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(response.StatusCode)
@@ -634,6 +706,9 @@ type StrictServerInterface interface {
 	// GetApiLiveOffers GET /api/live_offers
 	// (GET /api/live_offers)
 	GetApiLiveOffers(ctx context.Context, request GetApiLiveOffersRequestObject) (GetApiLiveOffersResponseObject, error)
+	// GetApiLiveOffersCounts Live offer counts by fiat
+	// (GET /api/live_offers/counts)
+	GetApiLiveOffersCounts(ctx context.Context, request GetApiLiveOffersCountsRequestObject) (GetApiLiveOffersCountsResponseObject, error)
 	// GetApiLiveOffersIdLifecycle GET /api/live_offers/{id}/lifecycle
 	// (GET /api/live_offers/{id}/lifecycle)
 	GetApiLiveOffersIdLifecycle(ctx context.Context, request GetApiLiveOffersIdLifecycleRequestObject) (GetApiLiveOffersIdLifecycleResponseObject, error)
@@ -768,6 +843,30 @@ func (sh *strictHandler) GetApiLiveOffers(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// GetApiLiveOffersCounts operation middleware
+func (sh *strictHandler) GetApiLiveOffersCounts(w http.ResponseWriter, r *http.Request) {
+	var request GetApiLiveOffersCountsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetApiLiveOffersCounts(ctx, request.(GetApiLiveOffersCountsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetApiLiveOffersCounts")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetApiLiveOffersCountsResponseObject); ok {
+		if err := validResponse.VisitGetApiLiveOffersCountsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetApiLiveOffersIdLifecycle operation middleware
 func (sh *strictHandler) GetApiLiveOffersIdLifecycle(w http.ResponseWriter, r *http.Request, id string) {
 	var request GetApiLiveOffersIdLifecycleRequestObject
@@ -847,22 +946,24 @@ func (sh *strictHandler) GetApiTradeCostConfig(w http.ResponseWriter, r *http.Re
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,
