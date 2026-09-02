@@ -377,13 +377,15 @@ func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
 		);
 		CREATE TABLE payment_method_chat_templates (
 			id BIGSERIAL PRIMARY KEY,
-			exchange TEXT NOT NULL
+			exchange TEXT NOT NULL,
+			CONSTRAINT payment_method_chat_templates_exchange_allowed_check CHECK (
+				exchange IN ('RoboSats', 'Bisq2')
+			)
 		);
 		INSERT INTO offers (exchange, direction, fiat_currency) VALUES ('bisq', 'bid', 'EUR');
 		INSERT INTO snapshots (exchange, direction, fiat_currency) VALUES ('peachbitcoin', 'ask', 'USD');
 		INSERT INTO transactions (dex, direction, fiat_currency) VALUES ('hodlhodl', 'bid', 'GBP');
 		INSERT INTO ohlc (fiat_currency) VALUES ('CHF');
-		INSERT INTO payment_method_chat_templates (exchange) VALUES ('robosats');
 		INSERT INTO payment_method_chat_templates (exchange) VALUES ('RoboSats');
 		INSERT INTO payment_method_chat_templates (exchange) VALUES ('Bisq2');
 	`); err != nil {
@@ -451,7 +453,7 @@ func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate remapped chat template exchanges: %v", err)
 	}
-	wantExchanges := []string{"robosats", "robosats", "bisq2"}
+	wantExchanges := []string{"robosats", "bisq2"}
 	if len(exchanges) != len(wantExchanges) {
 		t.Fatalf("chat template exchanges = %v, want %v", exchanges, wantExchanges)
 	}
@@ -460,7 +462,53 @@ func TestEnsureUnifiedSchemaConvertsLegacyVarcharEnums(t *testing.T) {
 			t.Errorf("chat template exchange[%d] = %q, want %q", i, got, wantExchanges[i])
 		}
 	}
+	if _, err := db.Exec(`INSERT INTO payment_method_chat_templates (exchange) VALUES ('bisq')`); err == nil {
+		t.Fatal("disallowed chat template exchange was accepted")
+	}
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		t.Fatalf("reapply varchar enum repair: %v", err)
+	}
+}
+
+func TestEnsureUnifiedSchemaRejectsLegacyEnumNormalizationCollisions(t *testing.T) {
+	db := testdb.OpenUninitialized(t)
+	if _, err := db.Exec(`
+		CREATE TYPE dex_provider AS ENUM ('bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin');
+		CREATE TABLE payment_method_chat_templates (
+			id BIGSERIAL PRIMARY KEY,
+			exchange TEXT NOT NULL,
+			payment_method_id BIGINT NOT NULL,
+			trade_direction TEXT NOT NULL,
+			CONSTRAINT payment_method_chat_templates_exchange_allowed_check CHECK (
+				exchange IN ('RoboSats', 'robosats', 'Bisq2')
+			),
+			CONSTRAINT payment_method_chat_templates_unique
+				UNIQUE (exchange, payment_method_id, trade_direction)
+		);
+		INSERT INTO payment_method_chat_templates (exchange, payment_method_id, trade_direction)
+		VALUES ('RoboSats', 1, 'bid'), ('robosats', 1, 'bid');
+	`); err != nil {
+		t.Fatalf("create colliding legacy chat templates: %v", err)
+	}
+	markExistingSchemaFilesApplied(t, db)
+	markExistingMigrationFilesAppliedExcept(t, db, "20260830153000_repair_legacy_varchar_enums.sql")
+
+	err := dbutil.EnsureUnifiedSchema(db)
+	if err == nil || !strings.Contains(err.Error(), "conflicting template keys") {
+		t.Fatalf("collision error = %v, want conflicting template keys", err)
+	}
+
+	var exchanges string
+	if err := db.QueryRow(`
+		SELECT string_agg(exchange, ',' ORDER BY exchange)
+		FROM payment_method_chat_templates
+	`).Scan(&exchanges); err != nil {
+		t.Fatalf("read chat templates after rollback: %v", err)
+	}
+	if exchanges != "RoboSats,robosats" {
+		t.Fatalf("chat templates after rollback = %q, want original values", exchanges)
+	}
+	if _, err := db.Exec(`INSERT INTO payment_method_chat_templates (exchange, payment_method_id, trade_direction) VALUES ('bisq', 2, 'ask')`); err == nil {
+		t.Fatal("legacy exchange constraint was not restored by rollback")
 	}
 }

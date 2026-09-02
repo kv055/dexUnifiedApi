@@ -113,7 +113,7 @@ func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[str
 			return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
 		}
 		if dir == "migrations" && filename == legacyVarcharEnumRepairFile {
-			if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency SET DEFAULT 'EUR'::fiat_currency`); err != nil {
+			if err := finalizeLegacyVarcharEnumRepair(tx); err != nil {
 				_ = tx.Rollback()
 				return fmt.Errorf("finalize %s/%s: %w", dir, filename, err)
 			}
@@ -143,16 +143,55 @@ func prepareLegacyVarcharEnumRepair(tx *sql.Tx) error {
 	if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency DROP DEFAULT`); err != nil {
 		return err
 	}
+	// Legacy installations constrained this text column to display labels
+	// (RoboSats/Bisq2). Remove that constraint before folding the values to
+	// canonical enum labels; it is restored after the type conversion below.
+	if _, err := tx.Exec(`
+ALTER TABLE IF EXISTS payment_method_chat_templates
+    DROP CONSTRAINT IF EXISTS payment_method_chat_templates_exchange_allowed_check
+`); err != nil {
+		return err
+	}
 	_, err := tx.Exec(`
 DO $$
 DECLARE
     rec RECORD;
     current_type OID;
     target_type OID;
+	conflicting_keys TEXT;
 BEGIN
     IF to_regtype('dex_provider') IS NULL THEN
         RETURN;
     END IF;
+
+	-- A legacy display label and its canonical equivalent can coexist under a
+	-- case-sensitive unique constraint. Do not silently choose which template
+	-- survives normalization.
+	IF to_regclass('payment_method_chat_templates') IS NOT NULL
+	   AND EXISTS (
+	       SELECT 1 FROM pg_attribute
+	       WHERE attrelid = 'payment_method_chat_templates'::regclass
+	         AND attname = 'payment_method_id' AND attnum > 0 AND NOT attisdropped
+	   )
+	   AND EXISTS (
+	       SELECT 1 FROM pg_attribute
+	       WHERE attrelid = 'payment_method_chat_templates'::regclass
+	         AND attname = 'trade_direction' AND attnum > 0 AND NOT attisdropped
+	   ) THEN
+	    SELECT string_agg(format('%s/%s/%s', exchange_key, payment_method_id, trade_direction), ', ')
+	    INTO conflicting_keys
+	    FROM (
+	        SELECT lower(trim(exchange::text)) AS exchange_key, payment_method_id, trade_direction
+	        FROM payment_method_chat_templates
+	        GROUP BY lower(trim(exchange::text)), payment_method_id, trade_direction
+	        HAVING count(*) > 1
+	    ) conflicts;
+	    IF conflicting_keys IS NOT NULL THEN
+	        RAISE EXCEPTION 'cannot normalize payment_method_chat_templates.exchange: conflicting template keys: %',
+	            conflicting_keys;
+	    END IF;
+	END IF;
+
     FOR rec IN
         SELECT * FROM (VALUES
             ('offers', 'exchange'),
@@ -197,6 +236,18 @@ BEGIN
         );
     END LOOP;
 END $$;
+`)
+	return err
+}
+
+func finalizeLegacyVarcharEnumRepair(tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE IF EXISTS ohlc ALTER COLUMN fiat_currency SET DEFAULT 'EUR'::fiat_currency`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+ALTER TABLE IF EXISTS payment_method_chat_templates
+    ADD CONSTRAINT payment_method_chat_templates_exchange_allowed_check
+    CHECK (exchange IN ('robosats', 'bisq2'))
 `)
 	return err
 }
