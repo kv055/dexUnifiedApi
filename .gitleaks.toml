@@ -9,3 +9,9 @@ paths = [
   '''(^|/)\.env(?:\..*)?\.enc$''',
   '''(^|/)\.env(?:\..*)?\.example$''',
 ]
+
+[[allowlists]]
+description = "Generated OpenAPI embeddings are compressed base64, not live secrets"
+paths = [
+  '''(^|/)internal/api/gen/.+\.gen\.go$''',
+]
