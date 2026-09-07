@@ -1896,6 +1896,7 @@ func main() {
 	defer span.End()
 
 	slog.InfoContext(ctx, "starting orderbook snapshot")
+	resetNIP69Cache()
 	registryURL := strings.TrimSpace(os.Getenv("ROBOSATS_FEDERATION_URL"))
 	if registryURL == "" {
 		registryURL = defaultRobosatsFederationURL
@@ -1992,6 +1993,7 @@ func main() {
 		{"hodlhodl", fetchHodlHodlCurrency},
 		{"robosats", fetchRobosatsCurrency},
 		{"peachbitcoin", fetchPeachBitcoinCurrency},
+		{"mostro", fetchMostroCurrency},
 	}
 
 	exchangeData := make(exchangeSnapshotData)

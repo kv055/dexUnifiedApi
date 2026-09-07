@@ -168,6 +168,9 @@ func TestGlobalEnumTypesAndColumns(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('not-a-dex', 'EUR', 'bid')`); err == nil {
 		t.Error("invalid dex provider was accepted")
 	}
+	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('mostro', 'EUR', 'ask')`); err != nil {
+		t.Errorf("mostro dex provider rejected: %v", err)
+	}
 	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, direction) VALUES ('bisq', 'XYZ', 'bid')`); err == nil {
 		t.Error("invalid fiat currency was accepted")
 	}
