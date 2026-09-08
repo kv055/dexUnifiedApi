@@ -6,7 +6,7 @@ RUN adduser -D toruser
 
 EXPOSE 9050 9051
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=480s --retries=10 \
     CMD curl -sf --socks5 127.0.0.1:9050 http://example.com > /dev/null 2>&1 || exit 1
 
 USER toruser
