@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"commons/paymentmethods"
@@ -498,8 +497,15 @@ func TestSaveSnapshotPersistsSellerRating(t *testing.T) {
 	if gotRaw == nil {
 		t.Fatal("seller_rating_raw = NULL, want a JSON blob")
 	}
-	if gotSignals == nil || !strings.Contains(*gotSignals, `"source":"hodlhodl"`) {
-		t.Fatalf("seller_rating_signals = %v, want a hodlhodl extras blob", gotSignals)
+	if gotSignals == nil {
+		t.Fatal("seller_rating_signals = NULL, want a hodlhodl extras blob")
+	}
+	var signals map[string]any
+	if err := json.Unmarshal([]byte(*gotSignals), &signals); err != nil {
+		t.Fatalf("seller_rating_signals = %s, want JSON: %v", *gotSignals, err)
+	}
+	if signals["source"] != "hodlhodl" {
+		t.Fatalf("seller_rating_signals = %s, want source=hodlhodl", *gotSignals)
 	}
 
 	// Unavailable path stores NULL score/raw and the literal 'unavailable'.
