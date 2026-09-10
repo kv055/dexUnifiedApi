@@ -267,4 +267,10 @@ func TestParseRobosatsOffersLeavesRatingUnavailable(t *testing.T) {
 	if got.SecurityDepositPct == nil || *got.SecurityDepositPct != 0.03 {
 		t.Fatalf("SecurityDepositPct = %v, want 0.03 from bond_size 3", got.SecurityDepositPct)
 	}
+	if got.CounterpartyStakePct == nil || *got.CounterpartyStakePct != 0.03 {
+		t.Fatalf("CounterpartyStakePct = %v, want 0.03 from bond_size 3", got.CounterpartyStakePct)
+	}
+	if got.CounterpartyStakeBTC == nil || *got.CounterpartyStakeBTC != *got.SecurityDepositBTC {
+		t.Fatalf("CounterpartyStakeBTC = %v, want same as SecurityDepositBTC %v", got.CounterpartyStakeBTC, got.SecurityDepositBTC)
+	}
 }

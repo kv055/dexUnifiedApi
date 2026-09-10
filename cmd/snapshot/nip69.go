@@ -219,6 +219,7 @@ func mapNIP69Event(event nostrreq.Event, platform, wantKind, currency string, bt
 		out.SecurityDepositBTC = btc
 	}
 	applyRating(&out, mapNIP69Rating(event.TagValues("rating")))
+	out.SellerRatingSignals = mapNIP69Signals(event.TagValues("rating"))
 	return out, true
 }
 
@@ -291,22 +292,8 @@ func securityDepositFromBond(raw string, amtSats, btcMax float64) (*float64, *fl
 }
 
 func mapNIP69Rating(values []string) sellerrating.Score {
-	rawText := strings.Join(values, "")
-	rawText = strings.TrimSpace(rawText)
-	if rawText == "" {
-		return sellerrating.Unavailable()
-	}
-	payload := []byte(rawText)
-	var envelope []json.RawMessage
-	if json.Unmarshal(payload, &envelope) == nil && len(envelope) >= 2 {
-		payload = envelope[len(envelope)-1]
-	}
-	var parsed struct {
-		TotalRating  *float64 `json:"total_rating"`
-		TotalReviews int      `json:"total_reviews"`
-		MaxRate      float64  `json:"max_rate"`
-	}
-	if err := json.Unmarshal(payload, &parsed); err != nil || parsed.TotalRating == nil {
+	parsed, ok := parseNIP69RatingPayload(values)
+	if !ok || parsed.TotalRating == nil {
 		return sellerrating.Unavailable()
 	}
 	maxRate := parsed.MaxRate
@@ -326,6 +313,48 @@ func mapNIP69Rating(values []string) sellerrating.Score {
 		sellerrating.DefaultFeedbackVerifiedThreshold,
 		raw,
 	)
+}
+
+type nip69RatingPayload struct {
+	TotalRating  *float64 `json:"total_rating"`
+	TotalReviews int      `json:"total_reviews"`
+	MaxRate      float64  `json:"max_rate"`
+	LastRating   *float64 `json:"last_rating"`
+	MinRate      *float64 `json:"min_rate"`
+	Days         *float64 `json:"days"`
+}
+
+func parseNIP69RatingPayload(values []string) (nip69RatingPayload, bool) {
+	var parsed nip69RatingPayload
+	rawText := strings.Join(values, "")
+	rawText = strings.TrimSpace(rawText)
+	if rawText == "" {
+		return parsed, false
+	}
+	payload := []byte(rawText)
+	var envelope []json.RawMessage
+	if json.Unmarshal(payload, &envelope) == nil && len(envelope) >= 2 {
+		payload = envelope[len(envelope)-1]
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return parsed, false
+	}
+	return parsed, true
+}
+
+func mapNIP69Signals(values []string) json.RawMessage {
+	parsed, ok := parseNIP69RatingPayload(values)
+	if !ok {
+		return nil
+	}
+	return marshalSignals(map[string]any{
+		"source":        "mostro",
+		"days":          parsed.Days,
+		"total_reviews": parsed.TotalReviews,
+		"last_rating":   parsed.LastRating,
+		"min_rate":      parsed.MinRate,
+		"max_rate":      parsed.MaxRate,
+	})
 }
 
 func logNIP69Census(platform string, relays []string, result nostrreq.QueryResult) {

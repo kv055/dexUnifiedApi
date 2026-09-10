@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"commons/paymentmethods"
@@ -257,19 +258,23 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	priceType := priceTypeFixed()
 	depositBTC := 0.003
 	depositPct := 0.15
+	stakeBTC := 0.001
+	stakePct := 0.05
 
 	live := saveSnapshot(db, "bisq", "EUR", "ask", 60000, []offer{{
-		OfferID:            "bisq-offer-1",
-		FiatCurrency:       "EUR",
-		Price:              61000,
-		BTCMin:             &btcMin,
-		BTCMax:             &btcMax,
-		FiatMin:            &fiatMin,
-		FiatMax:            &fiatMax,
-		PaymentMethods:     []string{"SEPA"},
-		PriceType:          priceType,
-		SecurityDepositBTC: &depositBTC,
-		SecurityDepositPct: &depositPct,
+		OfferID:              "bisq-offer-1",
+		FiatCurrency:         "EUR",
+		Price:                61000,
+		BTCMin:               &btcMin,
+		BTCMax:               &btcMax,
+		FiatMin:              &fiatMin,
+		FiatMax:              &fiatMax,
+		PaymentMethods:       []string{"SEPA"},
+		PriceType:            priceType,
+		SecurityDepositBTC:   &depositBTC,
+		SecurityDepositPct:   &depositPct,
+		CounterpartyStakeBTC: &stakeBTC,
+		CounterpartyStakePct: &stakePct,
 	}})
 
 	if len(live) != 1 {
@@ -277,8 +282,8 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	}
 
 	var count int
-	var gotDepositBTC, gotDepositPct float64
-	if err := db.QueryRow(`SELECT count(*), security_deposit_btc, security_deposit_pct FROM offers WHERE exchange = ? AND offer_id = ? GROUP BY security_deposit_btc, security_deposit_pct`, "bisq", "bisq-offer-1").Scan(&count, &gotDepositBTC, &gotDepositPct); err != nil {
+	var gotDepositBTC, gotDepositPct, gotStakeBTC, gotStakePct float64
+	if err := db.QueryRow(`SELECT count(*), security_deposit_btc, security_deposit_pct, counterparty_stake_btc, counterparty_stake_pct FROM offers WHERE exchange = ? AND offer_id = ? GROUP BY security_deposit_btc, security_deposit_pct, counterparty_stake_btc, counterparty_stake_pct`, "bisq", "bisq-offer-1").Scan(&count, &gotDepositBTC, &gotDepositPct, &gotStakeBTC, &gotStakePct); err != nil {
 		t.Fatalf("count persisted bisq offer: %v", err)
 	}
 	if count != 1 {
@@ -289,6 +294,12 @@ func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	}
 	if gotDepositPct != depositPct {
 		t.Fatalf("security_deposit_pct = %v, want %v", gotDepositPct, depositPct)
+	}
+	if gotStakeBTC != stakeBTC {
+		t.Fatalf("counterparty_stake_btc = %v, want %v", gotStakeBTC, stakeBTC)
+	}
+	if gotStakePct != stakePct {
+		t.Fatalf("counterparty_stake_pct = %v, want %v", gotStakePct, stakePct)
 	}
 }
 
@@ -465,13 +476,17 @@ func TestSaveSnapshotPersistsSellerRating(t *testing.T) {
 		PriceType:    priceTypeFixed(),
 	}
 	applyRating(&rated, mapHodlHodlTrader(hodlHodlTrader{TradesCount: 42, Rating: floatPtr(0.98), StrongHodler: true}))
+	rated.SellerRatingSignals = mapHodlHodlSignals(hodlHodlTrader{
+		TradesCount: 42, StrongHodler: true, DaysSinceLastTrade: 3, Verified: true, OnlineStatus: "online",
+	})
 	saveSnapshot(db, "hodlhodl", "EUR", "ask", 60000, []offer{rated})
 
 	var gotScore *float64
 	var gotConf *string
 	var gotRaw *string
-	if err := db.QueryRow(`SELECT seller_rating_score, seller_rating_confidence, seller_rating_raw::text
-		FROM offers WHERE exchange = ? AND offer_id = ?`, "hodlhodl", "hh-rated-1").Scan(&gotScore, &gotConf, &gotRaw); err != nil {
+	var gotSignals *string
+	if err := db.QueryRow(`SELECT seller_rating_score, seller_rating_confidence, seller_rating_raw::text, seller_rating_signals::text
+		FROM offers WHERE exchange = ? AND offer_id = ?`, "hodlhodl", "hh-rated-1").Scan(&gotScore, &gotConf, &gotRaw, &gotSignals); err != nil {
 		t.Fatalf("read rated offer: %v", err)
 	}
 	if gotScore == nil || *gotScore <= 0 || *gotScore > 100 {
@@ -482,6 +497,9 @@ func TestSaveSnapshotPersistsSellerRating(t *testing.T) {
 	}
 	if gotRaw == nil {
 		t.Fatal("seller_rating_raw = NULL, want a JSON blob")
+	}
+	if gotSignals == nil || !strings.Contains(*gotSignals, `"source":"hodlhodl"`) {
+		t.Fatalf("seller_rating_signals = %v, want a hodlhodl extras blob", gotSignals)
 	}
 
 	// Unavailable path stores NULL score/raw and the literal 'unavailable'.

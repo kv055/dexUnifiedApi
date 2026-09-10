@@ -30,11 +30,12 @@ func TestRefreshLiveHubLoadsCompleteMultiFiatBookAndRetainsItOnFailure(t *testin
 		INSERT INTO offers (
 			id, exchange, fiat_currency, direction, price, payment_methods,
 			offer_id, is_live, security_deposit_pct, seller_rating_score,
-			seller_rating_confidence, seller_rating_raw
+			seller_rating_confidence, seller_rating_raw, seller_rating_signals,
+			counterparty_stake_btc, counterparty_stake_pct
 		) VALUES
-			(1, 'bisq', 'EUR', 'bid', 61000, ARRAY['SEPA'], 'eur-1', TRUE, 0.15, 91, 'feedback_verified', '{"rating":0.95}'::jsonb),
-			(2, 'hodlhodl', 'USD', 'ask', 67000, ARRAY['Wise'], 'usd-1', TRUE, NULL, 88, 'feedback_verified', '{"rating":0.9}'::jsonb),
-			(3, 'bisq', 'GBP', 'bid', 52000, ARRAY['Faster Payments'], 'closed-1', FALSE, NULL, NULL, NULL, NULL)
+			(1, 'bisq', 'EUR', 'bid', 61000, ARRAY['SEPA'], 'eur-1', TRUE, 0.15, 91, 'feedback_verified', '{"rating":0.95}'::jsonb, '{"source":"hodlhodl","trades_count":12}'::jsonb, 0.001, 0.05),
+			(2, 'hodlhodl', 'USD', 'ask', 67000, ARRAY['Wise'], 'usd-1', TRUE, NULL, 88, 'feedback_verified', '{"rating":0.9}'::jsonb, NULL, NULL, NULL),
+			(3, 'bisq', 'GBP', 'bid', 52000, ARRAY['Faster Payments'], 'closed-1', FALSE, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
 	`); err != nil {
 		t.Fatalf("insert offers: %v", err)
 	}
@@ -63,8 +64,21 @@ func TestRefreshLiveHubLoadsCompleteMultiFiatBookAndRetainsItOnFailure(t *testin
 	if offers[0].FiatCurrency != "EUR" || offers[0].ReferencePrice != 60500 {
 		t.Fatalf("EUR offer = %#v, want latest EUR lifecycle reference", offers[0])
 	}
+	if offers[0].CounterpartyStakePct == nil || *offers[0].CounterpartyStakePct != 0.05 {
+		t.Fatalf("EUR counterparty stake pct = %v, want 0.05", offers[0].CounterpartyStakePct)
+	}
+	var signals map[string]any
+	if err := json.Unmarshal(offers[0].SellerRatingSignals, &signals); err != nil {
+		t.Fatalf("decode EUR seller_rating_signals: %v", err)
+	}
+	if signals["source"] != "hodlhodl" || signals["trades_count"] != float64(12) {
+		t.Fatalf("EUR seller_rating_signals = %s, want hodlhodl extras", offers[0].SellerRatingSignals)
+	}
 	if offers[1].FiatCurrency != "USD" || offers[1].ReferencePrice != 66500 {
 		t.Fatalf("USD offer = %#v, want USD lifecycle reference", offers[1])
+	}
+	if offers[1].CounterpartyStakePct != nil {
+		t.Fatalf("USD counterparty stake pct = %v, want nil", offers[1].CounterpartyStakePct)
 	}
 
 	if err := testDB.Close(); err != nil {
@@ -345,6 +359,7 @@ func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
 	btcMax := 0.1
 	score := 82.5
 	conf := "feedback_verified"
+	stakePct := 0.05
 	hub.offers = []LiveOffer{{
 		ID:                     1,
 		Exchange:               "bisq",
@@ -356,6 +371,8 @@ func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
 		LastSeen:               "2026-04-01 12:00:00",
 		SellerRatingScore:      &score,
 		SellerRatingConfidence: &conf,
+		SellerRatingSignals:    json.RawMessage(`{"source":"hodlhodl","trades_count":12}`),
+		CounterpartyStakePct:   &stakePct,
 	}}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
@@ -371,6 +388,12 @@ func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
 	}
 	if _, ok := raw[0]["seller_rating_confidence"]; !ok {
 		t.Fatalf("seller_rating_confidence missing from live offers API response: %s", rec.Body.String())
+	}
+	if _, ok := raw[0]["counterparty_stake_pct"]; !ok {
+		t.Fatalf("counterparty_stake_pct missing from live offers API response: %s", rec.Body.String())
+	}
+	if _, ok := raw[0]["seller_rating_signals"]; !ok {
+		t.Fatalf("seller_rating_signals missing from live offers API response: %s", rec.Body.String())
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -41,7 +42,7 @@ func TestFetchHodlHodlMapsSuccessfulOffer(t *testing.T) {
 		if req.URL.Query().Get("filters[side]") != "sell" || req.URL.Query().Get("filters[currency_code]") != "EUR" {
 			t.Fatalf("unexpected query: %s", req.URL.RawQuery)
 		}
-		return jsonResponse(http.StatusOK, `{"offers":[{"id":"hh-1","price":"60000","price_source":"fixed_value","min_amount":"300","max_amount":"600","payment_method_instructions":[{"payment_method_name":"SEPA"}],"trader":{"trades_count":10,"rating":0.98}}]}`), nil
+		return jsonResponse(http.StatusOK, `{"offers":[{"id":"hh-1","price":"60000","price_source":"fixed_value","min_amount":"300","max_amount":"600","payment_method_instructions":[{"payment_method_name":"SEPA"}],"trader":{"trades_count":10,"rating":0.98,"strong_hodler":true,"days_since_last_trade":4,"average_payment_time_minutes":12,"average_release_time_minutes":8,"blocked_by":0,"verified":true,"verified_by":"hodlhodl","online_status":"online"}}]}`), nil
 	})}
 
 	result := fetchHodlHodlCurrencyFrom(context.Background(), client, "https://hodlhodl.test/", "ask", "EUR", 60000)
@@ -51,6 +52,13 @@ func TestFetchHodlHodlMapsSuccessfulOffer(t *testing.T) {
 	got := result.Offers[0]
 	if got.OfferID != "hh-1" || got.Price != 60000 || len(got.PaymentMethods) != 1 || got.PaymentMethods[0] != "SEPA" {
 		t.Fatalf("offer = %#v, want mapped hh-1 offer", got)
+	}
+	var signals map[string]any
+	if err := json.Unmarshal(got.SellerRatingSignals, &signals); err != nil {
+		t.Fatalf("unmarshal seller_rating_signals: %v", err)
+	}
+	if signals["source"] != "hodlhodl" || signals["trades_count"] != float64(10) || signals["online_status"] != "online" {
+		t.Fatalf("seller_rating_signals = %s, want hodlhodl extras", got.SellerRatingSignals)
 	}
 }
 

@@ -78,12 +78,17 @@ type LiveOffer struct {
 	// snapshot time. Nil for exchanges with no deposit concept, or offers
 	// snapshotted before this was persisted.
 	SecurityDepositPct *float64 `json:"security_deposit_pct"`
+	// CounterpartyStake* is the maker's lock (Bisq 1 maker deposit, RoboSats
+	// bond). Nil when the venue has no lock, or the offer predates the column.
+	CounterpartyStakeBTC *float64 `json:"counterparty_stake_btc"`
+	CounterpartyStakePct *float64 `json:"counterparty_stake_pct"`
 	// SellerRating* are the maker's normalized reputation (internal/sellerrating).
 	// Score is 0-100, nil when no signal is obtainable; Confidence records the
 	// methodology ('unavailable' when there is none); Raw holds the source inputs.
 	SellerRatingScore      *float64        `json:"seller_rating_score"`
 	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw"`
+	SellerRatingSignals    json.RawMessage `json:"seller_rating_signals"`
 	// MakerID is the exchange's seller identity, used to look up a per-maker
 	// reputation for live Peach offers (its listing omits the rating).
 	MakerID string `json:"maker_id,omitempty"`
@@ -288,6 +293,9 @@ type liveOfferAPI struct {
 	SellerRatingScore      *float64               `json:"seller_rating_score"`
 	SellerRatingConfidence *string                `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage        `json:"seller_rating_raw,omitempty"`
+	SellerRatingSignals    json.RawMessage        `json:"seller_rating_signals,omitempty"`
+	CounterpartyStakeBTC   *float64               `json:"counterparty_stake_btc"`
+	CounterpartyStakePct   *float64               `json:"counterparty_stake_pct"`
 }
 
 // liveOutOffer is the shape sent to clients — includes computed premium fields.
@@ -334,6 +342,9 @@ type liveOutOffer struct {
 	SellerRatingScore         *float64                      `json:"seller_rating_score"`
 	SellerRatingConfidence    *string                       `json:"seller_rating_confidence"`
 	SellerRatingRaw           json.RawMessage               `json:"seller_rating_raw,omitempty"`
+	SellerRatingSignals       json.RawMessage               `json:"seller_rating_signals,omitempty"`
+	CounterpartyStakeBTC      *float64                      `json:"counterparty_stake_btc"`
+	CounterpartyStakePct      *float64                      `json:"counterparty_stake_pct"`
 	Lifecycle                 []LifecyclePoint              `json:"lifecycle,omitempty"`
 	ResolvedRoute             *resolvedRoute                `json:"-"`
 	RouteResolution           routeResolution               `json:"-"`
@@ -498,6 +509,9 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 		SellerRatingScore:      o.SellerRatingScore,
 		SellerRatingConfidence: o.SellerRatingConfidence,
 		SellerRatingRaw:        o.SellerRatingRaw,
+		SellerRatingSignals:    o.SellerRatingSignals,
+		CounterpartyStakeBTC:   o.CounterpartyStakeBTC,
+		CounterpartyStakePct:   o.CounterpartyStakePct,
 	}
 	attachHedgelessOnly(&api.Analysis.FullVolume, o.HedgelessOnlyBreakdown, o.RefPrice)
 	if api.BTCNetworkFee.Method == "" && o.HedgelessOnlyBreakdown != nil {
@@ -1169,6 +1183,9 @@ func (h *LiveHub) buildOutOffers(settings transactionalRoutingSettings) []liveOu
 			SellerRatingScore:         o.SellerRatingScore,
 			SellerRatingConfidence:    o.SellerRatingConfidence,
 			SellerRatingRaw:           o.SellerRatingRaw,
+			SellerRatingSignals:       o.SellerRatingSignals,
+			CounterpartyStakeBTC:      o.CounterpartyStakeBTC,
+			CounterpartyStakePct:      o.CounterpartyStakePct,
 			Lifecycle:                 lc[o.ID],
 			ResolvedRoute:             selectedRoute,
 			RouteResolution:           resolution,

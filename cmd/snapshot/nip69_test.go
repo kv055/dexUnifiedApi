@@ -221,3 +221,46 @@ func TestFetchNIP69CurrencyFailedIncludesError(t *testing.T) {
 		t.Fatalf("failed census = %#v, want nil", got)
 	}
 }
+
+func TestMapNIP69Signals(t *testing.T) {
+	t.Parallel()
+	values := []string{`{"total_rating":4.5,"total_reviews":30,"last_rating":5,"min_rate":3,"max_rate":5,"days":400}`}
+	score := mapNIP69Rating(values)
+	if score.Value == nil || score.Confidence != sellerrating.ConfidenceFeedbackVerified {
+		t.Fatalf("score = %#v, want a verified feedback score", score)
+	}
+
+	raw := mapNIP69Signals(values)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal signals: %v", err)
+	}
+	if got["source"] != "mostro" {
+		t.Fatalf("source = %v, want mostro", got["source"])
+	}
+	if got["days"] != float64(400) {
+		t.Fatalf("days = %v, want 400", got["days"])
+	}
+	if got["total_reviews"] != float64(30) {
+		t.Fatalf("total_reviews = %v, want 30", got["total_reviews"])
+	}
+	if got["last_rating"] != float64(5) {
+		t.Fatalf("last_rating = %v, want 5", got["last_rating"])
+	}
+	if got["min_rate"] != float64(3) {
+		t.Fatalf("min_rate = %v, want 3", got["min_rate"])
+	}
+	if got["max_rate"] != float64(5) {
+		t.Fatalf("max_rate = %v, want 5", got["max_rate"])
+	}
+}
+
+func TestMapNIP69SignalsEmpty(t *testing.T) {
+	t.Parallel()
+	if got := mapNIP69Signals(nil); got != nil {
+		t.Fatalf("empty rating tag signals = %s, want nil", got)
+	}
+	if got := mapNIP69Signals([]string{"not-json"}); got != nil {
+		t.Fatalf("malformed rating tag signals = %s, want nil", got)
+	}
+}

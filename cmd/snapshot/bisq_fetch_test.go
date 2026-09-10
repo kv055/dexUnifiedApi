@@ -61,6 +61,13 @@ func TestMapBisqOfferSellDirectionUsesBuyerDeposit(t *testing.T) {
 	if got.SecurityDepositPct == nil || *got.SecurityDepositPct != 0.15 {
 		t.Fatalf("SecurityDepositPct = %v, want 0.15", got.SecurityDepositPct)
 	}
+	// Maker on a sell offer sells → posts the SELLER deposit.
+	if got.CounterpartyStakeBTC == nil || *got.CounterpartyStakeBTC != 0.025 {
+		t.Fatalf("CounterpartyStakeBTC = %v, want 0.025 (seller deposit)", got.CounterpartyStakeBTC)
+	}
+	if got.CounterpartyStakePct == nil || *got.CounterpartyStakePct != 0.05 {
+		t.Fatalf("CounterpartyStakePct = %v, want 0.05", got.CounterpartyStakePct)
+	}
 	// Unpatched daemon: empty sign-state → rating unavailable, not a crash.
 	if got.SellerRatingScore != nil {
 		t.Fatalf("SellerRatingScore = %v, want nil for empty sign-state", *got.SellerRatingScore)
@@ -83,6 +90,12 @@ func TestMapBisqOfferBuyDirectionUsesSellerDeposit(t *testing.T) {
 	if got.SecurityDepositBTC == nil || *got.SecurityDepositBTC != 0.025 {
 		t.Fatalf("SecurityDepositBTC = %v, want 0.025 (seller deposit)", got.SecurityDepositBTC)
 	}
+	if got.CounterpartyStakeBTC == nil || *got.CounterpartyStakeBTC != 0.075 {
+		t.Fatalf("CounterpartyStakeBTC = %v, want 0.075 (buyer deposit)", got.CounterpartyStakeBTC)
+	}
+	if got.CounterpartyStakePct == nil || *got.CounterpartyStakePct != 0.075 {
+		t.Fatalf("CounterpartyStakePct = %v, want 0.075", got.CounterpartyStakePct)
+	}
 	if got.PriceType == nil || *got.PriceType != "floating" {
 		t.Fatalf("PriceType = %v, want floating for market-based price", got.PriceType)
 	}
@@ -92,6 +105,25 @@ func TestMapBisqOfferZeroAmountSkipsDeposit(t *testing.T) {
 	got := mapBisqOffer(&bisqgrpc.OfferInfo{Id: "z", Price: "1", Amount: 0}, "ask", time.Now())
 	if got.SecurityDepositBTC != nil || got.SecurityDepositPct != nil {
 		t.Fatal("deposit fields should be nil for zero-amount offer")
+	}
+	if got.CounterpartyStakeBTC != nil || got.CounterpartyStakePct != nil {
+		t.Fatal("counterparty stake fields should be nil for zero-amount offer")
+	}
+}
+
+func TestMapBisqOfferBannedRatingIsZero(t *testing.T) {
+	got := mapBisqOffer(&bisqgrpc.OfferInfo{
+		Id:                         "banned",
+		Price:                      "53000",
+		Amount:                     100_000_000,
+		AccountAgeWitnessSignState: "BANNED",
+		AccountAgeWitnessDate:      time.Now().UnixMilli(),
+	}, "ask", time.Now())
+	if got.SellerRatingScore == nil || *got.SellerRatingScore != 0 {
+		t.Fatalf("SellerRatingScore = %v, want 0 for banned maker", got.SellerRatingScore)
+	}
+	if got.SellerRatingConfidence == nil || *got.SellerRatingConfidence != "account_signing" {
+		t.Fatalf("SellerRatingConfidence = %v, want account_signing", got.SellerRatingConfidence)
 	}
 }
 

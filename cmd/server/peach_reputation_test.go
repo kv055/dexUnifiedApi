@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"dexunifiedapi/internal/sellerrating"
 	"dexunifiedapi/internal/testdb"
@@ -95,14 +97,25 @@ func TestPersistPeachRatings(t *testing.T) {
 		t.Fatalf("insert offer: %v", err)
 	}
 
-	score := mapPeachReputation(peachUserReputation{Rating: 0.9, RatingCount: 40})
-	persistPeachRatings(ctx, map[int64]sellerrating.Score{id: score})
+	rep := peachUserReputation{
+		Rating: 0.9, RatingCount: 40, Trades: 100,
+		CreationDate: "2023-03-01T13:39:55.942Z",
+		UserRating:   1, PeachRating: 0.9, RecentRating: 0.91, HistoryRating: 0.95,
+		Medals: []string{"superTrader"},
+	}
+	rep.Disputes.Opened = 4
+	rep.Disputes.Won = 1
+	rep.Disputes.Lost = 1
+	score := mapPeachReputation(rep)
+	signals := mapPeachSignals(rep, time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))
+	persistPeachRatings(ctx, map[int64]peachMakerRating{id: {score: score, signals: signals}})
 
 	var gotScore *float64
 	var gotConf *string
 	var gotRaw *string
-	if err := db.QueryRow(`SELECT seller_rating_score, seller_rating_confidence, seller_rating_raw::text
-		FROM offers WHERE id = ?`, id).Scan(&gotScore, &gotConf, &gotRaw); err != nil {
+	var gotSignals *string
+	if err := db.QueryRow(`SELECT seller_rating_score, seller_rating_confidence, seller_rating_raw::text, seller_rating_signals::text
+		FROM offers WHERE id = ?`, id).Scan(&gotScore, &gotConf, &gotRaw, &gotSignals); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
 	if gotScore == nil || *gotScore != *score.Value {
@@ -113,5 +126,48 @@ func TestPersistPeachRatings(t *testing.T) {
 	}
 	if gotRaw == nil {
 		t.Fatal("seller_rating_raw = NULL, want a JSON blob")
+	}
+	if gotSignals == nil {
+		t.Fatal("seller_rating_signals = NULL, want a JSON blob")
+	}
+}
+
+func TestMapPeachSignals(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	var r peachUserReputation
+	r.CreationDate = "2023-03-01T13:39:55.942Z"
+	r.Trades = 1738
+	r.RatingCount = 45
+	r.UserRating = 1
+	r.PeachRating = 0.924
+	r.RecentRating = 0.926
+	r.HistoryRating = 0.975
+	r.Medals = []string{"superTrader", "ambassador"}
+	r.Disputes.Opened = 4
+	r.Disputes.Won = 1
+	r.Disputes.Lost = 1
+
+	raw := mapPeachSignals(r, now)
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal signals: %v", err)
+	}
+	if got["source"] != "peach" {
+		t.Fatalf("source = %v, want peach", got["source"])
+	}
+	if got["trades"] != float64(1738) {
+		t.Fatalf("trades = %v, want 1738", got["trades"])
+	}
+	created, ok := parsePeachCreationDate(r.CreationDate)
+	if !ok {
+		t.Fatal("creation date should parse")
+	}
+	wantDays := int(now.Sub(created).Hours() / 24)
+	if got["account_age_days"] != float64(wantDays) {
+		t.Fatalf("account_age_days = %v, want %d", got["account_age_days"], wantDays)
+	}
+	if got["disputes_lost"] != float64(1) {
+		t.Fatalf("disputes_lost = %v, want 1", got["disputes_lost"])
 	}
 }

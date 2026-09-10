@@ -45,6 +45,9 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			o.seller_rating_score,
 			o.seller_rating_confidence,
 			o.seller_rating_raw,
+			o.seller_rating_signals,
+			o.counterparty_stake_btc,
+			o.counterparty_stake_pct,
 			COALESCE(o.maker_id, '')
 		FROM offers o
 		LEFT JOIN LATERAL (
@@ -69,6 +72,7 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			refPrice           sql.NullFloat64
 			paymentMethodsJSON string
 			ratingRaw          []byte
+			signalsRaw         []byte
 		)
 		if err := rows.Scan(
 			&o.ID,
@@ -90,6 +94,9 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			&o.SellerRatingScore,
 			&o.SellerRatingConfidence,
 			&ratingRaw,
+			&signalsRaw,
+			&o.CounterpartyStakeBTC,
+			&o.CounterpartyStakePct,
 			&o.MakerID,
 		); err != nil {
 			return nil, fmt.Errorf("scan live offer: %w", err)
@@ -102,6 +109,9 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 		}
 		if len(ratingRaw) > 0 {
 			o.SellerRatingRaw = append(o.SellerRatingRaw[:0], ratingRaw...)
+		}
+		if len(signalsRaw) > 0 {
+			o.SellerRatingSignals = append(o.SellerRatingSignals[:0], signalsRaw...)
 		}
 		offers = append(offers, o)
 	}

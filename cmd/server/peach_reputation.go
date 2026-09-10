@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,14 +41,69 @@ var peachHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 // peachUserReputation is the maker profile returned by GET /v1/user/:id.
 type peachUserReputation struct {
-	Rating      float64 `json:"rating"` // -1..1
-	RatingCount int     `json:"ratingCount"`
-	Trades      int     `json:"trades"`
-	Disputes    struct {
+	CreationDate  string   `json:"creationDate"`
+	Rating        float64  `json:"rating"` // -1..1
+	RatingCount   int      `json:"ratingCount"`
+	Trades        int      `json:"trades"`
+	HistoryRating float64  `json:"historyRating"`
+	PeachRating   float64  `json:"peachRating"`
+	UserRating    float64  `json:"userRating"`
+	RecentRating  float64  `json:"recentRating"`
+	Medals        []string `json:"medals"`
+	Disputes      struct {
 		Opened int `json:"opened"`
 		Won    int `json:"won"`
 		Lost   int `json:"lost"`
 	} `json:"disputes"`
+}
+
+// peachMakerRating is the score plus same-payload extras from one user GET.
+type peachMakerRating struct {
+	score   sellerrating.Score
+	signals json.RawMessage
+}
+
+func mapPeachSignals(r peachUserReputation, now time.Time) json.RawMessage {
+	blob := map[string]any{
+		"source":          "peach",
+		"creation_date":   r.CreationDate,
+		"trades":          r.Trades,
+		"rating_count":    r.RatingCount,
+		"user_rating":     r.UserRating,
+		"peach_rating":    r.PeachRating,
+		"recent_rating":   r.RecentRating,
+		"history_rating":  r.HistoryRating,
+		"medals":          r.Medals,
+		"disputes_opened": r.Disputes.Opened,
+		"disputes_won":    r.Disputes.Won,
+		"disputes_lost":   r.Disputes.Lost,
+	}
+	if created, ok := parsePeachCreationDate(r.CreationDate); ok {
+		days := int(now.Sub(created).Hours() / 24)
+		if days < 0 {
+			days = 0
+		}
+		blob["account_age_days"] = days
+	}
+	b, err := json.Marshal(blob)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func parsePeachCreationDate(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // mapPeachReputation normalizes a Peach maker profile into a Score. Peach's
@@ -107,7 +163,7 @@ type peachReputationCache struct {
 }
 
 type peachCacheEntry struct {
-	score     sellerrating.Score
+	rating    peachMakerRating
 	fetchedAt time.Time
 }
 
@@ -117,21 +173,21 @@ func newPeachReputationCache(ttl time.Duration) *peachReputationCache {
 
 var peachReputations = newPeachReputationCache(peachReputationTTL)
 
-func (c *peachReputationCache) peekFresh(makerID string, now time.Time) (sellerrating.Score, bool) {
+func (c *peachReputationCache) peekFresh(makerID string, now time.Time) (peachMakerRating, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[makerID]
 	if !ok || now.Sub(e.fetchedAt) >= c.ttl {
-		return sellerrating.Score{}, false
+		return peachMakerRating{}, false
 	}
-	return e.score, true
+	return e.rating, true
 }
 
 // Resolve returns a maker's reputation, using the cache when fresh and otherwise
 // fetching. On a fetch failure it falls back to any stale cached value; ok is
 // false only when there is no value at all (so the offer keeps no rating rather
 // than a wrong one).
-func (c *peachReputationCache) Resolve(ctx context.Context, makerID string) (sellerrating.Score, bool) {
+func (c *peachReputationCache) Resolve(ctx context.Context, makerID string) (peachMakerRating, bool) {
 	now := time.Now()
 	if s, ok := c.peekFresh(makerID, now); ok {
 		return s, true
@@ -145,16 +201,19 @@ func (c *peachReputationCache) Resolve(ctx context.Context, makerID string) (sel
 		e, ok := c.entries[makerID]
 		c.mu.Unlock()
 		if ok {
-			return e.score, true // slightly stale beats nothing
+			return e.rating, true // slightly stale beats nothing
 		}
 		fmt.Printf("[PeachReputation] fetch failed for %s: %v\n", makerID, err)
-		return sellerrating.Score{}, false
+		return peachMakerRating{}, false
 	}
-	score := mapPeachReputation(rep)
+	rating := peachMakerRating{
+		score:   mapPeachReputation(rep),
+		signals: mapPeachSignals(rep, now),
+	}
 	c.mu.Lock()
-	c.entries[makerID] = peachCacheEntry{score: score, fetchedAt: now}
+	c.entries[makerID] = peachCacheEntry{rating: rating, fetchedAt: now}
 	c.mu.Unlock()
-	return score, true
+	return rating, true
 }
 
 // peachMakersWithID returns offerID→makerID for every live Peach offer that
@@ -216,31 +275,31 @@ func resolveAndApplyPeachRatings(ctx context.Context, offers []LiveOffer, outOff
 	}
 
 	now := time.Now()
-	scoreByMaker := make(map[string]sellerrating.Score)
+	ratingByMaker := make(map[string]peachMakerRating)
 	ordered := make([]string, 0, len(targets))
 	for _, makerID := range targets {
 		ordered = append(ordered, makerID)
-		if _, done := scoreByMaker[makerID]; done {
+		if _, done := ratingByMaker[makerID]; done {
 			continue
 		}
 		if s, ok := peachReputations.peekFresh(makerID, now); ok {
-			scoreByMaker[makerID] = s
+			ratingByMaker[makerID] = s
 		}
 	}
 
 	toFetch := pickPeachFetchQueue(ordered, func(id string) bool {
-		_, ok := scoreByMaker[id]
+		_, ok := ratingByMaker[id]
 		return ok
 	}, peachUncachedFetchCap)
 	for _, makerID := range toFetch {
 		if s, ok := peachReputations.Resolve(ctx, makerID); ok {
-			scoreByMaker[makerID] = s
+			ratingByMaker[makerID] = s
 		}
 	}
 
-	byOfferID := make(map[int64]sellerrating.Score, len(targets))
+	byOfferID := make(map[int64]peachMakerRating, len(targets))
 	for offerID, makerID := range targets {
-		if s, ok := scoreByMaker[makerID]; ok {
+		if s, ok := ratingByMaker[makerID]; ok {
 			byOfferID[offerID] = s
 		}
 	}
@@ -254,7 +313,7 @@ func resolveAndApplyPeachRatings(ctx context.Context, offers []LiveOffer, outOff
 
 // applySellerRatings patches seller-rating fields onto the in-memory offers by
 // id and rebroadcasts, so ratings resolved after ingest reach subscribers.
-func (h *LiveHub) applySellerRatings(byOfferID map[int64]sellerrating.Score) {
+func (h *LiveHub) applySellerRatings(byOfferID map[int64]peachMakerRating) {
 	if len(byOfferID) == 0 {
 		return
 	}
@@ -264,10 +323,11 @@ func (h *LiveHub) applySellerRatings(byOfferID map[int64]sellerrating.Score) {
 		if !ok {
 			continue
 		}
-		h.offers[i].SellerRatingScore = s.Value
-		conf := string(s.Confidence)
+		h.offers[i].SellerRatingScore = s.score.Value
+		conf := string(s.score.Confidence)
 		h.offers[i].SellerRatingConfidence = &conf
-		h.offers[i].SellerRatingRaw = s.Raw
+		h.offers[i].SellerRatingRaw = s.score.Raw
+		h.offers[i].SellerRatingSignals = s.signals
 	}
 	h.offersMu.Unlock()
 	h.broadcastAll()
@@ -275,18 +335,22 @@ func (h *LiveHub) applySellerRatings(byOfferID map[int64]sellerrating.Score) {
 
 // persistPeachRatings writes the resolved ratings onto the offers table so the
 // DB-backed views match the live feed (same columns as the snapshot writes).
-func persistPeachRatings(ctx context.Context, byOfferID map[int64]sellerrating.Score) {
+func persistPeachRatings(ctx context.Context, byOfferID map[int64]peachMakerRating) {
 	if db == nil {
 		return
 	}
 	for id, s := range byOfferID {
 		var raw any
-		if len(s.Raw) > 0 {
-			raw = string(s.Raw)
+		if len(s.score.Raw) > 0 {
+			raw = string(s.score.Raw)
+		}
+		var signals any
+		if len(s.signals) > 0 {
+			signals = string(s.signals)
 		}
 		if _, err := db.ExecContext(ctx,
-			`UPDATE offers SET seller_rating_score=?, seller_rating_confidence=?, seller_rating_raw=?::jsonb WHERE id=?`,
-			s.Value, string(s.Confidence), raw, id,
+			`UPDATE offers SET seller_rating_score=?, seller_rating_confidence=?, seller_rating_raw=?::jsonb, seller_rating_signals=?::jsonb WHERE id=?`,
+			s.score.Value, string(s.score.Confidence), raw, signals, id,
 		); err != nil {
 			fmt.Printf("[PeachReputation] persist failed for offer %d: %v\n", id, err)
 		}
