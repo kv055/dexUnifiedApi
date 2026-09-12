@@ -54,8 +54,8 @@ func TestMostroPersistedQuoteFeedsLiveProfit(t *testing.T) {
 		RETURNING id`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO order_lifecycle (offer_db_id, price, ref_price, snapshot_time)
-		VALUES (?, 75000, 60000, CURRENT_TIMESTAMP - INTERVAL '1 minute')`, id); err != nil {
+	if _, err := db.Exec(`INSERT INTO order_lifecycle (offer_db_id, price, ref_price, premium_pct, snapshot_time)
+		VALUES (?, 75000, 60000, 25, CURRENT_TIMESTAMP - INTERVAL '1 minute')`, id); err != nil {
 		t.Fatal(err)
 	}
 	// The next snapshot changes spot and fills amt for a take slice. The
@@ -63,8 +63,8 @@ func TestMostroPersistedQuoteFeedsLiveProfit(t *testing.T) {
 	if _, err := db.Exec(`UPDATE offers SET price = 80000, btc_min = 0.00075, btc_max = 0.00375 WHERE id = ?`, id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO order_lifecycle (offer_db_id, price, ref_price, snapshot_time)
-		VALUES (?, 80000, 64000, CURRENT_TIMESTAMP)`, id); err != nil {
+	if _, err := db.Exec(`INSERT INTO order_lifecycle (offer_db_id, price, ref_price, premium_pct, snapshot_time)
+		VALUES (?, 80000, 64000, 25, CURRENT_TIMESTAMP)`, id); err != nil {
 		t.Fatal(err)
 	}
 	offers, err := newLiveOfferRepository(db).Load(context.Background())
