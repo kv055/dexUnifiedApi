@@ -311,7 +311,7 @@ func TestNIP69SnapshotUpdatesPriceAndSizeTogether(t *testing.T) {
 	// A complete book rejecting this fixed quote closes its previous live row;
 	// a missing reference fetch must leave reconciliation unconfirmed instead.
 	start := time.Now().UTC()
-	if _, err := db.Exec("UPDATE offers SET last_seen = ?, is_live = TRUE WHERE id = ?", start.Add(-time.Minute), id); err != nil {
+	if _, err := db.Exec("UPDATE offers SET first_seen = ?, last_seen = ?, is_live = TRUE WHERE id = ?", start.Add(-2*time.Minute), start.Add(-time.Minute), id); err != nil {
 		t.Fatal(err)
 	}
 	if err := reconcileLiveOfferStatus(db, start, nil, defaultLiveOfferStaleGrace); err != nil {
