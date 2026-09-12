@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +60,10 @@ func fetchNIP69Currency(ctx context.Context, platform string, relays []string, d
 }
 
 func fetchNIP69CurrencyFrom(ctx context.Context, platform string, relays []string, direction, currency string, btcPrice int, query nip69QueryFunc) *fetchResult {
+	if btcPrice <= 0 {
+		slog.WarnContext(ctx, "NIP-69 market reference price unavailable", "exchange", platform, "currency", currency, "direction", direction)
+		return nil
+	}
 	book := loadNIP69Book(ctx, platform, relays, query)
 	if book == nil || book.failed {
 		return nil
@@ -171,36 +177,43 @@ func mapNIP69Event(event nostrreq.Event, platform, wantKind, currency string, bt
 		return offer{}, false
 	}
 
-	amtSats := parseTagFloat(event.TagValue("amt"))
+	reject := func(reason string) (offer, bool) {
+		slog.Warn("NIP-69 quote rejected", "exchange", platform, "offer_id", offerID, "reason", reason)
+		return offer{}, false
+	}
+	amtSats, err := parseNIP69Number(event.TagValue("amt"))
+	if err != nil || amtSats < 0 || math.Trunc(amtSats) != amtSats {
+		return reject("invalid sat amount")
+	}
 	fiatMin, fiatMax, ok := parseFiatAmount(event.TagValues("fa"))
 	if !ok {
-		return offer{}, false
+		return reject("invalid fiat limits")
 	}
-	premium := parseTagFloat(event.TagValue("premium"))
+	var premium float64
+	for _, tag := range event.Tags {
+		if len(tag) == 0 || tag[0] != "premium" {
+			continue
+		}
+		if len(tag) != 2 {
+			return reject("invalid premium")
+		}
+		premium, err = parseNIP69Number(tag[1])
+		if err != nil {
+			return reject("invalid premium")
+		}
+		break
+	}
 
-	var price float64
-	var priceType *string
-	if amtSats > 0 {
-		btc := amtSats / 1e8
-		if btc <= 0 {
-			return offer{}, false
-		}
-		midFiat := float64(fiatMin+fiatMax) / 2
-		price = midFiat / btc
-		priceType = priceTypeFixed()
-	} else {
-		if btcPrice <= 0 {
-			return offer{}, false
-		}
-		price = float64(btcPrice) * (1 + premium/100)
-		priceType = priceTypeFloating()
-	}
-	if price <= 0 {
-		return offer{}, false
+	price, priceType, err := nip69Price(amtSats, fiatMin, fiatMax, premium, btcPrice)
+	if err != nil {
+		return reject(err.Error())
 	}
 
 	btcMin := round8(float64(fiatMin) / price)
 	btcMax := round8(float64(fiatMax) / price)
+	if !positiveFinite(btcMin) || !positiveFinite(btcMax) {
+		return reject("invalid BTC limits")
+	}
 	methods := paymentMethodsFromPM(event.TagValues("pm"))
 
 	out := offer{
@@ -223,25 +236,78 @@ func mapNIP69Event(event nostrreq.Event, platform, wantKind, currency string, bt
 	return out, true
 }
 
+// nip69FixedPriceMaxDeviation is a product filter, not a protocol constraint:
+// unusually priced fixed orders are excluded, never rewritten as floating.
+const nip69FixedPriceMaxDeviation = 0.5
+
+// nip69Price prefers a sat-implied fixed price only for a single fiat amount
+// whose implied fiat/BTC is still near spot. Range orders use the floating
+// quote because pending `amt` can describe one take slice, not the fiat range.
+func nip69Price(amtSats float64, fiatMin, fiatMax int, premium float64, btcPrice int) (float64, *string, error) {
+	if btcPrice <= 0 {
+		return 0, nil, fmt.Errorf("reference price unavailable")
+	}
+	if amtSats > 0 && fiatMin == fiatMax {
+		btc := amtSats / 1e8
+		price := float64(fiatMin) / btc
+		if !positiveFinite(price) || !impliedPriceNearSpot(price, btcPrice) {
+			return 0, nil, fmt.Errorf("fixed price outside spot tolerance")
+		}
+		return price, priceTypeFixed(), nil
+	}
+	if premium >= 100 {
+		return 0, nil, fmt.Errorf("floating premium must be below 100 percent")
+	}
+	// Mostro get_market_quote subtracts premium percent from the sats:
+	// sats = fiat / spot * 1e8 * (1 - premium/100).
+	price := float64(btcPrice) / (1 - premium/100)
+	if !positiveFinite(price) {
+		return 0, nil, fmt.Errorf("invalid floating price")
+	}
+	return price, priceTypeFloating(), nil
+}
+
+func positiveFinite(v float64) bool {
+	return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+func parseNIP69Number(raw string) (float64, error) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("invalid number")
+	}
+	return v, nil
+}
+
+func impliedPriceNearSpot(price float64, btcPrice int) bool {
+	if btcPrice <= 0 || price <= 0 {
+		return false
+	}
+	ratio := price / float64(btcPrice)
+	return ratio >= 1-nip69FixedPriceMaxDeviation && ratio <= 1+nip69FixedPriceMaxDeviation
+}
+
 func parseFiatAmount(values []string) (int, int, bool) {
-	if len(values) == 0 {
+	if len(values) == 0 || len(values) > 2 {
 		return 0, 0, false
 	}
-	minV := parseTagFloat(values[0])
+	// Mostro publishes integer fiat amounts. Do not truncate malformed ranges
+	// into a single amount and accidentally enable the fixed-price path.
+	minV, err := strconv.Atoi(strings.TrimSpace(values[0]))
+	if err != nil || minV <= 0 {
+		return 0, 0, false
+	}
 	maxV := minV
 	if len(values) >= 2 {
-		maxV = parseTagFloat(values[1])
-	}
-	if minV <= 0 && maxV <= 0 {
-		return 0, 0, false
+		maxV, err = strconv.Atoi(strings.TrimSpace(values[1]))
+		if err != nil || maxV <= 0 {
+			return 0, 0, false
+		}
 	}
 	if maxV < minV {
 		minV, maxV = maxV, minV
 	}
-	if minV <= 0 {
-		minV = maxV
-	}
-	return int(minV), int(maxV), true
+	return minV, maxV, true
 }
 
 func parseTagFloat(raw string) float64 {

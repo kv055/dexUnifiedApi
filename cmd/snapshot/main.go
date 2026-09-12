@@ -722,98 +722,6 @@ func mapHodlHodlSignals(t hodlHodlTrader) json.RawMessage {
 	})
 }
 
-func fetchHodlHodlCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
-	return fetchHodlHodlCurrencyFrom(ctx, clearnetClient(), "https://hodlhodl.com", direction, currency, btcPrice)
-}
-
-func fetchHodlHodlCurrencyFrom(ctx context.Context, client *http.Client, baseURL, direction, currency string, btcPrice int) *fetchResult {
-	reqURL := fmt.Sprintf("%s/api/v1/offers?filters[side]=%s&filters[include_global]=true&filters[currency_code]=%s&filters[only_working_now]=true&sort[by]=price", strings.TrimRight(baseURL, "/"), externalOfferDirection(direction), url.QueryEscape(currency))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		fmt.Printf("[HodlHodl] Request error: %v\n", err)
-		return nil
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("[HodlHodl] Error: %v\n", err)
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("[HodlHodl] Unexpected status %d\n", resp.StatusCode)
-		return nil
-	}
-	body, err := readAllLimited(resp.Body)
-	if err != nil {
-		fmt.Printf("[HodlHodl] Response read error: %v\n", err)
-		return nil
-	}
-
-	var data struct {
-		Offers []struct {
-			ID             string `json:"id"`
-			Price          string `json:"price"`
-			PriceSource    string `json:"price_source"`
-			MinAmount      string `json:"min_amount"`
-			MaxAmount      string `json:"max_amount"`
-			PaymentMethods []struct {
-				Name string `json:"name"`
-			} `json:"payment_methods"`
-			PaymentMethodInstructions []struct {
-				PaymentMethodName string `json:"payment_method_name"`
-			} `json:"payment_method_instructions"`
-			Trader hodlHodlTrader `json:"trader"`
-		} `json:"offers"`
-	}
-	if err := json.Unmarshal(body, &data); err != nil {
-		fmt.Printf("[HodlHodl] Parse error: %v\n", err)
-		return nil
-	}
-
-	var offers []offer
-	for _, o := range data.Offers {
-		price, err := strconv.ParseFloat(o.Price, 64)
-		if err != nil || price == 0 {
-			continue
-		}
-		fiatMin := int(parseFloatStr(o.MinAmount))
-		fiatMax := int(parseFloatStr(o.MaxAmount))
-
-		// HodlHodl labels pass through as-is; canonicalization in
-		// commons/paymentmethods handles SEPA and national-bank variants.
-		var methods []string
-		if direction == "bid" {
-			for _, pm := range o.PaymentMethods {
-				methods = append(methods, pm.Name)
-			}
-		} else {
-			for _, pmi := range o.PaymentMethodInstructions {
-				methods = append(methods, pmi.PaymentMethodName)
-			}
-		}
-
-		btcMin := round8(float64(fiatMin) / price)
-		btcMax := round8(float64(fiatMax) / price)
-		newOffer := offer{
-			OfferID:        o.ID,
-			FiatCurrency:   currency,
-			Price:          price,
-			BTCMin:         &btcMin,
-			BTCMax:         &btcMax,
-			FiatMin:        &fiatMin,
-			FiatMax:        &fiatMax,
-			PaymentMethods: methods,
-			PriceType:      normalizeHodlHodlPriceType(o.PriceSource),
-		}
-		applyRating(&newOffer, mapHodlHodlTrader(o.Trader))
-		newOffer.SellerRatingSignals = mapHodlHodlSignals(o.Trader)
-		offers = append(offers, newOffer)
-	}
-
-	fmt.Printf("[HodlHodl] Found %d %s offers\n", len(offers), direction)
-	return completeFetch(float64(btcPrice), offers)
-}
-
 // normalizePeachMethod converts a Peach Bitcoin payment-method identifier
 // (e.g. "sepa", "instantSepa", "nationalTransferDE", "mbWay") into a
 // human-readable form. This is an exchange-specific PRE-normalizer (camelCase
@@ -1703,6 +1611,8 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				last_seen = CURRENT_TIMESTAMP,
 				price_type = ?,
 				price = ?,
+				btc_min = ?,
+				btc_max = ?,
 				fiat_min = ?,
 				fiat_max = ?,
 				payment_methods = ?,
@@ -1720,7 +1630,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
-				o.PriceType, o.Price, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
+				o.PriceType, o.Price, o.BTCMin, o.BTCMax, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),

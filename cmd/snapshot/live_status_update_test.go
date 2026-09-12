@@ -158,6 +158,19 @@ func TestReconcileLiveOfferStatusKeepsIncompleteAbsentsWithinCompleteGrace(t *te
 	}
 }
 
+func TestReconcileLiveOfferStatusHodlHodlIncompleteDoesNotClose(t *testing.T) {
+	db := openLiveStatusDB(t)
+	snapshotStart := time.Now().UTC()
+	id := insertLiveOffer(t, db, "hodlhodl", "EUR", "ask", snapshotStart.Add(-time.Minute))
+
+	if err := reconcileLiveOfferStatus(db, snapshotStart, nil, 5*time.Minute); err != nil {
+		t.Fatalf("reconcile incomplete hodlhodl: %v", err)
+	}
+	if !offerIsLive(t, db, id) {
+		t.Fatal("hodlhodl offer closed after incomplete pagination")
+	}
+}
+
 func TestReconcileLiveOfferStatusCompleteEmptyClosesAbsents(t *testing.T) {
 	db := openLiveStatusDB(t)
 	snapshotStart := time.Now().UTC()

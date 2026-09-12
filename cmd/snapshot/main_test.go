@@ -248,6 +248,90 @@ func TestRecordFetchResultTracksOfferIDs(t *testing.T) {
 	}
 }
 
+func TestSaveSnapshotUpdatesBTCAndFiatLimitsWithoutChangingIdentity(t *testing.T) {
+	db := testdb.Open(t)
+	btcMin := 0.01
+	btcMax := 0.02
+	fiatMin := 600
+	fiatMax := 1200
+	priceType := priceTypeFixed()
+
+	first := saveSnapshot(db, "hodlhodl", "EUR", "ask", 60000, []offer{{
+		OfferID:        "hh-persist-1",
+		FiatCurrency:   "EUR",
+		Price:          61000,
+		BTCMin:         &btcMin,
+		BTCMax:         &btcMax,
+		FiatMin:        &fiatMin,
+		FiatMax:        &fiatMax,
+		PaymentMethods: []string{"SEPA"},
+		PriceType:      priceType,
+	}})
+	if len(first) != 1 {
+		t.Fatalf("first live len = %d, want 1", len(first))
+	}
+
+	btcMin, btcMax = 0.03, 0.08
+	fiatMin, fiatMax = 1800, 4800
+	second := saveSnapshot(db, "hodlhodl", "EUR", "ask", 60000, []offer{{
+		OfferID:        "hh-persist-1",
+		FiatCurrency:   "EUR",
+		Price:          62500,
+		BTCMin:         &btcMin,
+		BTCMax:         &btcMax,
+		FiatMin:        &fiatMin,
+		FiatMax:        &fiatMax,
+		PaymentMethods: []string{"SEPA"},
+		PriceType:      priceType,
+	}})
+	if len(second) != 1 {
+		t.Fatalf("second live len = %d, want 1", len(second))
+	}
+	if second[0].ID != first[0].ID {
+		t.Fatalf("id = %d, want preserved %d", second[0].ID, first[0].ID)
+	}
+	if second[0].FirstSeen != first[0].FirstSeen {
+		t.Fatalf("first_seen = %q, want preserved %q", second[0].FirstSeen, first[0].FirstSeen)
+	}
+	if second[0].BTCMin == nil || second[0].BTCMax == nil || *second[0].BTCMin != 0.03 || *second[0].BTCMax != 0.08 {
+		t.Fatalf("live btc = %v-%v, want 0.03-0.08", second[0].BTCMin, second[0].BTCMax)
+	}
+	if second[0].FiatMin == nil || second[0].FiatMax == nil || *second[0].FiatMin != 1800 || *second[0].FiatMax != 4800 {
+		t.Fatalf("live fiat = %v-%v, want 1800-4800", second[0].FiatMin, second[0].FiatMax)
+	}
+	if second[0].Price != 62500 {
+		t.Fatalf("live price = %v, want 62500", second[0].Price)
+	}
+
+	var (
+		gotPrice, gotBTCMin, gotBTCMax float64
+		gotFiatMin, gotFiatMax         int64
+		gotFirstSeen                   string
+		gotID                          int64
+	)
+	if err := db.QueryRow(`
+		SELECT id, price, btc_min, btc_max, fiat_min, fiat_max,
+			to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
+		FROM offers WHERE exchange = ? AND offer_id = ?`,
+		"hodlhodl", "hh-persist-1",
+	).Scan(&gotID, &gotPrice, &gotBTCMin, &gotBTCMax, &gotFiatMin, &gotFiatMax, &gotFirstSeen); err != nil {
+		t.Fatalf("load persisted offer: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM offers WHERE exchange = ? AND offer_id = ?`, "hodlhodl", "hh-persist-1").Scan(&count); err != nil {
+		t.Fatalf("count persisted offer: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("persisted rows = %d, want 1", count)
+	}
+	if gotID != first[0].ID || gotFirstSeen != first[0].FirstSeen {
+		t.Fatalf("db identity id=%d first_seen=%q, want id=%d first_seen=%q", gotID, gotFirstSeen, first[0].ID, first[0].FirstSeen)
+	}
+	if gotPrice != 62500 || gotBTCMin != 0.03 || gotBTCMax != 0.08 || gotFiatMin != 1800 || gotFiatMax != 4800 {
+		t.Fatalf("db limits price=%v btc=%v-%v fiat=%d-%d, want updated values", gotPrice, gotBTCMin, gotBTCMax, gotFiatMin, gotFiatMax)
+	}
+}
+
 func TestSaveSnapshotPersistsBisqOffer(t *testing.T) {
 	db := testdb.Open(t)
 	btcMin := 0.01
