@@ -92,6 +92,13 @@ type LiveOffer struct {
 	// MakerID is the exchange's seller identity, used to look up a per-maker
 	// reputation for live Peach offers (its listing omits the rating).
 	MakerID string `json:"maker_id,omitempty"`
+	// VenueNodePubKey scopes a Mostro order id to its coordinator. The source
+	// event fields preserve the signed quote selected by execution.
+	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
+	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	SourceEventID        string     `json:"source_event_id,omitempty"`
+	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
+	ProtocolVersion      int        `json:"protocol_version,omitempty"`
 }
 
 // LifecyclePoint is a single price observation from the order_lifecycle table.
@@ -279,6 +286,12 @@ type liveOfferAnalysis struct {
 }
 
 type liveOfferAPI struct {
+	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
+	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	SourceEventID        string     `json:"source_event_id,omitempty"`
+	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
+	ProtocolVersion      int        `json:"protocol_version,omitempty"`
+
 	ID                     int64                  `json:"id"`
 	Exchange               string                 `json:"exchange"`
 	OfferID                string                 `json:"offer_id"`
@@ -300,6 +313,12 @@ type liveOfferAPI struct {
 
 // liveOutOffer is the shape sent to clients — includes computed premium fields.
 type liveOutOffer struct {
+	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
+	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	SourceEventID        string     `json:"source_event_id,omitempty"`
+	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
+	ProtocolVersion      int        `json:"protocol_version,omitempty"`
+
 	ID                        int64                         `json:"id"`
 	Exchange                  string                        `json:"exchange"`
 	FiatCurrency              string                        `json:"fiat_currency"`
@@ -478,6 +497,7 @@ func buildBTCLiveNetworkFee(bd tradecost.CostBreakdown, requiredConfirmations in
 func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 	requiredConfirmations := tradecost.ResolveRequiredConfirmations(o.Direction, 0)
 	api := liveOfferAPI{
+		VenueNodePubKey: o.VenueNodePubKey, VenueNodeName: o.VenueNodeName, SourceEventID: o.SourceEventID, SourceEventCreatedAt: o.SourceEventCreatedAt, ProtocolVersion: o.ProtocolVersion,
 		ID:             o.ID,
 		Exchange:       o.Exchange,
 		OfferID:        derefStringOrEmpty(o.OfferID),
@@ -1141,6 +1161,7 @@ func (h *LiveHub) buildOutOffers(settings transactionalRoutingSettings) []liveOu
 		}
 
 		result = append(result, liveOutOffer{
+			VenueNodePubKey: o.VenueNodePubKey, VenueNodeName: o.VenueNodeName, SourceEventID: o.SourceEventID, SourceEventCreatedAt: o.SourceEventCreatedAt, ProtocolVersion: o.ProtocolVersion,
 			ID:                        o.ID,
 			Exchange:                  o.Exchange,
 			FiatCurrency:              o.FiatCurrency,

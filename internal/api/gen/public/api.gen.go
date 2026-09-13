@@ -18,10 +18,29 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/oapi-codegen/runtime"
 )
+
+// Defines values for LiveOfferProtocolVersion.
+const (
+	N1 LiveOfferProtocolVersion = 1
+	N2 LiveOfferProtocolVersion = 2
+)
+
+// Valid indicates whether the value is a known member of the LiveOfferProtocolVersion enum.
+func (e LiveOfferProtocolVersion) Valid() bool {
+	switch e {
+	case N1:
+		return true
+	case N2:
+		return true
+	default:
+		return false
+	}
+}
 
 // LifecyclePoint defines model for LifecyclePoint.
 type LifecyclePoint struct {
@@ -31,13 +50,156 @@ type LifecyclePoint struct {
 }
 
 // LiveOffer Enriched live DEX offer returned by the unified routing book.
-type LiveOffer map[string]interface{}
+type LiveOffer struct {
+	// ProtocolVersion Absent when unknown; execution reads signed node capabilities.
+	ProtocolVersion      *LiveOfferProtocolVersion `json:"protocol_version,omitempty"`
+	SourceEventCreatedAt *time.Time                `json:"source_event_created_at,omitempty"`
+
+	// SourceEventId Signed quote identifier revalidated before taking an offer.
+	SourceEventId *string `json:"source_event_id,omitempty"`
+	VenueNodeName *string `json:"venue_node_name,omitempty"`
+
+	// VenueNodePubkey Nostr author of the Mostro order, scoped to its coordinator.
+	VenueNodePubkey      *string                `json:"venue_node_pubkey,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// LiveOfferProtocolVersion Absent when unknown; execution reads signed node capabilities.
+type LiveOfferProtocolVersion int
 
 // PutApiCexPermissionsProviderJSONBody defines parameters for PutApiCexPermissionsProvider.
 type PutApiCexPermissionsProviderJSONBody map[string]interface{}
 
 // PutApiCexPermissionsProviderJSONRequestBody defines body for PutApiCexPermissionsProvider for application/json ContentType.
 type PutApiCexPermissionsProviderJSONRequestBody PutApiCexPermissionsProviderJSONBody
+
+// Getter for additional properties for LiveOffer. Returns the specified
+// element and whether it was found
+func (a LiveOffer) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for LiveOffer
+func (a *LiveOffer) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for LiveOffer to handle AdditionalProperties
+func (a *LiveOffer) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["protocol_version"]; found {
+		err = json.Unmarshal(raw, &a.ProtocolVersion)
+		if err != nil {
+			return fmt.Errorf("error reading 'protocol_version': %w", err)
+		}
+		delete(object, "protocol_version")
+	}
+
+	if raw, found := object["source_event_created_at"]; found {
+		err = json.Unmarshal(raw, &a.SourceEventCreatedAt)
+		if err != nil {
+			return fmt.Errorf("error reading 'source_event_created_at': %w", err)
+		}
+		delete(object, "source_event_created_at")
+	}
+
+	if raw, found := object["source_event_id"]; found {
+		err = json.Unmarshal(raw, &a.SourceEventId)
+		if err != nil {
+			return fmt.Errorf("error reading 'source_event_id': %w", err)
+		}
+		delete(object, "source_event_id")
+	}
+
+	if raw, found := object["venue_node_name"]; found {
+		err = json.Unmarshal(raw, &a.VenueNodeName)
+		if err != nil {
+			return fmt.Errorf("error reading 'venue_node_name': %w", err)
+		}
+		delete(object, "venue_node_name")
+	}
+
+	if raw, found := object["venue_node_pubkey"]; found {
+		err = json.Unmarshal(raw, &a.VenueNodePubkey)
+		if err != nil {
+			return fmt.Errorf("error reading 'venue_node_pubkey': %w", err)
+		}
+		delete(object, "venue_node_pubkey")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for LiveOffer to handle AdditionalProperties
+func (a LiveOffer) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.ProtocolVersion != nil {
+		object["protocol_version"], err = json.Marshal(a.ProtocolVersion)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'protocol_version': %w", err)
+		}
+	}
+
+	if a.SourceEventCreatedAt != nil {
+		object["source_event_created_at"], err = json.Marshal(a.SourceEventCreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'source_event_created_at': %w", err)
+		}
+	}
+
+	if a.SourceEventId != nil {
+		object["source_event_id"], err = json.Marshal(a.SourceEventId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'source_event_id': %w", err)
+		}
+	}
+
+	if a.VenueNodeName != nil {
+		object["venue_node_name"], err = json.Marshal(a.VenueNodeName)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'venue_node_name': %w", err)
+		}
+	}
+
+	if a.VenueNodePubkey != nil {
+		object["venue_node_pubkey"], err = json.Marshal(a.VenueNodePubkey)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'venue_node_pubkey': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -946,24 +1108,27 @@ func (sh *strictHandler) GetApiTradeCostConfig(w http.ResponseWriter, r *http.Re
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

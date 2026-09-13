@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"commons/nostrreq"
 	"dexunifiedapi/internal/sellerrating"
@@ -217,15 +218,19 @@ func mapNIP69Event(event nostrreq.Event, platform, wantKind, currency string, bt
 	methods := paymentMethodsFromPM(event.TagValues("pm"))
 
 	out := offer{
-		OfferID:        offerID,
-		FiatCurrency:   fiatCode,
-		Price:          price,
-		BTCMin:         &btcMin,
-		BTCMax:         &btcMax,
-		FiatMin:        &fiatMin,
-		FiatMax:        &fiatMax,
-		PaymentMethods: methods,
-		PriceType:      priceType,
+		OfferID:              offerID,
+		FiatCurrency:         fiatCode,
+		Price:                price,
+		BTCMin:               &btcMin,
+		BTCMax:               &btcMax,
+		FiatMin:              &fiatMin,
+		FiatMax:              &fiatMax,
+		PaymentMethods:       methods,
+		PriceType:            priceType,
+		VenueNodePubKey:      event.PubKey,
+		VenueNodeName:        secondTagValue(event, "y"),
+		SourceEventID:        event.ID,
+		SourceEventCreatedAt: time.Unix(event.CreatedAt, 0).UTC(),
 	}
 	if pct, btc := securityDepositFromBond(event.TagValue("bond"), amtSats, btcMax); pct != nil {
 		out.SecurityDepositPct = pct
@@ -234,6 +239,15 @@ func mapNIP69Event(event nostrreq.Event, platform, wantKind, currency string, bt
 	applyRating(&out, mapNIP69Rating(event.TagValues("rating")))
 	out.SellerRatingSignals = mapNIP69Signals(event.TagValues("rating"))
 	return out, true
+}
+
+func secondTagValue(event nostrreq.Event, name string) string {
+	for _, tag := range event.Tags {
+		if len(tag) > 2 && tag[0] == name {
+			return strings.TrimSpace(tag[2])
+		}
+	}
+	return ""
 }
 
 // nip69FixedPriceMaxDeviation is a product filter, not a protocol constraint:

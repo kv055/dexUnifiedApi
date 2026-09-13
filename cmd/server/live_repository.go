@@ -49,6 +49,11 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			o.counterparty_stake_btc,
 			o.counterparty_stake_pct,
 			COALESCE(o.maker_id, '')
+			, COALESCE(o.venue_node_pubkey, '')
+			, COALESCE(o.venue_node_name, '')
+			, COALESCE(o.source_event_id, '')
+			, o.source_event_created_at
+			, COALESCE(o.venue_protocol_version, 0)
 		FROM offers o
 		LEFT JOIN LATERAL (
 			SELECT ol.ref_price
@@ -98,6 +103,11 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			&o.CounterpartyStakeBTC,
 			&o.CounterpartyStakePct,
 			&o.MakerID,
+			&o.VenueNodePubKey,
+			&o.VenueNodeName,
+			&o.SourceEventID,
+			&o.SourceEventCreatedAt,
+			&o.ProtocolVersion,
 		); err != nil {
 			return nil, fmt.Errorf("scan live offer: %w", err)
 		}

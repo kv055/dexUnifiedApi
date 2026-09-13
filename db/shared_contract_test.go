@@ -16,6 +16,25 @@ import (
 func TestSharedServiceSchemaContract(t *testing.T) {
 	db := testdb.Open(t)
 	required := map[string][]string{
+		"offers": {
+			"id", "exchange", "offer_id", "venue_node_pubkey", "venue_node_name", "source_event_id", "source_event_created_at", "venue_protocol_version",
+		},
+		"mostro_identities": {
+			"id", "label", "encrypted_mnemonic", "next_trade_index", "is_active", "created_at", "updated_at",
+		},
+		"mostro_trade_sessions": {
+			"id", "transaction_id", "identity_id", "trade_index", "trade_pubkey", "node_pubkey", "order_id", "request_id", "protocol_version", "state", "last_event_id", "last_error", "session_data",
+		},
+		"mostro_payments": {
+			"id", "session_id", "purpose", "invoice", "payment_hash", "amount_sat", "status",
+		},
+		"mostro_outbox": {
+			"id", "session_id", "request_id", "event_id", "event_json", "action", "relay_acks", "status", "attempts", "next_attempt_at", "last_error",
+		},
+		"mostro_chat_events": {"session_id", "event_id", "inner_event_id", "event_json", "created_at"},
+		"mostro_inbox_events": {
+			"event_id", "session_id", "node_pubkey", "event_created_at", "event_json", "plaintext_ciphertext", "processed_at", "processing_error", "received_at",
+		},
 		"accounts": {
 			"id", "provider", "email", "password", "phone", "last_health_check",
 			"is_healthy", "is_active", "payment_priority", "payment_tag", "notification_channels", "category", "created_at", "updated_at",

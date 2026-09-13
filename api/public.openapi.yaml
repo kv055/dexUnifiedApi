@@ -281,6 +281,22 @@ components:
       description: Enriched live DEX offer returned by the unified routing book.
       type: object
       additionalProperties: true
+      properties:
+        venue_node_pubkey:
+          type: string
+          description: Nostr author of the Mostro order, scoped to its coordinator.
+        venue_node_name:
+          type: string
+        source_event_id:
+          type: string
+          description: Signed quote identifier revalidated before taking an offer.
+        source_event_created_at:
+          type: string
+          format: date-time
+        protocol_version:
+          type: integer
+          enum: [1, 2]
+          description: Absent when unknown; execution reads signed node capabilities.
       required:
         - id
         - exchange

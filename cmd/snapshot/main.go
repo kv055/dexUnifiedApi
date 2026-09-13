@@ -154,7 +154,12 @@ type offer struct {
 	// MakerID is the exchange's seller identity, sent to the unified-api server
 	// so it can look up a per-maker reputation for live Peach offers (the
 	// listing omits the rating).
-	MakerID string `json:"maker_id,omitempty"`
+	MakerID              string    `json:"maker_id,omitempty"`
+	VenueNodePubKey      string    `json:"venue_node_pubkey,omitempty"`
+	VenueNodeName        string    `json:"venue_node_name,omitempty"`
+	SourceEventID        string    `json:"source_event_id,omitempty"`
+	SourceEventCreatedAt time.Time `json:"source_event_created_at,omitempty"`
+	ProtocolVersion      int       `json:"protocol_version,omitempty"`
 }
 
 // applyRating copies a normalized sellerrating.Score onto an offer. Every
@@ -255,7 +260,12 @@ type livePayload struct {
 	SellerRatingSignals    json.RawMessage `json:"seller_rating_signals,omitempty"`
 	// MakerID lets the server look up a per-maker reputation for live Peach
 	// offers (its listing omits the rating).
-	MakerID string `json:"maker_id,omitempty"`
+	MakerID              string     `json:"maker_id,omitempty"`
+	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
+	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	SourceEventID        string     `json:"source_event_id,omitempty"`
+	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
+	ProtocolVersion      int        `json:"protocol_version,omitempty"`
 }
 
 func priceTypeFixed() *string    { s := "fixed"; return &s }
@@ -1551,7 +1561,13 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 		// order_lifecycle rows and pushing N duplicate hub entries — the bloat that
 		// OOM-killed the server (offer #989 got 83 rows every snapshot).
 		if o.OfferID != "" {
-			err := tx.QueryRow("SELECT id FROM offers WHERE exchange = ? AND fiat_currency = ? AND offer_id = ?", exchange, fiat, o.OfferID).Scan(&existingID)
+			query := "SELECT id FROM offers WHERE exchange = ? AND fiat_currency = ? AND offer_id = ?"
+			args := []any{exchange, fiat, o.OfferID}
+			if exchange == "mostro" && o.VenueNodePubKey != "" {
+				query += " AND venue_node_pubkey = ?"
+				args = append(args, o.VenueNodePubKey)
+			}
+			err := tx.QueryRow(query, args...).Scan(&existingID)
 			found = err == nil
 		} else {
 			err := tx.QueryRow(`SELECT id FROM offers
@@ -1586,6 +1602,14 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 			SellerRatingRaw:        o.SellerRatingRaw,
 			SellerRatingSignals:    o.SellerRatingSignals,
 			MakerID:                o.MakerID,
+			VenueNodePubKey:        o.VenueNodePubKey,
+			VenueNodeName:          o.VenueNodeName,
+			SourceEventID:          o.SourceEventID,
+			ProtocolVersion:        o.ProtocolVersion,
+		}
+		if !o.SourceEventCreatedAt.IsZero() {
+			v := o.SourceEventCreatedAt
+			live.SourceEventCreatedAt = &v
 		}
 		if o.FiatMin != nil {
 			v := int64(*o.FiatMin)
@@ -1625,7 +1649,12 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				seller_rating_confidence = ?,
 				seller_rating_raw = ?::jsonb,
 				seller_rating_signals = ?::jsonb,
-				maker_id = COALESCE(?, maker_id)
+				maker_id = COALESCE(?, maker_id),
+				venue_node_pubkey = COALESCE(?, venue_node_pubkey),
+				venue_node_name = COALESCE(?, venue_node_name),
+				source_event_id = COALESCE(?, source_event_id),
+				source_event_created_at = COALESCE(?, source_event_created_at),
+				venue_protocol_version = ?
 				WHERE id = ?
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
@@ -1635,7 +1664,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
 				nilIfEmptyRawMessage(o.SellerRatingSignals),
-				nilIfEmpty(o.MakerID), existingID,
+				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion), existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		} else {
 			upsertErr = tx.QueryRow(`INSERT INTO offers
@@ -1643,8 +1672,9 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				 fiat_min, fiat_max, payment_methods, offer_id, price_type, price,
 				 security_deposit_btc, security_deposit_pct,
 				 counterparty_stake_btc, counterparty_stake_pct,
-				 seller_rating_score, seller_rating_confidence, seller_rating_raw, seller_rating_signals, maker_id)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?)
+				 seller_rating_score, seller_rating_confidence, seller_rating_raw, seller_rating_signals, maker_id,
+				 venue_node_pubkey, venue_node_name, source_event_id, source_event_created_at, venue_protocol_version)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?, ?)
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
@@ -1654,7 +1684,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
 				nilIfEmptyRawMessage(o.SellerRatingSignals),
-				nilIfEmpty(o.MakerID),
+				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion),
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		}
 		if upsertErr != nil {
@@ -2484,6 +2514,20 @@ func nilIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nilIfZeroTime(v time.Time) any {
+	if v.IsZero() {
+		return nil
+	}
+	return v
+}
+
+func nilIfZeroInt(v int) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 func nilIfEmptySlice(s []string) any {
