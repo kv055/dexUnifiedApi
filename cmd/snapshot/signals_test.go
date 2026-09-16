@@ -79,7 +79,7 @@ func TestMapBisq2Signals(t *testing.T) {
 		TotalScore:      40000,
 		FiveSystemScore: 4,
 		Ranking:         12,
-	}, &fiatMax)
+	}, &fiatMax, []string{"MAIN_CHAIN"})
 	var got map[string]any
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal signals: %v", err)
@@ -99,9 +99,13 @@ func TestMapBisq2Signals(t *testing.T) {
 	if got["five_system_matches_buckets"] != true {
 		t.Fatalf("five_system_matches_buckets = %v, want true", got["five_system_matches_buckets"])
 	}
+	rails, _ := got["bitcoin_payment_methods"].([]any)
+	if len(rails) != 1 || rails[0] != "MAIN_CHAIN" {
+		t.Fatalf("bitcoin_payment_methods = %v, want [MAIN_CHAIN]", got["bitcoin_payment_methods"])
+	}
 
 	over := 250
-	overRaw := mapBisq2Signals(bisq2Reputation{TotalScore: 40000, FiveSystemScore: 3, Ranking: 1}, &over)
+	overRaw := mapBisq2Signals(bisq2Reputation{TotalScore: 40000, FiveSystemScore: 3, Ranking: 1}, &over, nil)
 	var overGot map[string]any
 	if err := json.Unmarshal(overRaw, &overGot); err != nil {
 		t.Fatalf("unmarshal over-limit signals: %v", err)

@@ -458,7 +458,12 @@ func fetchBisq2Currency(ctx context.Context, direction, currency string, btcPric
 			QuoteSidePaymentMethodSpecs []struct {
 				PaymentMethod string `json:"paymentMethod"`
 			} `json:"quoteSidePaymentMethodSpecs"`
+			BaseSidePaymentMethodSpecs []struct {
+				PaymentMethod string `json:"paymentMethod"`
+			} `json:"baseSidePaymentMethodSpecs"`
 		} `json:"bisqEasyOffer"`
+		QuoteSidePaymentMethods []string `json:"quoteSidePaymentMethods"`
+		BaseSidePaymentMethods  []string `json:"baseSidePaymentMethods"`
 		// reputationScore is a sibling of bisqEasyOffer in each list item; the
 		// Bisq2 node computes it with the same ReputationService the desktop UI
 		// uses (burned/bonded BSQ + imported bisq1 account age). fiveSystemScore
@@ -521,9 +526,21 @@ func fetchBisq2Currency(ctx context.Context, direction, currency string, btcPric
 		btcMax := float64(fiatMax) / price
 
 		var methods []string
-		for _, spec := range o.QuoteSidePaymentMethodSpecs {
-			if m := strings.TrimSpace(spec.PaymentMethod); m != "" {
-				methods = append(methods, m)
+		methods = append(methods, item.QuoteSidePaymentMethods...)
+		if len(methods) == 0 {
+			for _, spec := range o.QuoteSidePaymentMethodSpecs {
+				if m := strings.TrimSpace(spec.PaymentMethod); m != "" {
+					methods = append(methods, m)
+				}
+			}
+		}
+		var bitcoinRails []string
+		bitcoinRails = append(bitcoinRails, item.BaseSidePaymentMethods...)
+		if len(bitcoinRails) == 0 {
+			for _, spec := range o.BaseSidePaymentMethodSpecs {
+				if m := strings.TrimSpace(spec.PaymentMethod); m != "" {
+					bitcoinRails = append(bitcoinRails, m)
+				}
 			}
 		}
 
@@ -549,7 +566,7 @@ func fetchBisq2Currency(ctx context.Context, direction, currency string, btcPric
 			TotalScore:      rep.TotalScore,
 			FiveSystemScore: rep.FiveSystemScore,
 			Ranking:         rep.Ranking,
-		}, &fiatMax)
+		}, &fiatMax, bitcoinRails)
 		offers = append(offers, newOffer)
 	}
 
@@ -594,7 +611,7 @@ func bisq2OfficialFiveSystemScore(totalScore int64) float64 {
 	}
 }
 
-func mapBisq2Signals(rep bisq2Reputation, offerFiatMax *int) json.RawMessage {
+func mapBisq2Signals(rep bisq2Reputation, offerFiatMax *int, bitcoinRails []string) json.RawMessage {
 	maxSellUSD := float64(rep.TotalScore) / 200
 	official := bisq2OfficialFiveSystemScore(rep.TotalScore)
 	blob := map[string]any{
@@ -607,6 +624,9 @@ func mapBisq2Signals(rep bisq2Reputation, offerFiatMax *int) json.RawMessage {
 	if offerFiatMax != nil {
 		blob["offer_fiat_max"] = *offerFiatMax
 		blob["within_reputation_limit"] = float64(*offerFiatMax) <= maxSellUSD
+	}
+	if len(bitcoinRails) > 0 {
+		blob["bitcoin_payment_methods"] = bitcoinRails
 	}
 	return marshalSignals(blob)
 }
