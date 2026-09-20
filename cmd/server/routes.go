@@ -16,7 +16,7 @@ func registerRoutes(mux *http.ServeMux) {
 	publicapi.RegisterLegacyStrictHandler(legacyMux, mux)
 	internalapi.RegisterLegacyStrictHandler(legacyMux, mux)
 
-	// Streaming endpoints intentionally remain outside generated response handling.
+	// Streaming endpoints bypass generated response handling.
 	mux.HandleFunc("GET /ws/live_offers", handleLiveOffersWS)
 	mux.Handle("GET /internal/ws/live_offers", internalSecretGate(http.HandlerFunc(handleLiveOffersWS)))
 }
@@ -25,6 +25,8 @@ func registerRoutes(mux *http.ServeMux) {
 // the generated strict request adapters. New operations should be implemented
 // directly on the generated StrictServerInterface instead of being added here.
 func registerLegacyRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/execution-quotes", handleExecutionQuotes)
+	mux.Handle("POST /internal/bisq/requote", internalSecretGate(http.HandlerFunc(handleBisqRequote)))
 	mux.HandleFunc("GET /api/live_offers", handleLiveOffersREST)
 	mux.HandleFunc("GET /api/live_offers/counts", handleLiveOffersCountsREST)
 	mux.HandleFunc("GET /api/live_offers/{id}/lifecycle", handleLiveOfferLifecycleREST)

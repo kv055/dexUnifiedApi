@@ -131,6 +131,32 @@ func TestFetchRobosatsUnionsCoordinatorsAndKeepsGoingAfterNotFound(t *testing.T)
 	}
 }
 
+func TestFetchRobosatsKeepsSameNumericIDOnDifferentCoordinators(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		book := `[{"id": 7, "price": 61000, "premium": 0, "amount": 400, "min_amount": 0, "max_amount": 0, "payment_method": "SEPA", "bond_size": 3}]`
+		return jsonResponse(http.StatusOK, book), nil
+	})}
+	robosatsCoordinatorIDs = map[string]string{
+		"http://alpha.test": "alpha",
+		"http://beta.test":  "beta",
+	}
+	t.Cleanup(func() { robosatsCoordinatorIDs = map[string]string{} })
+	result := fetchRobosatsCurrencyFrom(context.Background(), "ask", "EUR", 60000, client, []string{"http://alpha.test", "http://beta.test"})
+	if result == nil || len(result.Offers) != 2 {
+		t.Fatalf("offers = %#v, want both coordinator copies of order 7", result)
+	}
+	seen := map[string]bool{}
+	for _, o := range result.Offers {
+		if o.OfferID != "7" || o.VenueCoordinatorID == "" {
+			t.Fatalf("offer = %#v, want native id 7 with coordinator identity", o)
+		}
+		seen[o.VenueCoordinatorID] = true
+	}
+	if !seen["alpha"] || !seen["beta"] {
+		t.Fatalf("coordinators = %v, want alpha and beta", seen)
+	}
+}
+
 func TestFetchRobosatsNotFoundThenFailureIsIncomplete(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Host {
@@ -253,7 +279,7 @@ func TestParseRobosatsOffersLeavesRatingUnavailable(t *testing.T) {
 		"payment_method": "SEPA",
 		"bond_size": 3
 	}`)}
-	offers := parseRobosatsOffers(raw, "EUR", 60000)
+	offers := parseRobosatsOffers(raw, "EUR", 60000, "expats")
 	if len(offers) != 1 {
 		t.Fatalf("len(offers) = %d, want 1", len(offers))
 	}

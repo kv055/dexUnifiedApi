@@ -17,7 +17,7 @@ func TestSharedServiceSchemaContract(t *testing.T) {
 	db := testdb.Open(t)
 	required := map[string][]string{
 		"offers": {
-			"id", "exchange", "offer_id", "venue_node_pubkey", "venue_node_name", "source_event_id", "source_event_created_at", "venue_protocol_version",
+			"id", "exchange", "offer_id", "venue_node_pubkey", "venue_node_name", "venue_coordinator_id", "source_event_id", "source_event_created_at", "venue_protocol_version",
 		},
 		"mostro_identities": {
 			"id", "label", "encrypted_mnemonic", "next_trade_index", "is_active", "created_at", "updated_at",
@@ -34,6 +34,15 @@ func TestSharedServiceSchemaContract(t *testing.T) {
 		"mostro_chat_events": {"session_id", "event_id", "inner_event_id", "event_json", "created_at"},
 		"mostro_inbox_events": {
 			"event_id", "session_id", "node_pubkey", "event_created_at", "event_json", "plaintext_ciphertext", "processed_at", "processing_error", "received_at",
+		},
+		"robosats_trade_sessions": {
+			"id", "transaction_id", "credential_id", "coordinator_id", "order_id", "phase", "session_data",
+		},
+		"robosats_payments": {
+			"id", "session_id", "purpose", "invoice", "payment_hash", "amount_sat", "status",
+		},
+		"execution_quotes": {
+			"id", "exchange", "coordinator_id", "offer_id", "fiat_amount", "btc_amount", "max_bond_sat", "max_escrow_sat", "route", "expires_at", "transaction_id",
 		},
 		"accounts": {
 			"id", "provider", "email", "password", "phone", "last_health_check",

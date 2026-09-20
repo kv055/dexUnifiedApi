@@ -96,6 +96,7 @@ type LiveOffer struct {
 	// event fields preserve the signed quote selected by execution.
 	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
 	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	VenueCoordinatorID   string     `json:"venue_coordinator_id,omitempty"`
 	SourceEventID        string     `json:"source_event_id,omitempty"`
 	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
 	ProtocolVersion      int        `json:"protocol_version,omitempty"`
@@ -288,6 +289,7 @@ type liveOfferAnalysis struct {
 type liveOfferAPI struct {
 	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
 	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	VenueCoordinatorID   string     `json:"venue_coordinator_id,omitempty"`
 	SourceEventID        string     `json:"source_event_id,omitempty"`
 	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
 	ProtocolVersion      int        `json:"protocol_version,omitempty"`
@@ -315,6 +317,7 @@ type liveOfferAPI struct {
 type liveOutOffer struct {
 	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
 	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	VenueCoordinatorID   string     `json:"venue_coordinator_id,omitempty"`
 	SourceEventID        string     `json:"source_event_id,omitempty"`
 	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
 	ProtocolVersion      int        `json:"protocol_version,omitempty"`
@@ -497,7 +500,7 @@ func buildBTCLiveNetworkFee(bd tradecost.CostBreakdown, requiredConfirmations in
 func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 	requiredConfirmations := tradecost.ResolveRequiredConfirmations(o.Direction, 0)
 	api := liveOfferAPI{
-		VenueNodePubKey: o.VenueNodePubKey, VenueNodeName: o.VenueNodeName, SourceEventID: o.SourceEventID, SourceEventCreatedAt: o.SourceEventCreatedAt, ProtocolVersion: o.ProtocolVersion,
+		VenueNodePubKey: o.VenueNodePubKey, VenueNodeName: o.VenueNodeName, VenueCoordinatorID: o.VenueCoordinatorID, SourceEventID: o.SourceEventID, SourceEventCreatedAt: o.SourceEventCreatedAt, ProtocolVersion: o.ProtocolVersion,
 		ID:             o.ID,
 		Exchange:       o.Exchange,
 		OfferID:        derefStringOrEmpty(o.OfferID),
@@ -1161,7 +1164,7 @@ func (h *LiveHub) buildOutOffers(settings transactionalRoutingSettings) []liveOu
 		}
 
 		result = append(result, liveOutOffer{
-			VenueNodePubKey: o.VenueNodePubKey, VenueNodeName: o.VenueNodeName, SourceEventID: o.SourceEventID, SourceEventCreatedAt: o.SourceEventCreatedAt, ProtocolVersion: o.ProtocolVersion,
+			VenueNodePubKey: o.VenueNodePubKey, VenueNodeName: o.VenueNodeName, VenueCoordinatorID: o.VenueCoordinatorID, SourceEventID: o.SourceEventID, SourceEventCreatedAt: o.SourceEventCreatedAt, ProtocolVersion: o.ProtocolVersion,
 			ID:                        o.ID,
 			Exchange:                  o.Exchange,
 			FiatCurrency:              o.FiatCurrency,
