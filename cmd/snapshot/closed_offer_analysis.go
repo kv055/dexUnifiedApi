@@ -122,6 +122,12 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 	var minAvgNetPremiumPct sql.NullFloat64
 	var minAvgNetPremiumBTC sql.NullFloat64
 	var minAvgBTCAmount sql.NullFloat64
+	// Overall (all-rows) lifecycle aggregates persisted for the monitor's
+	// past-offers profitability stats, matching its GROUP BY semantics.
+	var lifecycleAvgPrice sql.NullFloat64
+	var lifecycleAvgHedgeNotional sql.NullFloat64
+	var lifecycleAvgLeverage sql.NullFloat64
+	var lifecycleAvgCollateral sql.NullFloat64
 
 	err := sdb.QueryRow(`
 		SELECT
@@ -129,6 +135,10 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 			AVG(ref_price),
 			AVG(premium_pct),
 			AVG(btc_amount),
+			AVG(price),
+			AVG(hedge_notional_fiat),
+			AVG(leverage_used),
+			AVG(recommended_collateral_fiat),
 			COUNT(CASE WHEN net_premium_pct > 0 THEN 1 END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN premium_pct    END),
 			AVG(CASE WHEN net_premium_pct > 0 THEN trade_cost_pct END),
@@ -149,6 +159,10 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		&avgRefPrice,
 		&overallAvgPremium,
 		&avgBTCAmount,
+		&lifecycleAvgPrice,
+		&lifecycleAvgHedgeNotional,
+		&lifecycleAvgLeverage,
+		&lifecycleAvgCollateral,
 		&profitableCount,
 		&profAvgPremium,
 		&profAvgTradeCostPct,
@@ -192,12 +206,22 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 				historical_analysis_status = ?,
 				avg_ref_price              = ?,
 				avg_premium_pct            = ?,
-				avg_btc_amount             = ?
+				avg_btc_amount             = ?,
+				avg_lifecycle_price        = ?,
+				avg_hedge_notional_fiat    = ?,
+				avg_leverage_used          = ?,
+				avg_recommended_collateral_fiat = ?,
+				lifecycle_observation_count     = ?
 			WHERE id = ?
 		`, "non_premium",
 			historicalRound4(avgRefPrice.Float64),
 			historicalRound4(overallAvgPremium.Float64),
 			historicalRound8(avgBTCAmount.Float64),
+			nullHistoricalRound4(lifecycleAvgPrice),
+			nullHistoricalRound2(lifecycleAvgHedgeNotional),
+			nullHistoricalRound4(lifecycleAvgLeverage),
+			nullHistoricalRound2(lifecycleAvgCollateral),
+			totalCount,
 			offer.id,
 		)
 		return "non_premium", false
@@ -266,6 +290,11 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 			avg_min_estimated_profit_fiat = ?,
 			avg_min_btc_amount          = ?,
 			min_volume_analyzed         = TRUE,
+			avg_lifecycle_price        = ?,
+			avg_hedge_notional_fiat    = ?,
+			avg_leverage_used          = ?,
+			avg_recommended_collateral_fiat = ?,
+			lifecycle_observation_count     = ?,
 			best_route_cex             = ?,
 			routing_profile            = ?,
 			routing_fee_detail         = ?
@@ -298,12 +327,21 @@ func analyzeSingleClosedOffer(sdb closedOfferDB, offer closedOfferRecord) (strin
 		nullHistoricalRound8(minAvgNetPremiumBTC),
 		nullHistoricalRound4IfValid(minAvgNetPremiumBTC, minProfitFiat),
 		nullHistoricalRound8(minAvgBTCAmount),
+		nullHistoricalRound4(lifecycleAvgPrice),
+		nullHistoricalRound2(lifecycleAvgHedgeNotional),
+		nullHistoricalRound4(lifecycleAvgLeverage),
+		nullHistoricalRound2(lifecycleAvgCollateral),
+		totalCount,
 		bestRouteCEX.String,
 		nullHistoricalString(routingProfile),
 		nullHistoricalJSON(routingFeeDetail),
 		offer.id,
 	)
 	return "analyzed", false
+}
+
+func historicalRound2(v float64) float64 {
+	return math.Round(v*1e2) / 1e2
 }
 
 func historicalRound4(v float64) float64 {
@@ -326,6 +364,13 @@ func nullHistoricalRound4(v sql.NullFloat64) any {
 		return nil
 	}
 	return historicalRound4(v.Float64)
+}
+
+func nullHistoricalRound2(v sql.NullFloat64) any {
+	if !v.Valid {
+		return nil
+	}
+	return historicalRound2(v.Float64)
 }
 
 func nullHistoricalRound4IfValid(valid sql.NullFloat64, value float64) any {

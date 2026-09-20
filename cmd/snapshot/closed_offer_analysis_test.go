@@ -298,6 +298,70 @@ func TestClosedOfferEverRawPositiveIsNotDeleted(t *testing.T) {
 	}
 }
 
+// Analyzer-persisted lifecycle aggregates feed the monitor's past-offers
+// profitability stats without re-aggregating order_lifecycle per request.
+func TestClosedOfferAnalysisPersistsLifecycleObservationAggregates(t *testing.T) {
+	db := openClosedOfferAnalysisDB(t)
+	offerID := insertClosedOffer(t, db, nil)
+	if _, err := db.Exec(`
+		INSERT INTO order_lifecycle (
+			offer_db_id, price, ref_price, premium_pct,
+			trade_cost_pct, trade_cost_btc, net_premium_pct, net_premium_btc, btc_amount,
+			hedge_notional_fiat, leverage_used, recommended_collateral_fiat
+		)
+		VALUES
+			(?, 100, 100, 5, 1, 0.001, 4, 0.004, 0.1, 1000, 2, 500),
+			(?, 110, 100, 5, 1, 0.001, 3, 0.003, 0.1, 2000, 4, 1500)
+	`, offerID, offerID); err != nil {
+		t.Fatalf("insert lifecycle: %v", err)
+	}
+
+	status, removed := analyzeSingleClosedOffer(db, closedOfferRecord{id: offerID})
+	if removed || status != "analyzed" {
+		t.Fatalf("analysis = (%q, removed=%v), want analyzed", status, removed)
+	}
+
+	var count int
+	var avgPrice, avgNotional, avgLeverage, avgCollateral float64
+	if err := db.QueryRow(`
+		SELECT lifecycle_observation_count, avg_lifecycle_price,
+		       avg_hedge_notional_fiat, avg_leverage_used,
+		       avg_recommended_collateral_fiat
+		FROM offers WHERE id = ?
+	`, offerID).Scan(&count, &avgPrice, &avgNotional, &avgLeverage, &avgCollateral); err != nil {
+		t.Fatalf("select observation aggregates: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("lifecycle_observation_count = %d, want 2", count)
+	}
+	assertAnalysisFloat(t, avgPrice, 105)
+	assertAnalysisFloat(t, avgNotional, 1500)
+	assertAnalysisFloat(t, avgLeverage, 3)
+	assertAnalysisFloat(t, avgCollateral, 1000)
+
+	// Rows without hedge samples persist NULL hedge aggregates, not zeros.
+	bareID := insertClosedOffer(t, db, nil)
+	insertLifecycleRow(t, db, bareID, 5, 1, 4, 0.004, 0.1)
+	if status, removed := analyzeSingleClosedOffer(db, closedOfferRecord{id: bareID}); removed || status != "analyzed" {
+		t.Fatalf("analysis = (%q, removed=%v), want analyzed", status, removed)
+	}
+	var bareNotional, bareCollateral sql.NullFloat64
+	var bareCount int
+	if err := db.QueryRow(`
+		SELECT lifecycle_observation_count, avg_hedge_notional_fiat,
+		       avg_recommended_collateral_fiat
+		FROM offers WHERE id = ?
+	`, bareID).Scan(&bareCount, &bareNotional, &bareCollateral); err != nil {
+		t.Fatalf("select bare aggregates: %v", err)
+	}
+	if bareCount != 1 {
+		t.Fatalf("lifecycle_observation_count = %d, want 1", bareCount)
+	}
+	if bareNotional.Valid || bareCollateral.Valid {
+		t.Fatalf("hedge aggregates = (%v, %v), want NULL", bareNotional, bareCollateral)
+	}
+}
+
 // Never premium (always unfavorable) and deeply unprofitable on average: this is
 // genuine junk and is deleted.
 func TestClosedOfferNeverPremiumIsDeleted(t *testing.T) {
