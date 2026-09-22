@@ -18,6 +18,7 @@ func TestLegacyStrictServerRejectsContractViolationForEveryJSONSuccess(t *testin
 	}{
 		{name: "postApiAccountsHealthCheck", method: "POST", path: "/api/accounts/health_check", status: 200},
 		{name: "getHealth", method: "GET", path: "/health", status: 200},
+		{name: "postInternalBisqRequote", method: "POST", path: "/internal/bisq/requote", status: 200},
 		{name: "getInternalCexPermissions", method: "GET", path: "/internal/cex_permissions", status: 200},
 		{name: "postInternalLiveOffers", method: "POST", path: "/internal/live_offers", status: 200},
 		{name: "postInternalPaymentNotifications", method: "POST", path: "/internal/payment_notifications", status: 200},

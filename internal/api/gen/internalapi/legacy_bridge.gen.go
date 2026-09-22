@@ -159,6 +159,15 @@ func (response legacyGetHealthResponse) VisitGetHealthResponse(w http.ResponseWr
 	return response.server.serveLegacy(w, response.request)
 }
 
+type legacyPostInternalBisqRequoteResponse struct {
+	server  *LegacyStrictServer
+	request *legacyRequest
+}
+
+func (response legacyPostInternalBisqRequoteResponse) VisitPostInternalBisqRequoteResponse(w http.ResponseWriter) error {
+	return response.server.serveLegacy(w, response.request)
+}
+
 type legacyGetInternalCexPermissionsResponse struct {
 	server  *LegacyStrictServer
 	request *legacyRequest
@@ -199,6 +208,13 @@ func (server *LegacyStrictServer) GetHealth(ctx context.Context, _ GetHealthRequ
 		return nil, err
 	}
 	return legacyGetHealthResponse{server: server, request: request}, nil
+}
+func (server *LegacyStrictServer) PostInternalBisqRequote(ctx context.Context, _ PostInternalBisqRequoteRequestObject) (PostInternalBisqRequoteResponseObject, error) {
+	request, err := legacyRequestFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return legacyPostInternalBisqRequoteResponse{server: server, request: request}, nil
 }
 func (server *LegacyStrictServer) GetInternalCexPermissions(ctx context.Context, _ GetInternalCexPermissionsRequestObject) (GetInternalCexPermissionsResponseObject, error) {
 	request, err := legacyRequestFromContext(ctx)

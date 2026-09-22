@@ -32,6 +32,21 @@ type Health struct {
 // PostApiAccountsHealthCheckJSONBody defines parameters for PostApiAccountsHealthCheck.
 type PostApiAccountsHealthCheckJSONBody map[string]interface{}
 
+// PostInternalBisqRequoteJSONBody defines parameters for PostInternalBisqRequote.
+type PostInternalBisqRequoteJSONBody struct {
+	FiatCurrency        string `json:"fiat_currency"`
+	FundingFeeCapSats   int    `json:"funding_fee_cap_sats"`
+	MiningFeeSats       int    `json:"mining_fee_sats"`
+	OfferId             string `json:"offer_id"`
+	Provider            string `json:"provider"`
+	SecurityDepositSats int    `json:"security_deposit_sats"`
+	TakerFeeSats        int    `json:"taker_fee_sats"`
+	TotalToPaySats      int    `json:"total_to_pay_sats"`
+	TradeAmountSats     int    `json:"trade_amount_sats"`
+	TradeMode           string `json:"trade_mode"`
+	VolumeAsLong        int    `json:"volume_as_long"`
+}
+
 // PostInternalLiveOffersJSONBody defines parameters for PostInternalLiveOffers.
 type PostInternalLiveOffersJSONBody map[string]interface{}
 
@@ -40,6 +55,9 @@ type PostInternalPaymentNotificationsJSONBody map[string]interface{}
 
 // PostApiAccountsHealthCheckJSONRequestBody defines body for PostApiAccountsHealthCheck for application/json ContentType.
 type PostApiAccountsHealthCheckJSONRequestBody PostApiAccountsHealthCheckJSONBody
+
+// PostInternalBisqRequoteJSONRequestBody defines body for PostInternalBisqRequote for application/json ContentType.
+type PostInternalBisqRequoteJSONRequestBody PostInternalBisqRequoteJSONBody
 
 // PostInternalLiveOffersJSONRequestBody defines body for PostInternalLiveOffers for application/json ContentType.
 type PostInternalLiveOffersJSONRequestBody PostInternalLiveOffersJSONBody
@@ -136,6 +154,9 @@ type ServerInterface interface {
 	// GetHealth GET /health
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
+	// PostInternalBisqRequote POST /internal/bisq/requote
+	// (POST /internal/bisq/requote)
+	PostInternalBisqRequote(w http.ResponseWriter, r *http.Request)
 	// GetInternalCexPermissions GET /internal/cex_permissions
 	// (GET /internal/cex_permissions)
 	GetInternalCexPermissions(w http.ResponseWriter, r *http.Request)
@@ -175,6 +196,20 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostInternalBisqRequote operation middleware
+func (siw *ServerInterfaceWrapper) PostInternalBisqRequote(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostInternalBisqRequote(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -348,6 +383,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/accounts/health_check", wrapper.PostApiAccountsHealthCheck)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/health", wrapper.GetHealth)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/internal/bisq/requote", wrapper.PostInternalBisqRequote)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/internal/cex_permissions", wrapper.GetInternalCexPermissions)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/internal/live_offers", wrapper.PostInternalLiveOffers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/internal/payment_notifications", wrapper.PostInternalPaymentNotifications)
@@ -466,6 +502,75 @@ type GetHealthdefaultTextResponse struct {
 }
 
 func (response GetHealthdefaultTextResponse) VisitGetHealthResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(response.StatusCode)
+
+	_, err := w.Write([]byte(fmt.Sprint(response.Body)))
+	return err
+}
+
+type PostInternalBisqRequoteRequestObject struct {
+	Body *PostInternalBisqRequoteJSONRequestBody
+}
+
+type PostInternalBisqRequoteResponseObject interface {
+	VisitPostInternalBisqRequoteResponse(w http.ResponseWriter) error
+}
+
+type PostInternalBisqRequote200JSONResponse map[string]interface{}
+
+func (response PostInternalBisqRequote200JSONResponse) VisitPostInternalBisqRequoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostInternalBisqRequote400Response struct {
+}
+
+func (response PostInternalBisqRequote400Response) VisitPostInternalBisqRequoteResponse(w http.ResponseWriter) error {
+	w.WriteHeader(400)
+	return nil
+}
+
+type PostInternalBisqRequote409Response struct {
+}
+
+func (response PostInternalBisqRequote409Response) VisitPostInternalBisqRequoteResponse(w http.ResponseWriter) error {
+	w.WriteHeader(409)
+	return nil
+}
+
+type PostInternalBisqRequotedefaultJSONResponse struct {
+	Body       map[string]interface{}
+	StatusCode int
+}
+
+func (response PostInternalBisqRequotedefaultJSONResponse) VisitPostInternalBisqRequoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostInternalBisqRequotedefaultTextResponse struct {
+	Body       string
+	StatusCode int
+}
+
+func (response PostInternalBisqRequotedefaultTextResponse) VisitPostInternalBisqRequoteResponse(w http.ResponseWriter) error {
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(response.StatusCode)
@@ -670,6 +775,9 @@ type StrictServerInterface interface {
 	// GetHealth GET /health
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
+	// PostInternalBisqRequote POST /internal/bisq/requote
+	// (POST /internal/bisq/requote)
+	PostInternalBisqRequote(ctx context.Context, request PostInternalBisqRequoteRequestObject) (PostInternalBisqRequoteResponseObject, error)
 	// GetInternalCexPermissions GET /internal/cex_permissions
 	// (GET /internal/cex_permissions)
 	GetInternalCexPermissions(ctx context.Context, request GetInternalCexPermissionsRequestObject) (GetInternalCexPermissionsResponseObject, error)
@@ -778,6 +886,37 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// PostInternalBisqRequote operation middleware
+func (sh *strictHandler) PostInternalBisqRequote(w http.ResponseWriter, r *http.Request) {
+	var request PostInternalBisqRequoteRequestObject
+
+	var body PostInternalBisqRequoteJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PostInternalBisqRequote(ctx, request.(PostInternalBisqRequoteRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PostInternalBisqRequote")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PostInternalBisqRequoteResponseObject); ok {
+		if err := validResponse.VisitPostInternalBisqRequoteResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetInternalCexPermissions operation middleware
 func (sh *strictHandler) GetInternalCexPermissions(w http.ResponseWriter, r *http.Request) {
 	var request GetInternalCexPermissionsRequestObject
@@ -875,21 +1014,26 @@ func (sh *strictHandler) PostInternalPaymentNotifications(w http.ResponseWriter,
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"/w==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

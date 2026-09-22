@@ -10,6 +10,7 @@ servers:
   - url: http://localhost:5010
 tags:
   - name: accounts
+  - name: bisq-execution
   - name: cex-permissions
   - name: health
   - name: live-offers
@@ -80,6 +81,78 @@ paths:
                 type: string
       description: GET /health
       security: []
+  /internal/bisq/requote:
+    post:
+      operationId: postInternalBisqRequote
+      tags:
+        - bisq-execution
+      summary: POST /internal/bisq/requote
+      responses:
+        "200":
+          description: Requoted Bisq route for the current server policy and offer
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Invalid Bisq route quote
+        "409":
+          description: Bisq route cannot be requoted from current server policy and offer
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      description: POST /internal/bisq/requote
+      security:
+        - internalSecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - offer_id
+                - provider
+                - trade_mode
+                - fiat_currency
+                - trade_amount_sats
+                - total_to_pay_sats
+                - security_deposit_sats
+                - taker_fee_sats
+                - mining_fee_sats
+                - volume_as_long
+                - funding_fee_cap_sats
+              properties:
+                offer_id:
+                  type: string
+                provider:
+                  type: string
+                trade_mode:
+                  type: string
+                fiat_currency:
+                  type: string
+                trade_amount_sats:
+                  type: integer
+                total_to_pay_sats:
+                  type: integer
+                security_deposit_sats:
+                  type: integer
+                taker_fee_sats:
+                  type: integer
+                mining_fee_sats:
+                  type: integer
+                volume_as_long:
+                  type: integer
+                funding_fee_cap_sats:
+                  type: integer
   /internal/cex_permissions:
     get:
       operationId: getInternalCexPermissions
