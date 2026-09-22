@@ -104,13 +104,11 @@ func (c BisqGRPCAccountChecker) PaymentAccountCount(ctx context.Context) (int, e
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	conn, err := grpc.DialContext(
-		ctx,
+	conn, err := grpc.NewClient(
 		c.host,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithPerRPCCredentials(bisqAccountCreds{password: c.password}),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("bisq account health: connect: %w", err)

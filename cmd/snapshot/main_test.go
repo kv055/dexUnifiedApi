@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"commons/paymentmethods"
@@ -1087,5 +1088,71 @@ func TestSaveSnapshotTouchesUnknownPaymentMethodAfterFlush(t *testing.T) {
 	}
 	if len(currencies) != 1 || currencies[0] != "USD" {
 		t.Fatalf("unknown currencies = %v, want [USD]", []string(currencies))
+	}
+}
+
+func TestSaveSnapshotMostroOfferConflictUpserts(t *testing.T) {
+	db := testdb.Open(t)
+	btcMin := 0.01
+	btcMax := 0.02
+	fiatMin := 600
+	fiatMax := 1200
+	priceType := priceTypeFixed()
+
+	mkOffer := func(pubkey string, price float64) []offer {
+		return []offer{{
+			OfferID:         "mostro-conflict-1",
+			Price:           price,
+			BTCMin:          &btcMin,
+			BTCMax:          &btcMax,
+			FiatMin:         &fiatMin,
+			FiatMax:         &fiatMax,
+			PaymentMethods:  []string{"LN"},
+			PriceType:       priceType,
+			VenueNodePubKey: pubkey,
+		}}
+	}
+
+	// Same offer id seen under another pubkey must resolve to the same row
+	// (identity matches the unique index) instead of dying on duplicate key.
+	first := saveSnapshot(db, "mostro", "EUR", "ask", 60000, mkOffer("pubkey-A", 61000))
+	if len(first) != 1 {
+		t.Fatalf("first live len = %d, want 1", len(first))
+	}
+	second := saveSnapshot(db, "mostro", "EUR", "ask", 60000, mkOffer("pubkey-B", 62500))
+	if len(second) != 1 {
+		t.Fatalf("second live len = %d, want 1 (conflict must upsert, not drop)", len(second))
+	}
+	if second[0].ID != first[0].ID {
+		t.Fatalf("id = %d, want preserved %d", second[0].ID, first[0].ID)
+	}
+	if second[0].FirstSeen != first[0].FirstSeen {
+		t.Fatalf("first_seen = %q, want preserved %q", second[0].FirstSeen, first[0].FirstSeen)
+	}
+	if second[0].Price != 62500 {
+		t.Fatalf("price = %v, want 62500", second[0].Price)
+	}
+
+	// Concurrent writers racing the same identity must all succeed and leave
+	// exactly one row: no duplicate-key poisoned transactions.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := saveSnapshot(db, "mostro", "EUR", "ask", 60000, mkOffer("pubkey-A", 61000)); len(got) != 1 {
+				t.Errorf("concurrent live len = %d, want 1", len(got))
+			}
+		}()
+	}
+	wg.Wait()
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM offers WHERE exchange = ? AND offer_id = ?`,
+		"mostro", "mostro-conflict-1").Scan(&count); err != nil {
+		t.Fatalf("count conflict offer: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("rows = %d, want 1", count)
 	}
 }

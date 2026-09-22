@@ -114,12 +114,6 @@ This function is part of the `main` package implementation.
 
 Signature: `func queryCex(r *http.Request) string`
 
-### `queryInt`
-
-This function is part of the `main` package implementation.
-
-Signature: `func queryInt(r *http.Request, key string, defaultVal int) int`
-
 ### `queryConfirmations`
 
 This function is part of the `main` package implementation.
@@ -173,7 +167,6 @@ Signature: `func writeError(w http.ResponseWriter, err error)`
 - `defaultCEX`: No inline declaration comment is present.
 - `adminDatabaseURL`: No inline declaration comment is present.
 - `databaseURL`: No inline declaration comment is present.
-- `snapshotIntervalMin`: No inline declaration comment is present.
 - `listenAddr`: No inline declaration comment is present.
 - `paymentNotificationSecret`: No inline declaration comment is present.
 - `bisqGRPCHost`: No inline declaration comment is present.

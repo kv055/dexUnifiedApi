@@ -166,7 +166,7 @@ func fetchFirstCredential[T any](sets []exchangecredentials.Credentials, require
 func fetchFirstHedgeCredential(sets []exchangecredentials.Credentials, provider string) (cextrading.LiveFeeSnapshot, error) {
 	return fetchFirstCredential(sets, false, func(creds exchangecredentials.Credentials) (cextrading.LiveFeeSnapshot, error) {
 		if provider == "coinbase" && strings.TrimSpace(creds.Passphrase) == "" {
-			return cextrading.LiveFeeSnapshot{}, fmt.Errorf("Coinbase INTX credentials not configured on this key")
+			return cextrading.LiveFeeSnapshot{}, fmt.Errorf("coinbase INTX credentials not configured on this key")
 		}
 		return cextrading.FetchLiveHedgeFeeSnapshot(provider, creds)
 	})

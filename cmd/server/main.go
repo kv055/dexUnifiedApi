@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,7 +56,6 @@ func sessionProtected(path string) bool {
 var (
 	adminDatabaseURL          string
 	databaseURL               string
-	snapshotIntervalMin       int
 	listenAddr                string
 	paymentNotificationSecret string
 	internalAPISecret         string
@@ -150,17 +148,6 @@ func init() {
 	)
 	adminDatabaseURL = config.PostgresAdminURLFromEnv()
 	databaseURL = config.PostgresURLFromEnv()
-	interval := os.Getenv("SNAPSHOT_INTERVAL_MIN")
-	if interval == "" {
-		snapshotIntervalMin = 1
-	} else {
-		v, err := strconv.Atoi(interval)
-		if err != nil {
-			snapshotIntervalMin = 1
-		} else {
-			snapshotIntervalMin = v
-		}
-	}
 
 	listenAddr = os.Getenv("LISTEN_ADDR")
 	if listenAddr == "" {
@@ -1020,18 +1007,6 @@ func queryFiat(r *http.Request) string {
 		return "EUR"
 	}
 	return currency
-}
-
-func queryInt(r *http.Request, key string, defaultVal int) int {
-	s := r.URL.Query().Get(key)
-	if s == "" {
-		return defaultVal
-	}
-	v, err := strconv.Atoi(s)
-	if err != nil {
-		return defaultVal
-	}
-	return v
 }
 
 func writeJSON(w http.ResponseWriter, data any) {

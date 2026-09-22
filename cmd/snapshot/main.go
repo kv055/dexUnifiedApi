@@ -1581,12 +1581,12 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 		// order_lifecycle rows and pushing N duplicate hub entries — the bloat that
 		// OOM-killed the server (offer #989 got 83 rows every snapshot).
 		if o.OfferID != "" {
+			// Identity matches the unique index exactly (exchange,
+			// fiat_currency, offer_id): adding venue_node_pubkey here made the
+			// lookup stricter than the constraint, so the same offer seen
+			// under another pubkey missed and died on a duplicate-key INSERT.
 			query := "SELECT id FROM offers WHERE exchange = ? AND fiat_currency = ? AND offer_id = ?"
 			args := []any{exchange, fiat, o.OfferID}
-			if exchange == "mostro" && o.VenueNodePubKey != "" {
-				query += " AND venue_node_pubkey = ?"
-				args = append(args, o.VenueNodePubKey)
-			}
 			err := tx.QueryRow(query, args...).Scan(&existingID)
 			found = err == nil
 		} else {
@@ -1687,6 +1687,12 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion), existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		} else {
+			// Concurrent cycles (or a lookup miss) can still race another
+			// writer to the same identity. ON CONFLICT turns that race into
+			// a last-writer-wins update instead of a duplicate-key error
+			// that would poison this whole transaction. Id-less offers pass
+			// a NULL offer_id, which never conflicts, so that path is
+			// unchanged.
 			upsertErr = tx.QueryRow(`INSERT INTO offers
 				(exchange, fiat_currency, direction, btc_min, btc_max,
 				 fiat_min, fiat_max, payment_methods, offer_id, price_type, price,
@@ -1695,11 +1701,41 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				 seller_rating_score, seller_rating_confidence, seller_rating_raw, seller_rating_signals, maker_id,
 				 venue_node_pubkey, venue_node_name, source_event_id, source_event_created_at, venue_protocol_version)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT (exchange, fiat_currency, offer_id) WHERE offer_id IS NOT NULL DO UPDATE SET
+				last_seen = CURRENT_TIMESTAMP,
+				price_type = ?,
+				price = ?,
+				btc_min = ?,
+				btc_max = ?,
+				fiat_min = ?,
+				fiat_max = ?,
+				payment_methods = ?,
+				offer_id = COALESCE(offers.offer_id, ?),
+				security_deposit_btc = ?,
+				security_deposit_pct = ?,
+				counterparty_stake_btc = ?,
+				counterparty_stake_pct = ?,
+				seller_rating_score = ?,
+				seller_rating_confidence = ?,
+				seller_rating_raw = ?::jsonb,
+				seller_rating_signals = ?::jsonb,
+				maker_id = COALESCE(?, offers.maker_id),
+				venue_node_pubkey = COALESCE(?, offers.venue_node_pubkey),
+				venue_node_name = COALESCE(?, offers.venue_node_name),
+				source_event_id = COALESCE(?, offers.source_event_id),
+				source_event_created_at = COALESCE(?, offers.source_event_created_at),
+				venue_protocol_version = ?
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				exchange, fiat, direction, o.BTCMin, o.BTCMax,
 				o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
+				o.SecurityDepositBTC, o.SecurityDepositPct,
+				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
+				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
+				nilIfEmptyRawMessage(o.SellerRatingSignals),
+				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion),
+				o.PriceType, o.Price, o.BTCMin, o.BTCMax, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
