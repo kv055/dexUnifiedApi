@@ -53,11 +53,15 @@ var (
 	bisq2APIPassword string
 	priceProvider    string
 	torProxy         string
-	robosatsOnions   = []string{
-		"http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion",
-		"http://mmhaqzuirth5rx7gl24d4773lknltjhik57k7ahec5iefktezv4b3uid.onion",
-		"http://4t4jxmivv6uqej6xzx2jx3fxh75gtt65v3szjoqmc4ugdlhipzdat6yd.onion",
-		"http://otmoonrndnrddqdlhu6b36heunmbyw3cgvadqo2oqeau3656wfv7fwad.onion",
+	// robosatsCoordinators is the last-known federated order-book source list,
+	// refreshed from the upstream registry on each run (see
+	// loadRobosatsCoordinators). The legacy defaults carry no alias, so their
+	// orders keep bare numeric ids until the registry resolves.
+	robosatsCoordinators = []robosatsCoordinator{
+		{Onion: "http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion"},
+		{Onion: "http://mmhaqzuirth5rx7gl24d4773lknltjhik57k7ahec5iefktezv4b3uid.onion"},
+		{Onion: "http://4t4jxmivv6uqej6xzx2jx3fxh75gtt65v3szjoqmc4ugdlhipzdat6yd.onion"},
+		{Onion: "http://otmoonrndnrddqdlhu6b36heunmbyw3cgvadqo2oqeau3656wfv7fwad.onion"},
 	}
 )
 
@@ -985,35 +989,46 @@ func peachResult(all []peachOffer, direction, currency string, btcPrice int, com
 }
 
 func fetchRobosatsCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
-	return fetchRobosatsCurrencyFrom(ctx, direction, currency, btcPrice, torClient(), robosatsOnions)
+	return fetchRobosatsCurrencyFrom(ctx, direction, currency, btcPrice, torClient(), robosatsCoordinators)
+}
+
+// robosatsCoordinator is one federated order-book source: the onion API
+// endpoint plus the registry alias. The alias scopes order ids (each
+// coordinator numbers its own orders) and builds per-order frontend links;
+// it is empty for the legacy fallback endpoints, whose alias is unknown.
+type robosatsCoordinator struct {
+	Alias string `json:"alias"`
+	Onion string `json:"onion"`
 }
 
 // robosatsFederationEntry is the subset of the upstream federation registry
 // needed to discover mainnet coordinator order books.
 type robosatsFederationEntry struct {
-	Federated bool `json:"federated"`
-	Mainnet   struct {
+	Federated  bool   `json:"federated"`
+	ShortAlias string `json:"shortAlias"`
+	Mainnet    struct {
 		Onion string `json:"onion"`
 	} `json:"mainnet"`
 }
 
 type robosatsFederationCache struct {
-	FetchedAt time.Time `json:"fetched_at"`
-	ETag      string    `json:"etag,omitempty"`
-	Onions    []string  `json:"onions"`
+	FetchedAt    time.Time             `json:"fetched_at"`
+	ETag         string                `json:"etag,omitempty"`
+	Coordinators []robosatsCoordinator `json:"coordinators"`
 }
 
-// fetchRobosatsFederation returns the current federated mainnet coordinator
-// onions. The registry is downloaded over HTTPS; coordinator APIs themselves
+// fetchRobosatsFederation returns the current federated mainnet coordinators.
+// The registry is downloaded over HTTPS; coordinator APIs themselves
 // remain onion-only and are fetched through Tor.
-func fetchRobosatsFederation(ctx context.Context, client *http.Client, registryURL string) ([]string, error) {
-	onions, _, _, err := fetchRobosatsFederationFrom(ctx, client, registryURL, "")
-	return onions, err
+func fetchRobosatsFederation(ctx context.Context, client *http.Client, registryURL string) ([]robosatsCoordinator, error) {
+	coordinators, _, _, err := fetchRobosatsFederationFrom(ctx, client, registryURL, "")
+	return coordinators, err
 }
 
 // fetchRobosatsFederationFrom conditionally fetches the registry. notModified
-// is true only when the caller's cached ETag remains current.
-func fetchRobosatsFederationFrom(ctx context.Context, client *http.Client, registryURL, etag string) ([]string, string, bool, error) {
+// is true only when the caller's cached ETag remains current. The result is
+// sorted by onion so repeated runs hit coordinators in a stable order.
+func fetchRobosatsFederationFrom(ctx context.Context, client *http.Client, registryURL, etag string) ([]robosatsCoordinator, string, bool, error) {
 	registry, err := url.Parse(strings.TrimSpace(registryURL))
 	if err != nil || registry.Scheme != "https" || registry.Host == "" {
 		return nil, "", false, fmt.Errorf("invalid RoboSats federation URL")
@@ -1047,26 +1062,51 @@ func fetchRobosatsFederationFrom(ctx context.Context, client *http.Client, regis
 		return nil, "", false, fmt.Errorf("decode federation registry: %w", err)
 	}
 
-	unique := make(map[string]struct{})
-	for _, entry := range entries {
+	// Sorted keys keep duplicate-onion alias selection deterministic: map
+	// iteration order is random, and the first valid alias wins per onion.
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	byOnion := make(map[string]robosatsCoordinator)
+	for _, key := range keys {
+		entry := entries[key]
 		if !entry.Federated {
 			continue
 		}
 		onion, ok := validRobosatsOnion(entry.Mainnet.Onion)
-		if ok {
-			unique[onion] = struct{}{}
+		if !ok {
+			continue
+		}
+		alias := strings.TrimSpace(entry.ShortAlias)
+		if alias == "" {
+			alias = strings.TrimSpace(key)
+		}
+		if !validRobosatsAlias(alias) {
+			continue
+		}
+		if _, dup := byOnion[onion]; !dup {
+			byOnion[onion] = robosatsCoordinator{Alias: alias, Onion: onion}
 		}
 	}
-	if len(unique) == 0 {
+	if len(byOnion) == 0 {
 		return nil, "", false, fmt.Errorf("federation registry contains no valid federated mainnet onions")
 	}
 
-	onions := make([]string, 0, len(unique))
-	for onion := range unique {
-		onions = append(onions, onion)
+	coordinators := make([]robosatsCoordinator, 0, len(byOnion))
+	for _, coordinator := range byOnion {
+		coordinators = append(coordinators, coordinator)
 	}
-	sort.Strings(onions)
-	return onions, resp.Header.Get("ETag"), false, nil
+	sort.Slice(coordinators, func(i, j int) bool { return coordinators[i].Onion < coordinators[j].Onion })
+	return coordinators, resp.Header.Get("ETag"), false, nil
+}
+
+// validRobosatsAlias guards the "alias:id" offer identity: the separator and
+// path characters must not appear in an alias, or frontend links built from
+// the stored id would split on the wrong segment.
+func validRobosatsAlias(alias string) bool {
+	return alias != "" && !strings.ContainsAny(alias, ":/ \t")
 }
 
 func validRobosatsOnion(raw string) (string, bool) {
@@ -1095,21 +1135,30 @@ func readRobosatsFederationCache(path string) (*robosatsFederationCache, error) 
 	if err := json.Unmarshal(body, &cache); err != nil {
 		return nil, err
 	}
-	unique := make(map[string]struct{}, len(cache.Onions))
-	for _, raw := range cache.Onions {
-		onion, ok := validRobosatsOnion(raw)
-		if ok {
-			unique[onion] = struct{}{}
+	// Old cache files stored bare onion strings; they no longer unmarshal into
+	// Coordinators and fall through to a refetch below via the empty check.
+	byOnion := make(map[string]robosatsCoordinator, len(cache.Coordinators))
+	for _, coordinator := range cache.Coordinators {
+		onion, ok := validRobosatsOnion(coordinator.Onion)
+		if !ok {
+			continue
+		}
+		alias := strings.TrimSpace(coordinator.Alias)
+		if alias != "" && !validRobosatsAlias(alias) {
+			continue
+		}
+		if _, dup := byOnion[onion]; !dup {
+			byOnion[onion] = robosatsCoordinator{Alias: alias, Onion: onion}
 		}
 	}
-	if cache.FetchedAt.IsZero() || len(unique) == 0 {
+	if cache.FetchedAt.IsZero() || len(byOnion) == 0 {
 		return nil, fmt.Errorf("cache has no valid coordinator list")
 	}
-	cache.Onions = make([]string, 0, len(unique))
-	for onion := range unique {
-		cache.Onions = append(cache.Onions, onion)
+	cache.Coordinators = make([]robosatsCoordinator, 0, len(byOnion))
+	for _, coordinator := range byOnion {
+		cache.Coordinators = append(cache.Coordinators, coordinator)
 	}
-	sort.Strings(cache.Onions)
+	sort.Slice(cache.Coordinators, func(i, j int) bool { return cache.Coordinators[i].Onion < cache.Coordinators[j].Onion })
 	return &cache, nil
 }
 
@@ -1156,35 +1205,35 @@ func robosatsFederationRefreshInterval() time.Duration {
 
 // loadRobosatsCoordinators uses a cached registry between refreshes. A failed
 // refresh retains the last known-good cache; only an empty cache uses fallback.
-func loadRobosatsCoordinators(ctx context.Context, client *http.Client, registryURL, cachePath string, refreshInterval time.Duration, fallback []string) []string {
+func loadRobosatsCoordinators(ctx context.Context, client *http.Client, registryURL, cachePath string, refreshInterval time.Duration, fallback []robosatsCoordinator) []robosatsCoordinator {
 	cache, cacheErr := readRobosatsFederationCache(cachePath)
 	if cacheErr == nil && time.Since(cache.FetchedAt) < refreshInterval {
-		slog.InfoContext(ctx, "using cached RoboSats federation coordinators", "coordinator_count", len(cache.Onions), "cached_at", cache.FetchedAt)
-		return cache.Onions
+		slog.InfoContext(ctx, "using cached RoboSats federation coordinators", "coordinator_count", len(cache.Coordinators), "cached_at", cache.FetchedAt)
+		return cache.Coordinators
 	}
 
 	etag := ""
 	if cache != nil {
 		etag = cache.ETag
 	}
-	onions, newETag, notModified, err := fetchRobosatsFederationFrom(ctx, client, registryURL, etag)
+	coordinators, newETag, notModified, err := fetchRobosatsFederationFrom(ctx, client, registryURL, etag)
 	if err != nil {
 		if cache != nil {
-			slog.WarnContext(ctx, "RoboSats federation refresh failed; retaining cached coordinators", "err", err, "coordinator_count", len(cache.Onions), "cached_at", cache.FetchedAt)
-			return cache.Onions
+			slog.WarnContext(ctx, "RoboSats federation refresh failed; retaining cached coordinators", "err", err, "coordinator_count", len(cache.Coordinators), "cached_at", cache.FetchedAt)
+			return cache.Coordinators
 		}
 		slog.WarnContext(ctx, "RoboSats federation discovery failed; using fallback coordinators", "err", err, "fallback_count", len(fallback))
-		return append([]string(nil), fallback...)
+		return append([]robosatsCoordinator(nil), fallback...)
 	}
 	if notModified {
-		onions = cache.Onions
+		coordinators = cache.Coordinators
 	}
-	updated := robosatsFederationCache{FetchedAt: time.Now().UTC(), ETag: newETag, Onions: onions}
+	updated := robosatsFederationCache{FetchedAt: time.Now().UTC(), ETag: newETag, Coordinators: coordinators}
 	if err := writeRobosatsFederationCache(cachePath, updated); err != nil {
 		slog.WarnContext(ctx, "could not cache RoboSats federation coordinators", "err", err)
 	}
-	slog.InfoContext(ctx, "RoboSats federation discovery succeeded", "coordinator_count", len(onions), "registry_url", registryURL, "not_modified", notModified)
-	return onions
+	slog.InfoContext(ctx, "RoboSats federation discovery succeeded", "coordinator_count", len(coordinators), "registry_url", registryURL, "not_modified", notModified)
+	return coordinators
 }
 
 func decodeRobosatsBook(body []byte) ([]json.RawMessage, string, error) {
@@ -1208,7 +1257,7 @@ func decodeRobosatsBook(body []byte) ([]json.RawMessage, string, error) {
 	return nil, "error_object", fmt.Errorf("unknown response object keys: %s", strings.Join(keys, ","))
 }
 
-func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, btcPrice int, client *http.Client, coordinators []string) *fetchResult {
+func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, btcPrice int, client *http.Client, coordinators []robosatsCoordinator) *fetchResult {
 	currencyID := fiat.RoboSatsCurrencyID(currency)
 	if currencyID == 0 {
 		return nil
@@ -1221,7 +1270,8 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 	byID := make(map[string]offer)
 	okCount := 0
 	failCount := 0
-	for _, onion := range coordinators {
+	for _, coordinator := range coordinators {
+		onion := coordinator.Onion
 		reqURL := fmt.Sprintf("%s/api/book/?currency=%d&type=%d", onion, currencyID, offerType)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
@@ -1255,7 +1305,7 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 			continue
 		}
 
-		offers := parseRobosatsOffers(rawOffers, currency, btcPrice)
+		offers := parseRobosatsOffers(rawOffers, currency, btcPrice, coordinator.Alias)
 		for _, o := range offers {
 			if o.OfferID == "" {
 				continue
@@ -1282,7 +1332,12 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 	return completeFetch(float64(btcPrice), offers)
 }
 
-func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice int) []offer {
+// parseRobosatsOffers maps one coordinator's book lines into offers.
+// coordinatorAlias scopes the stored offer id as "alias:id": order numbers
+// are per-coordinator sequences, so the bare id is ambiguous across the
+// federation and cannot back a per-order link. An empty alias keeps the
+// legacy bare id (used by the alias-less fallback endpoints).
+func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice int, coordinatorAlias string) []offer {
 	var offers []offer
 	for _, raw := range rawOffers {
 		var s string
@@ -1339,8 +1394,15 @@ func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice 
 		stakeBTC := depositBTC
 		stakePct := depositPct
 
+		alias := strings.TrimSpace(coordinatorAlias)
+		offerID := line.ID.String()
+		if alias != "" && validRobosatsAlias(alias) {
+			offerID = alias + ":" + offerID
+		} else {
+			alias = ""
+		}
 		newOffer := offer{
-			OfferID:              line.ID.String(),
+			OfferID:              offerID,
 			FiatCurrency:         currency,
 			Price:                price,
 			BTCMin:               &btcMin,
@@ -1353,6 +1415,7 @@ func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice 
 			SecurityDepositPct:   &depositPct,
 			CounterpartyStakeBTC: &stakeBTC,
 			CounterpartyStakePct: &stakePct,
+			VenueNodeName:        alias,
 		}
 		// Bond is skin-in-the-game on this offer (security_deposit_*), not a
 		// maker reputation track record. Leave the rating Unavailable().
@@ -2027,7 +2090,7 @@ func main() {
 	if registryURL == "" {
 		registryURL = defaultRobosatsFederationURL
 	}
-	robosatsOnions = loadRobosatsCoordinators(ctx, clearnetClient(), registryURL, defaultRobosatsFederationCachePath, robosatsFederationRefreshInterval(), robosatsOnions)
+	robosatsCoordinators = loadRobosatsCoordinators(ctx, clearnetClient(), registryURL, defaultRobosatsFederationCachePath, robosatsFederationRefreshInterval(), robosatsCoordinators)
 
 	refPrices := make(map[string]int, len(fiat.Enabled))
 	for _, currency := range fiat.Enabled {
