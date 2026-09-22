@@ -51,6 +51,7 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			COALESCE(o.maker_id, '')
 			, COALESCE(o.venue_node_pubkey, '')
 			, COALESCE(o.venue_node_name, '')
+			, COALESCE(o.venue_coordinator_id, '')
 			, COALESCE(o.source_event_id, '')
 			, o.source_event_created_at
 			, COALESCE(o.venue_protocol_version, 0)
@@ -105,6 +106,7 @@ func (r liveOfferRepository) Load(ctx context.Context) ([]LiveOffer, error) {
 			&o.MakerID,
 			&o.VenueNodePubKey,
 			&o.VenueNodeName,
+			&o.VenueCoordinatorID,
 			&o.SourceEventID,
 			&o.SourceEventCreatedAt,
 			&o.ProtocolVersion,

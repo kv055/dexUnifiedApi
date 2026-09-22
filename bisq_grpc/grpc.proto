@@ -493,6 +493,12 @@ service Trades {
     // the offer's payment method, e.g., NATIONAL_BANK, SEPA, SWIFT, etc.
     rpc TakeOffer (TakeOfferRequest) returns (TakeOfferReply) {
     }
+    // dexArbTrading: calculate deposit, fees, and rounded volume without taking the offer.
+    rpc QuoteTakeOffer (QuoteTakeOfferRequest) returns (QuoteTakeOfferReply) {
+    }
+    // dexArbTrading: take the offer only when amount and confirmed spending limits still match.
+    rpc GuardedTakeOffer (GuardedTakeOfferRequest) returns (TakeOfferReply) {
+    }
     // Send a 'payment started' message to a trading peer (the BTC seller).
     rpc ConfirmPaymentStarted (ConfirmPaymentStartedRequest) returns (ConfirmPaymentStartedReply) {
     }
@@ -535,6 +541,44 @@ message TakeOfferRequest {
 message TakeOfferReply {
     TradeInfo trade = 1;                                    // The new trade.
     AvailabilityResultWithDescription failure_reason = 2;   // The reason the offer could not be taken.
+}
+
+// dexArbTrading: read-only take-offer quote (see rpc QuoteTakeOffer).
+message QuoteTakeOfferRequest {
+    string offer_id = 1;
+    string payment_account_id = 2;
+    string taker_fee_currency_code = 3;
+    uint64 amount = 4;
+}
+
+message QuoteTakeOfferReply {
+    string offer_id = 1;
+    string payment_account_id = 2;
+    string payment_method_id = 3;
+    string currency_code = 4;
+    string price = 5;
+    bool is_buy_offer = 6;
+    uint64 trade_amount_sats = 7;
+    uint64 security_deposit_sats = 8;
+    uint64 taker_fee_sats = 9;
+    bool is_currency_for_taker_fee_btc = 10;
+    uint64 mining_fee_sats = 11;
+    uint64 total_to_pay_sats = 12;
+    uint64 funds_needed_for_trade_sats = 13;
+    uint64 missing_sats = 14;
+    bool is_btc_wallet_funded = 15;
+    string volume = 16;
+    int64 volume_as_long = 17;
+}
+
+// dexArbTrading: take an offer only when the live calculation matches confirmed limits.
+message GuardedTakeOfferRequest {
+    string offer_id = 1;
+    string payment_account_id = 2;
+    string taker_fee_currency_code = 3;
+    uint64 amount = 4;
+    uint64 max_wallet_debit_sats = 5;
+    int64 min_volume_as_long = 6;
 }
 
 message ConfirmPaymentStartedRequest {

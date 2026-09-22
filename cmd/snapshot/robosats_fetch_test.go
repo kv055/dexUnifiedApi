@@ -135,6 +135,27 @@ func TestFetchRobosatsUnionsCoordinatorsAndKeepsGoingAfterNotFound(t *testing.T)
 	}
 }
 
+func TestFetchRobosatsKeepsSameNumericIDOnDifferentCoordinators(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		book := `[{"id": 7, "price": 61000, "premium": 0, "amount": 400, "min_amount": 0, "max_amount": 0, "payment_method": "SEPA", "bond_size": 3}]`
+		return jsonResponse(http.StatusOK, book), nil
+	})}
+	result := fetchRobosatsCurrencyFrom(context.Background(), "ask", "EUR", 60000, client, []robosatsCoordinator{{Alias: "alpha", Onion: "http://alpha.test"}, {Alias: "beta", Onion: "http://beta.test"}})
+	if result == nil || len(result.Offers) != 2 {
+		t.Fatalf("offers = %#v, want both coordinator copies of order 7", result)
+	}
+	seen := map[string]bool{}
+	for _, o := range result.Offers {
+		if (o.OfferID != "alpha:7" && o.OfferID != "beta:7") || o.VenueCoordinatorID == "" {
+			t.Fatalf("offer = %#v, want namespaced id with coordinator identity", o)
+		}
+		seen[o.VenueCoordinatorID] = true
+	}
+	if !seen["alpha"] || !seen["beta"] {
+		t.Fatalf("coordinators = %v, want alpha and beta", seen)
+	}
+}
+
 func TestFetchRobosatsNotFoundThenFailureIsIncomplete(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Host {

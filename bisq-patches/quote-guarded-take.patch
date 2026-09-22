@@ -1,0 +1,599 @@
+diff --git a/core/src/main/java/bisq/core/api/CoreApi.java b/core/src/main/java/bisq/core/api/CoreApi.java
+index f8ae4cc..f0f5d8e 100644
+--- a/core/src/main/java/bisq/core/api/CoreApi.java
++++ b/core/src/main/java/bisq/core/api/CoreApi.java
+@@ -18,6 +18,7 @@
+ package bisq.core.api;
+ 
+ import bisq.core.api.model.AddressBalanceInfo;
++import bisq.core.api.model.TakeOfferQuote;
+ import bisq.core.api.model.BalancesInfo;
+ import bisq.core.api.model.TxFeeRateInfo;
+ import bisq.core.dao.governance.bond.role.BondedRole;
+@@ -334,6 +335,40 @@ public class CoreApi {
+                 errorMessageHandler);
+     }
+ 
++    // dexArbTrading: calculate seller deposit, fees, and rounded volume without taking.
++    public TakeOfferQuote quoteTakeOffer(String offerId,
++                                         String paymentAccountId,
++                                         String takerFeeCurrencyCode,
++                                         long intendedTradeAmount) {
++        Offer offer = coreOffersService.getOffer(offerId);
++        return coreTradesService.quoteTakeOffer(offer,
++                paymentAccountId,
++                takerFeeCurrencyCode,
++                intendedTradeAmount);
++    }
++
++    // dexArbTrading: take only when the live calculation still matches confirmed limits.
++    public void guardedTakeOffer(String offerId,
++                                 String paymentAccountId,
++                                 String takerFeeCurrencyCode,
++                                 long confirmedTradeAmount,
++                                 long maxWalletDebitSats,
++                                 long minVolumeAsLong,
++                                 long deadlineEpochMillis,
++                                 Consumer<Trade> resultHandler,
++                                 ErrorMessageHandler errorMessageHandler) {
++        Offer offer = coreOffersService.getOffer(offerId);
++        coreTradesService.guardedTakeOffer(offer,
++                paymentAccountId,
++                takerFeeCurrencyCode,
++                confirmedTradeAmount,
++                maxWalletDebitSats,
++                minVolumeAsLong,
++                deadlineEpochMillis,
++                resultHandler,
++                errorMessageHandler);
++    }
++
+     public void confirmPaymentStarted(String tradeId, @Nullable String txId, @Nullable String txKey) {
+         coreTradesService.confirmPaymentStarted(tradeId, txId, txKey);
+     }
+diff --git a/core/src/main/java/bisq/core/api/CoreTradesService.java b/core/src/main/java/bisq/core/api/CoreTradesService.java
+index 954f046..06ef4e5 100644
+--- a/core/src/main/java/bisq/core/api/CoreTradesService.java
++++ b/core/src/main/java/bisq/core/api/CoreTradesService.java
+@@ -20,8 +20,10 @@ package bisq.core.api;
+ import bisq.core.api.exception.FailedPreconditionException;
+ import bisq.core.api.exception.NotAvailableException;
+ import bisq.core.api.exception.NotFoundException;
++import bisq.core.api.model.TakeOfferQuote;
+ import bisq.core.btc.model.AddressEntry;
+ import bisq.core.btc.wallet.BtcWalletService;
++import bisq.core.monetary.Volume;
+ import bisq.core.offer.Offer;
+ import bisq.core.offer.OfferUtil;
+ import bisq.core.offer.OpenOffer;
+@@ -143,7 +145,110 @@ class CoreTradesService {
+                 coreContext.isApiUser());
+     }
+ 
+-    void takeOffer(Offer offer,
++    // dexArbTrading: init TakeOfferModel and return its funding/volume figures.
++    // Does not call TradeManager, so no trade is created and no tx is broadcast.
++    synchronized TakeOfferQuote quoteTakeOffer(Offer offer,
++                                  String paymentAccountId,
++                                  String takerFeeCurrencyCode,
++                                  long intendedTradeAmount) {
++        coreWalletsService.verifyWalletsAreAvailable();
++        coreWalletsService.verifyEncryptedWalletIsUnlocked();
++
++        if (offer.isBsqSwapOffer())
++            throw new IllegalArgumentException("quoteTakeOffer is not supported for BSQ swap offers");
++
++        if (!"BTC".equalsIgnoreCase(takerFeeCurrencyCode) || !offer.isBuyOffer())
++            throw new IllegalArgumentException("guarded quotes require a BTC-fee BUY offer");
++
++        var paymentAccount = user.getPaymentAccount(paymentAccountId);
++        if (paymentAccount == null)
++            throw new IllegalArgumentException(format("payment account with id '%s' not found", paymentAccountId));
++
++        verifyIntendedTradeAmountIsInRange(intendedTradeAmount, offer);
++
++        takeOfferModel.initPreview(offer, paymentAccount, intendedTradeAmount);
++        if (takeOfferModel.getAmount().value != intendedTradeAmount)
++            throw new IllegalArgumentException(
++                    format("payment account trade limit would change the trade amount from %s to %s",
++                            Coin.valueOf(intendedTradeAmount).toPlainString(),
++                            takeOfferModel.getAmount().toPlainString()));
++
++        Volume volume = takeOfferModel.getVolume();
++        String price = takeOfferModel.getCapturedPrice().toPlainString();
++        String volumePlain = volume == null ? "" : volume.toPlainString();
++        long volumeAsLong = volume == null ? 0 : volume.getValue();
++        String paymentMethodId = paymentAccount.getPaymentMethod() == null
++                ? ""
++                : paymentAccount.getPaymentMethod().getId();
++        return new TakeOfferQuote(
++                offer.getId(),
++                paymentAccountId,
++                paymentMethodId,
++                offer.getCurrencyCode(),
++                price,
++                offer.isBuyOffer(),
++                takeOfferModel.getAmount().value,
++                takeOfferModel.getSecurityDeposit().value,
++                takeOfferModel.getTakerFee().value,
++                takeOfferModel.isCurrencyForTakerFeeBtc(),
++                takeOfferModel.getTotalTxFee().value,
++                takeOfferModel.getTotalToPayAsCoin().value,
++                takeOfferModel.getFundsNeededForTrade().value,
++                takeOfferModel.getMissingCoin().value,
++                takeOfferModel.isBtcWalletFunded(),
++                volumePlain,
++                volumeAsLong);
++    }
++
++    synchronized void guardedTakeOffer(Offer offer,
++                          String paymentAccountId,
++                          String takerFeeCurrencyCode,
++                          long confirmedTradeAmount,
++                          long maxWalletDebitSats,
++                          long minVolumeAsLong,
++                          long deadlineEpochMillis,
++                          Consumer<Trade> resultHandler,
++                          ErrorMessageHandler errorMessageHandler) {
++        if (confirmedTradeAmount <= 0 || maxWalletDebitSats <= 0 || minVolumeAsLong <= 0 ||
++                deadlineEpochMillis <= System.currentTimeMillis())
++            throw new FailedPreconditionException("invalid or expired guarded take limits");
++        TakeOfferQuote quote = quoteTakeOffer(offer,
++                paymentAccountId,
++                takerFeeCurrencyCode,
++                confirmedTradeAmount);
++        if (quote.getTradeAmountSats() != confirmedTradeAmount)
++            throw new IllegalArgumentException(
++                    format("calculated trade amount %s does not match confirmed amount %s",
++                            Coin.valueOf(quote.getTradeAmountSats()).toPlainString(),
++                            Coin.valueOf(confirmedTradeAmount).toPlainString()));
++        if (maxWalletDebitSats > 0 && quote.getTotalToPaySats() > maxWalletDebitSats)
++            throw new FailedPreconditionException(
++                    format("total to pay %s exceeds confirmed wallet debit limit %s",
++                            Coin.valueOf(quote.getTotalToPaySats()).toPlainString(),
++                            Coin.valueOf(maxWalletDebitSats).toPlainString()));
++        if (minVolumeAsLong > 0 && quote.getVolumeAsLong() < minVolumeAsLong)
++            throw new FailedPreconditionException(
++                    format("rounded fiat volume %s is below confirmed minimum proceeds %s",
++                            quote.getVolume(),
++                            minVolumeAsLong));
++        if (!quote.isBtcWalletFunded())
++            throw new NotAvailableException("wallet is not funded for the guarded take");
++        if (deadlineEpochMillis <= System.currentTimeMillis())
++            throw new FailedPreconditionException("guarded take deadline expired");
++        // Submit the exact snapshot checked above, never re-enter ordinary take
++        // or re-read the market price. Java monitors are reentrant: quote and
++        // ordinary take share this lock, protecting the singleton model.
++        takeOfferModel.activatePreview();
++        tradeManager.onTakeOffer(Coin.valueOf(confirmedTradeAmount),
++                takeOfferModel.getTxFeeFromFeeService(),
++                takeOfferModel.getTakerFee(), true,
++                takeOfferModel.getCapturedPrice().getValue(),
++                takeOfferModel.getFundsNeededForTrade(), offer, paymentAccountId,
++                true, coreContext.isApiUser(), deadlineEpochMillis,
++                resultHandler::accept, errorMessageHandler);
++    }
++
++    synchronized void takeOffer(Offer offer,
+                    String paymentAccountId,
+                    String takerFeeCurrencyCode,
+                    long intendedTradeAmount,
+diff --git a/core/src/main/java/bisq/core/api/model/TakeOfferQuote.java b/core/src/main/java/bisq/core/api/model/TakeOfferQuote.java
+new file mode 100644
+index 0000000..5d543a4
+--- /dev/null
++++ b/core/src/main/java/bisq/core/api/model/TakeOfferQuote.java
+@@ -0,0 +1,64 @@
++/*
++ * dexArbTrading: read-only Bisq v1 take-offer quote. Built from TakeOfferModel
++ * without reserving the offer, creating a trade, or broadcasting transactions.
++ */
++package bisq.core.api.model;
++
++import lombok.Getter;
++
++@Getter
++public final class TakeOfferQuote {
++    private final String offerId;
++    private final String paymentAccountId;
++    private final String paymentMethodId;
++    private final String currencyCode;
++    private final String price;
++    private final boolean isBuyOffer;
++    private final long tradeAmountSats;
++    private final long securityDepositSats;
++    private final long takerFeeSats;
++    private final boolean isCurrencyForTakerFeeBtc;
++    private final long miningFeeSats;
++    private final long totalToPaySats;
++    private final long fundsNeededForTradeSats;
++    private final long missingSats;
++    private final boolean isBtcWalletFunded;
++    private final String volume;
++    private final long volumeAsLong;
++
++    public TakeOfferQuote(String offerId,
++                          String paymentAccountId,
++                          String paymentMethodId,
++                          String currencyCode,
++                          String price,
++                          boolean isBuyOffer,
++                          long tradeAmountSats,
++                          long securityDepositSats,
++                          long takerFeeSats,
++                          boolean isCurrencyForTakerFeeBtc,
++                          long miningFeeSats,
++                          long totalToPaySats,
++                          long fundsNeededForTradeSats,
++                          long missingSats,
++                          boolean isBtcWalletFunded,
++                          String volume,
++                          long volumeAsLong) {
++        this.offerId = offerId;
++        this.paymentAccountId = paymentAccountId;
++        this.paymentMethodId = paymentMethodId;
++        this.currencyCode = currencyCode;
++        this.price = price;
++        this.isBuyOffer = isBuyOffer;
++        this.tradeAmountSats = tradeAmountSats;
++        this.securityDepositSats = securityDepositSats;
++        this.takerFeeSats = takerFeeSats;
++        this.isCurrencyForTakerFeeBtc = isCurrencyForTakerFeeBtc;
++        this.miningFeeSats = miningFeeSats;
++        this.totalToPaySats = totalToPaySats;
++        this.fundsNeededForTradeSats = fundsNeededForTradeSats;
++        this.missingSats = missingSats;
++        this.isBtcWalletFunded = isBtcWalletFunded;
++        this.volume = volume;
++        this.volumeAsLong = volumeAsLong;
++    }
++}
+diff --git a/core/src/main/java/bisq/core/offer/bisq_v1/TakeOfferModel.java b/core/src/main/java/bisq/core/offer/bisq_v1/TakeOfferModel.java
+index 821ca14..e82b470 100644
+--- a/core/src/main/java/bisq/core/offer/bisq_v1/TakeOfferModel.java
++++ b/core/src/main/java/bisq/core/offer/bisq_v1/TakeOfferModel.java
+@@ -95,6 +95,9 @@ public class TakeOfferModel implements Model {
+     private boolean isBtcWalletFunded;
+     @Getter
+     private Volume volume;
++    @Getter
++    private Price capturedPrice;
++    private boolean preview;
+ 
+     @Inject
+     public TakeOfferModel(AccountAgeWitnessService accountAgeWitnessService,
+@@ -113,10 +116,31 @@ public class TakeOfferModel implements Model {
+                           PaymentAccount paymentAccount,
+                           long intendedTradeAmount,
+                           boolean useSavingsWallet) {
++        initModel(offer, paymentAccount, intendedTradeAmount, useSavingsWallet, false);
++    }
++
++    // A BTC-only preview must not allocate wallet addresses, change preferences,
++    // reset offer state, or change the globally selected price-feed currency.
++    public void initPreview(Offer offer, PaymentAccount paymentAccount, long amount) {
++        initModel(offer, paymentAccount, amount, true, true);
++    }
++
++    public void activatePreview() {
++        checkArgument(preview, "model is not a preview");
++        addressEntry = btcWalletService.getOrCreateAddressEntry(offer.getId(), OFFER_FUNDING);
++        offer.resetState();
++    }
++
++    private void initModel(Offer offer, PaymentAccount paymentAccount,
++                           long intendedTradeAmount, boolean useSavingsWallet, boolean preview) {
+         this.clearModel();
++        this.preview = preview;
+         this.offer = offer;
+         this.paymentAccount = paymentAccount;
+-        this.addressEntry = btcWalletService.getOrCreateAddressEntry(offer.getId(), OFFER_FUNDING);
++        this.capturedPrice = offer.getPrice();
++        this.addressEntry = preview
++                ? btcWalletService.getAddressEntry(offer.getId(), OFFER_FUNDING).orElse(null)
++                : btcWalletService.getOrCreateAddressEntry(offer.getId(), OFFER_FUNDING);
+         validateModelInputs();
+ 
+         this.useSavingsWallet = useSavingsWallet;
+@@ -124,15 +148,16 @@ public class TakeOfferModel implements Model {
+         this.securityDeposit = offer.getDirection() == SELL
+                 ? offer.getBuyerSecurityDeposit()
+                 : offer.getSellerSecurityDeposit();
+-        this.isCurrencyForTakerFeeBtc = offerUtil.isCurrencyForTakerFeeBtc(this.amount);
++        this.isCurrencyForTakerFeeBtc = preview || offerUtil.isCurrencyForTakerFeeBtc(this.amount);
+         this.takerFee = offerUtil.getTakerFee(isCurrencyForTakerFeeBtc, this.amount);
+ 
+         calculateTxFees();
+         calculateVolume();
+         calculateTotalToPay();
+-        offer.resetState();
+-
+-        priceFeedService.setCurrencyCode(offer.getCurrencyCode());
++        if (!preview) {
++            offer.resetState();
++            priceFeedService.setCurrencyCode(offer.getCurrencyCode());
++        }
+     }
+ 
+     @Override
+@@ -185,7 +210,7 @@ public class TakeOfferModel implements Model {
+     }
+ 
+     private void calculateVolume() {
+-        Price tradePrice = offer.getPrice();
++        Price tradePrice = capturedPrice;
+         Volume volumeByAmount = Objects.requireNonNull(tradePrice).getVolumeByAmount(amount);
+ 
+         if (offer.getPaymentMethod().getId().equals(PaymentMethod.HAL_CASH_ID))
+@@ -199,7 +224,8 @@ public class TakeOfferModel implements Model {
+     }
+ 
+     private void updateBalance() {
+-        Coin tradeWalletBalance = btcWalletService.getBalanceForAddress(addressEntry.getAddress());
++        Coin tradeWalletBalance = addressEntry == null ? ZERO
++                : btcWalletService.getBalanceForAddress(addressEntry.getAddress());
+         if (useSavingsWallet) {
+             Coin savingWalletBalance = btcWalletService.getSavingWalletBalance();
+             totalAvailableBalance = savingWalletBalance.add(tradeWalletBalance);
+@@ -258,9 +284,9 @@ public class TakeOfferModel implements Model {
+         checkNotNull(offer, "offer must not be null");
+         checkNotNull(offer.getAmount(), "offer amount must not be null");
+         checkArgument(offer.getAmount().value > 0, "offer amount must not be zero");
+-        checkNotNull(offer.getPrice(), "offer price must not be null");
++        checkNotNull(capturedPrice, "offer price must not be null");
+         checkNotNull(paymentAccount, "payment account must not be null");
+-        checkNotNull(addressEntry, "address entry must not be null");
++        if (!preview) checkNotNull(addressEntry, "address entry must not be null");
+     }
+ 
+     private void clearModel() {
+@@ -280,6 +306,8 @@ public class TakeOfferModel implements Model {
+         this.txFeePerVbyteFromFeeService = null;
+         this.useSavingsWallet = true;
+         this.volume = null;
++        this.capturedPrice = null;
++        this.preview = false;
+     }
+ 
+     @Override
+diff --git a/core/src/main/java/bisq/core/trade/TradeManager.java b/core/src/main/java/bisq/core/trade/TradeManager.java
+index 3b035a4..86e8127 100644
+--- a/core/src/main/java/bisq/core/trade/TradeManager.java
++++ b/core/src/main/java/bisq/core/trade/TradeManager.java
+@@ -566,12 +566,33 @@ public class TradeManager implements PersistedDataHost, DecryptedDirectMessageLi
+                             boolean isTakerApiUser,
+                             TradeResultHandler<Trade> tradeResultHandler,
+                             ErrorMessageHandler errorMessageHandler) {
++        onTakeOffer(amount, txFee, takerFee, isCurrencyForTakerFeeBtc, tradePrice,
++                fundsNeededForTrade, offer, paymentAccountId, useSavingsWallet,
++                isTakerApiUser, Long.MAX_VALUE, tradeResultHandler, errorMessageHandler);
++    }
++
++    public void onTakeOffer(Coin amount, Coin txFee, Coin takerFee,
++                            boolean isCurrencyForTakerFeeBtc, long tradePrice,
++                            Coin fundsNeededForTrade, Offer offer, String paymentAccountId,
++                            boolean useSavingsWallet, boolean isTakerApiUser,
++                            long deadlineEpochMillis,
++                            TradeResultHandler<Trade> tradeResultHandler,
++                            ErrorMessageHandler errorMessageHandler) {
++
++        checkArgument(System.currentTimeMillis() < deadlineEpochMillis,
++                "guarded take deadline expired");
+ 
+         checkArgument(!wasOfferAlreadyUsedInTrade(offer.getId()));
+ 
+         OfferAvailabilityModel model = getOfferAvailabilityModel(offer, isTakerApiUser);
+         offer.checkOfferAvailability(model,
+                 () -> {
++                    // Availability is asynchronous; the request may have expired
++                    // while waiting for the maker. Do not create a trade then.
++                    if (System.currentTimeMillis() >= deadlineEpochMillis) {
++                        errorMessageHandler.handleErrorMessage("guarded take deadline expired");
++                        return;
++                    }
+                     if (offer.getState() == Offer.State.AVAILABLE) {
+                         Trade trade;
+                         if (offer.isBuyOffer()) {
+diff --git a/daemon/src/main/java/bisq/daemon/grpc/GrpcTradesService.java b/daemon/src/main/java/bisq/daemon/grpc/GrpcTradesService.java
+index 47fe658..57e1489 100644
+--- a/daemon/src/main/java/bisq/daemon/grpc/GrpcTradesService.java
++++ b/daemon/src/main/java/bisq/daemon/grpc/GrpcTradesService.java
+@@ -19,6 +19,7 @@ package bisq.daemon.grpc;
+ 
+ import bisq.core.api.CoreApi;
+ import bisq.core.api.model.CanceledTradeInfo;
++import bisq.core.api.model.TakeOfferQuote;
+ import bisq.core.api.model.TradeInfo;
+ import bisq.core.offer.Offer;
+ import bisq.core.offer.OpenOffer;
+@@ -38,7 +39,12 @@ import bisq.proto.grpc.FailTradeRequest;
+ import bisq.proto.grpc.GetTradeReply;
+ import bisq.proto.grpc.GetTradeRequest;
+ import bisq.proto.grpc.GetTradesReply;
++import bisq.proto.grpc.GuardedTakeOfferRequest;
++import bisq.proto.grpc.GetTakeCapabilitiesRequest;
++import bisq.proto.grpc.GetTakeCapabilitiesReply;
+ import bisq.proto.grpc.GetTradesRequest;
++import bisq.proto.grpc.QuoteTakeOfferReply;
++import bisq.proto.grpc.QuoteTakeOfferRequest;
+ import bisq.proto.grpc.TakeOfferReply;
+ import bisq.proto.grpc.TakeOfferRequest;
+ import bisq.proto.grpc.UnFailTradeReply;
+@@ -87,6 +93,90 @@ class GrpcTradesService extends TradesImplBase {
+         this.exceptionHandler = exceptionHandler;
+     }
+ 
++    @Override
++    public void getTakeCapabilities(GetTakeCapabilitiesRequest req,
++                                    StreamObserver<GetTakeCapabilitiesReply> responseObserver) {
++        responseObserver.onNext(GetTakeCapabilitiesReply.newBuilder().setGuardVersion(2).build());
++        responseObserver.onCompleted();
++    }
++
++    // dexArbTrading: read-only quote using TakeOfferModel.
++    @Override
++    public void quoteTakeOffer(QuoteTakeOfferRequest req,
++                               StreamObserver<QuoteTakeOfferReply> responseObserver) {
++        try {
++            Offer offer = coreApi.getOffer(req.getOfferId());
++            var intendedTradeAmount = req.getAmount() == 0
++                    ? offer.getAmount().value
++                    : req.getAmount();
++            TakeOfferQuote quote = coreApi.quoteTakeOffer(offer.getId(),
++                    req.getPaymentAccountId(),
++                    req.getTakerFeeCurrencyCode(),
++                    intendedTradeAmount);
++            var reply = QuoteTakeOfferReply.newBuilder()
++                    .setOfferId(quote.getOfferId())
++                    .setPaymentAccountId(quote.getPaymentAccountId())
++                    .setPaymentMethodId(quote.getPaymentMethodId())
++                    .setCurrencyCode(quote.getCurrencyCode())
++                    .setPrice(quote.getPrice() == null ? "" : quote.getPrice())
++                    .setIsBuyOffer(quote.isBuyOffer())
++                    .setTradeAmountSats(quote.getTradeAmountSats())
++                    .setSecurityDepositSats(quote.getSecurityDepositSats())
++                    .setTakerFeeSats(quote.getTakerFeeSats())
++                    .setIsCurrencyForTakerFeeBtc(quote.isCurrencyForTakerFeeBtc())
++                    .setMiningFeeSats(quote.getMiningFeeSats())
++                    .setTotalToPaySats(quote.getTotalToPaySats())
++                    .setFundsNeededForTradeSats(quote.getFundsNeededForTradeSats())
++                    .setMissingSats(quote.getMissingSats())
++                    .setIsBtcWalletFunded(quote.isBtcWalletFunded())
++                    .setVolume(quote.getVolume() == null ? "" : quote.getVolume())
++                    .setVolumeAsLong(quote.getVolumeAsLong())
++                    .build();
++            responseObserver.onNext(reply);
++            responseObserver.onCompleted();
++        } catch (Throwable cause) {
++            exceptionHandler.handleException(log, cause, responseObserver);
++        }
++    }
++
++    // dexArbTrading: take only when the live calculation matches confirmed limits.
++    @Override
++    public void guardedTakeOffer(GuardedTakeOfferRequest req,
++                                 StreamObserver<TakeOfferReply> responseObserver) {
++        GrpcErrorMessageHandler errorMessageHandler =
++                new GrpcErrorMessageHandler(getGuardedTakeOfferMethod().getFullMethodName(),
++                        responseObserver,
++                        exceptionHandler,
++                        log);
++        try {
++            Offer offer = coreApi.getOffer(req.getOfferId());
++            if (offer.isBsqSwapOffer()) {
++                throw new IllegalArgumentException("guardedTakeOffer is not supported for BSQ swap offers");
++            }
++            var intendedTradeAmount = req.getAmount() == 0
++                    ? offer.getAmount().value
++                    : req.getAmount();
++            coreApi.guardedTakeOffer(offer.getId(),
++                    req.getPaymentAccountId(),
++                    req.getTakerFeeCurrencyCode(),
++                    intendedTradeAmount,
++                    req.getMaxWalletDebitSats(),
++                    req.getMinVolumeAsLong(),
++                    req.getDeadlineEpochMillis(),
++                    trade -> {
++                        var reply = buildTakeOfferReply(trade);
++                        responseObserver.onNext(reply);
++                        responseObserver.onCompleted();
++                    },
++                    errorMessage -> {
++                        if (!errorMessageHandler.isErrorHandled())
++                            errorMessageHandler.handleErrorMessage(errorMessage);
++                    });
++        } catch (Throwable cause) {
++            exceptionHandler.handleException(log, cause, responseObserver);
++        }
++    }
++
+     @Override
+     public void takeOffer(TakeOfferRequest req,
+                           StreamObserver<TakeOfferReply> responseObserver) {
+@@ -275,6 +365,8 @@ class GrpcTradesService extends TradesImplBase {
+                             put(getGetTradeMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
+                             put(getGetTradesMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
+                             put(getTakeOfferMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
++                            put(getQuoteTakeOfferMethod().getFullMethodName(), new GrpcCallRateMeter(1, SECONDS));
++                            put(getGuardedTakeOfferMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
+                             put(getConfirmPaymentStartedMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
+                             put(getConfirmPaymentReceivedMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
+                             put(getCloseTradeMethod().getFullMethodName(), new GrpcCallRateMeter(1, MINUTES));
+diff --git a/proto/src/main/proto/grpc.proto b/proto/src/main/proto/grpc.proto
+index dcd6bca..a3f7789 100644
+--- a/proto/src/main/proto/grpc.proto
++++ b/proto/src/main/proto/grpc.proto
+@@ -396,6 +396,48 @@ message TakeOfferReply {
+     AvailabilityResultWithDescription failure_reason = 2;   // The reason the offer could not be taken.
+ }
+ 
++// dexArbTrading: read-only take-offer quote (see rpc QuoteTakeOffer).
++message QuoteTakeOfferRequest {
++    string offer_id = 1;
++    string payment_account_id = 2;
++    string taker_fee_currency_code = 3;
++    uint64 amount = 4;
++}
++
++message QuoteTakeOfferReply {
++    string offer_id = 1;
++    string payment_account_id = 2;
++    string payment_method_id = 3;
++    string currency_code = 4;
++    string price = 5;
++    bool is_buy_offer = 6;
++    uint64 trade_amount_sats = 7;
++    uint64 security_deposit_sats = 8;
++    uint64 taker_fee_sats = 9;
++    bool is_currency_for_taker_fee_btc = 10;
++    uint64 mining_fee_sats = 11;
++    uint64 total_to_pay_sats = 12;
++    uint64 funds_needed_for_trade_sats = 13;
++    uint64 missing_sats = 14;
++    bool is_btc_wallet_funded = 15;
++    string volume = 16;
++    int64 volume_as_long = 17;
++}
++
++// dexArbTrading: take an offer only when the live calculation matches confirmed limits.
++message GuardedTakeOfferRequest {
++    string offer_id = 1;
++    string payment_account_id = 2;
++    string taker_fee_currency_code = 3;
++    uint64 amount = 4;
++    uint64 max_wallet_debit_sats = 5;
++    int64 min_volume_as_long = 6;
++    int64 deadline_epoch_millis = 7;
++}
++
++message GetTakeCapabilitiesRequest {}
++message GetTakeCapabilitiesReply { uint32 guard_version = 1; }
++
+ message ConfirmPaymentStartedRequest {
+     string trade_id = 1;    // The unique identifier of the open trade.
+ }
+diff --git a/proto-grpc/src/main/proto/grpc_services.proto b/proto-grpc/src/main/proto/grpc_services.proto
+index 380e0e9..0f5f71d 100644
+--- a/proto-grpc/src/main/proto/grpc_services.proto
++++ b/proto-grpc/src/main/proto/grpc_services.proto
+@@ -128,6 +128,7 @@ service ShutdownServer {
+ * The Trades service provides rpc methods for taking, executing, and listing trades.
+ */
+ service Trades {
++    rpc GetTakeCapabilities (GetTakeCapabilitiesRequest) returns (GetTakeCapabilitiesReply) {}
+     // Get a currently open trade.
+     rpc GetTrade (GetTradeRequest) returns (GetTradeReply) {
+     }
+@@ -138,6 +139,12 @@ service Trades {
+     // the offer's payment method, e.g., NATIONAL_BANK, SEPA, SWIFT, etc.
+     rpc TakeOffer (TakeOfferRequest) returns (TakeOfferReply) {
+     }
++    // dexArbTrading: calculate deposit, fees, and rounded volume without taking the offer.
++    rpc QuoteTakeOffer (QuoteTakeOfferRequest) returns (QuoteTakeOfferReply) {
++    }
++    // dexArbTrading: take the offer only when amount and confirmed spending limits still match.
++    rpc GuardedTakeOffer (GuardedTakeOfferRequest) returns (TakeOfferReply) {
++    }
+     // Send a 'payment started' message to a trading peer (the BTC seller).
+     rpc ConfirmPaymentStarted (ConfirmPaymentStartedRequest) returns (ConfirmPaymentStartedReply) {
+     }

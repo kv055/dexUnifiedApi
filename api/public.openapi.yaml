@@ -82,6 +82,39 @@ paths:
             schema:
               type: object
               additionalProperties: true
+  /api/execution-quotes:
+    post:
+      operationId: postApiExecutionQuotes
+      tags:
+        - live-offers
+      summary: Create an authoritative execution quote for a custom trade size
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      security:
+        - dashboardSession: []
   /api/live_offers:
     get:
       operationId: getApiLiveOffers
@@ -287,6 +320,9 @@ components:
           description: Nostr author of the Mostro order, scoped to its coordinator.
         venue_node_name:
           type: string
+        venue_coordinator_id:
+          type: string
+          description: Stable RoboSats federation coordinator alias bound to the native order id.
         source_event_id:
           type: string
           description: Signed quote identifier revalidated before taking an offer.

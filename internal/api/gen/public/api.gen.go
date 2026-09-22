@@ -57,7 +57,10 @@ type LiveOffer struct {
 
 	// SourceEventId Signed quote identifier revalidated before taking an offer.
 	SourceEventId *string `json:"source_event_id,omitempty"`
-	VenueNodeName *string `json:"venue_node_name,omitempty"`
+
+	// VenueCoordinatorId Stable RoboSats federation coordinator alias bound to the native order id.
+	VenueCoordinatorId *string `json:"venue_coordinator_id,omitempty"`
+	VenueNodeName      *string `json:"venue_node_name,omitempty"`
 
 	// VenueNodePubkey Nostr author of the Mostro order, scoped to its coordinator.
 	VenueNodePubkey      *string                `json:"venue_node_pubkey,omitempty"`
@@ -70,8 +73,14 @@ type LiveOfferProtocolVersion int
 // PutApiCexPermissionsProviderJSONBody defines parameters for PutApiCexPermissionsProvider.
 type PutApiCexPermissionsProviderJSONBody map[string]interface{}
 
+// PostApiExecutionQuotesJSONBody defines parameters for PostApiExecutionQuotes.
+type PostApiExecutionQuotesJSONBody map[string]interface{}
+
 // PutApiCexPermissionsProviderJSONRequestBody defines body for PutApiCexPermissionsProvider for application/json ContentType.
 type PutApiCexPermissionsProviderJSONRequestBody PutApiCexPermissionsProviderJSONBody
+
+// PostApiExecutionQuotesJSONRequestBody defines body for PostApiExecutionQuotes for application/json ContentType.
+type PostApiExecutionQuotesJSONRequestBody PostApiExecutionQuotesJSONBody
 
 // Getter for additional properties for LiveOffer. Returns the specified
 // element and whether it was found
@@ -120,6 +129,14 @@ func (a *LiveOffer) UnmarshalJSON(b []byte) error {
 			return fmt.Errorf("error reading 'source_event_id': %w", err)
 		}
 		delete(object, "source_event_id")
+	}
+
+	if raw, found := object["venue_coordinator_id"]; found {
+		err = json.Unmarshal(raw, &a.VenueCoordinatorId)
+		if err != nil {
+			return fmt.Errorf("error reading 'venue_coordinator_id': %w", err)
+		}
+		delete(object, "venue_coordinator_id")
 	}
 
 	if raw, found := object["venue_node_name"]; found {
@@ -178,6 +195,13 @@ func (a LiveOffer) MarshalJSON() ([]byte, error) {
 		}
 	}
 
+	if a.VenueCoordinatorId != nil {
+		object["venue_coordinator_id"], err = json.Marshal(a.VenueCoordinatorId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'venue_coordinator_id': %w", err)
+		}
+	}
+
 	if a.VenueNodeName != nil {
 		object["venue_node_name"], err = json.Marshal(a.VenueNodeName)
 		if err != nil {
@@ -209,6 +233,9 @@ type ServerInterface interface {
 	// PutApiCexPermissionsProvider PUT /api/cex_permissions/{provider}
 	// (PUT /api/cex_permissions/{provider})
 	PutApiCexPermissionsProvider(w http.ResponseWriter, r *http.Request, provider string)
+	// PostApiExecutionQuotes Create an authoritative execution quote for a custom trade size
+	// (POST /api/execution-quotes)
+	PostApiExecutionQuotes(w http.ResponseWriter, r *http.Request)
 	// GetApiLiveOffers GET /api/live_offers
 	// (GET /api/live_offers)
 	GetApiLiveOffers(w http.ResponseWriter, r *http.Request)
@@ -266,6 +293,20 @@ func (siw *ServerInterfaceWrapper) PutApiCexPermissionsProvider(w http.ResponseW
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PutApiCexPermissionsProvider(w, r, provider)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostApiExecutionQuotes operation middleware
+func (siw *ServerInterfaceWrapper) PostApiExecutionQuotes(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostApiExecutionQuotes(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -479,6 +520,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/cex_permissions", wrapper.GetApiCexPermissions)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/cex_permissions/{provider}", wrapper.PutApiCexPermissionsProvider)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/execution-quotes", wrapper.PostApiExecutionQuotes)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/live_offers", wrapper.GetApiLiveOffers)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/live_offers/counts", wrapper.GetApiLiveOffersCounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/live_offers/{id}/lifecycle", wrapper.GetApiLiveOffersIdLifecycle)
@@ -586,6 +628,59 @@ type PutApiCexPermissionsProviderdefaultTextResponse struct {
 }
 
 func (response PutApiCexPermissionsProviderdefaultTextResponse) VisitPutApiCexPermissionsProviderResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(response.StatusCode)
+
+	_, err := w.Write([]byte(fmt.Sprint(response.Body)))
+	return err
+}
+
+type PostApiExecutionQuotesRequestObject struct {
+	Body *PostApiExecutionQuotesJSONRequestBody
+}
+
+type PostApiExecutionQuotesResponseObject interface {
+	VisitPostApiExecutionQuotesResponse(w http.ResponseWriter) error
+}
+
+type PostApiExecutionQuotes200JSONResponse map[string]interface{}
+
+func (response PostApiExecutionQuotes200JSONResponse) VisitPostApiExecutionQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostApiExecutionQuotesdefaultJSONResponse struct {
+	Body       map[string]interface{}
+	StatusCode int
+}
+
+func (response PostApiExecutionQuotesdefaultJSONResponse) VisitPostApiExecutionQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostApiExecutionQuotesdefaultTextResponse struct {
+	Body       string
+	StatusCode int
+}
+
+func (response PostApiExecutionQuotesdefaultTextResponse) VisitPostApiExecutionQuotesResponse(w http.ResponseWriter) error {
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(response.StatusCode)
@@ -865,6 +960,9 @@ type StrictServerInterface interface {
 	// PutApiCexPermissionsProvider PUT /api/cex_permissions/{provider}
 	// (PUT /api/cex_permissions/{provider})
 	PutApiCexPermissionsProvider(ctx context.Context, request PutApiCexPermissionsProviderRequestObject) (PutApiCexPermissionsProviderResponseObject, error)
+	// PostApiExecutionQuotes Create an authoritative execution quote for a custom trade size
+	// (POST /api/execution-quotes)
+	PostApiExecutionQuotes(ctx context.Context, request PostApiExecutionQuotesRequestObject) (PostApiExecutionQuotesResponseObject, error)
 	// GetApiLiveOffers GET /api/live_offers
 	// (GET /api/live_offers)
 	GetApiLiveOffers(ctx context.Context, request GetApiLiveOffersRequestObject) (GetApiLiveOffersResponseObject, error)
@@ -974,6 +1072,37 @@ func (sh *strictHandler) PutApiCexPermissionsProvider(w http.ResponseWriter, r *
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(PutApiCexPermissionsProviderResponseObject); ok {
 		if err := validResponse.VisitPutApiCexPermissionsProviderResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PostApiExecutionQuotes operation middleware
+func (sh *strictHandler) PostApiExecutionQuotes(w http.ResponseWriter, r *http.Request) {
+	var request PostApiExecutionQuotesRequestObject
+
+	var body PostApiExecutionQuotesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PostApiExecutionQuotes(ctx, request.(PostApiExecutionQuotesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PostApiExecutionQuotes")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PostApiExecutionQuotesResponseObject); ok {
+		if err := validResponse.VisitPostApiExecutionQuotesResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -1108,27 +1237,29 @@ func (sh *strictHandler) GetApiTradeCostConfig(w http.ResponseWriter, r *http.Re
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"96/70cNU9yrrDA+j2xFAsen+Pd3KfrH/JwAA//8=",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

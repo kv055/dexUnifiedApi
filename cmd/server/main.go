@@ -49,6 +49,7 @@ func sessionProtected(path string) bool {
 	return strings.HasPrefix(path, "/api/live_offers") ||
 		strings.HasPrefix(path, "/api/cex_permissions") ||
 		strings.HasPrefix(path, "/api/trade_cost_config") ||
+		strings.HasPrefix(path, "/api/execution-quotes") ||
 		strings.HasPrefix(path, "/api/payment_notifications") ||
 		strings.HasPrefix(path, "/ws/live_offers")
 }

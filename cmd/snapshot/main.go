@@ -63,6 +63,7 @@ var (
 		{Onion: "http://4t4jxmivv6uqej6xzx2jx3fxh75gtt65v3szjoqmc4ugdlhipzdat6yd.onion"},
 		{Onion: "http://otmoonrndnrddqdlhu6b36heunmbyw3cgvadqo2oqeau3656wfv7fwad.onion"},
 	}
+	robosatsCoordinatorIDs = map[string]string{}
 )
 
 const (
@@ -161,6 +162,7 @@ type offer struct {
 	MakerID              string    `json:"maker_id,omitempty"`
 	VenueNodePubKey      string    `json:"venue_node_pubkey,omitempty"`
 	VenueNodeName        string    `json:"venue_node_name,omitempty"`
+	VenueCoordinatorID   string    `json:"venue_coordinator_id,omitempty"`
 	SourceEventID        string    `json:"source_event_id,omitempty"`
 	SourceEventCreatedAt time.Time `json:"source_event_created_at,omitempty"`
 	ProtocolVersion      int       `json:"protocol_version,omitempty"`
@@ -267,6 +269,7 @@ type livePayload struct {
 	MakerID              string     `json:"maker_id,omitempty"`
 	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
 	VenueNodeName        string     `json:"venue_node_name,omitempty"`
+	VenueCoordinatorID   string     `json:"venue_coordinator_id,omitempty"`
 	SourceEventID        string     `json:"source_event_id,omitempty"`
 	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
 	ProtocolVersion      int        `json:"protocol_version,omitempty"`
@@ -1012,9 +1015,11 @@ type robosatsFederationEntry struct {
 }
 
 type robosatsFederationCache struct {
-	FetchedAt    time.Time             `json:"fetched_at"`
-	ETag         string                `json:"etag,omitempty"`
-	Coordinators []robosatsCoordinator `json:"coordinators"`
+	FetchedAt      time.Time             `json:"fetched_at"`
+	ETag           string                `json:"etag,omitempty"`
+	Coordinators   []robosatsCoordinator `json:"coordinators"`
+	CoordinatorIDs map[string]string     `json:"coordinator_ids,omitempty"`
+	Onions         []string              `json:"onions"`
 }
 
 // fetchRobosatsFederation returns the current federated mainnet coordinators.
@@ -1107,6 +1112,17 @@ func fetchRobosatsFederationFrom(ctx context.Context, client *http.Client, regis
 // the stored id would split on the wrong segment.
 func validRobosatsAlias(alias string) bool {
 	return alias != "" && !strings.ContainsAny(alias, ":/ \t")
+}
+
+func robosatsCoordinatorID(onion string) string {
+	if id := strings.TrimSpace(robosatsCoordinatorIDs[onion]); id != "" {
+		return id
+	}
+	u, err := url.Parse(strings.TrimSpace(onion))
+	if err != nil || u.Hostname() == "" {
+		return strings.TrimSpace(onion)
+	}
+	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".onion")
 }
 
 func validRobosatsOnion(raw string) (string, bool) {
@@ -1207,6 +1223,9 @@ func robosatsFederationRefreshInterval() time.Duration {
 // refresh retains the last known-good cache; only an empty cache uses fallback.
 func loadRobosatsCoordinators(ctx context.Context, client *http.Client, registryURL, cachePath string, refreshInterval time.Duration, fallback []robosatsCoordinator) []robosatsCoordinator {
 	cache, cacheErr := readRobosatsFederationCache(cachePath)
+	if cacheErr == nil {
+		robosatsCoordinatorIDs = cache.CoordinatorIDs
+	}
 	if cacheErr == nil && time.Since(cache.FetchedAt) < refreshInterval {
 		slog.InfoContext(ctx, "using cached RoboSats federation coordinators", "coordinator_count", len(cache.Coordinators), "cached_at", cache.FetchedAt)
 		return cache.Coordinators
@@ -1228,7 +1247,7 @@ func loadRobosatsCoordinators(ctx context.Context, client *http.Client, registry
 	if notModified {
 		coordinators = cache.Coordinators
 	}
-	updated := robosatsFederationCache{FetchedAt: time.Now().UTC(), ETag: newETag, Coordinators: coordinators}
+	updated := robosatsFederationCache{FetchedAt: time.Now().UTC(), ETag: newETag, Coordinators: coordinators, CoordinatorIDs: robosatsCoordinatorIDs}
 	if err := writeRobosatsFederationCache(cachePath, updated); err != nil {
 		slog.WarnContext(ctx, "could not cache RoboSats federation coordinators", "err", err)
 	}
@@ -1267,11 +1286,17 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 		offerType = 0
 	}
 
-	byID := make(map[string]offer)
+	byKey := make(map[string]offer)
 	okCount := 0
 	failCount := 0
 	for _, coordinator := range coordinators {
 		onion := coordinator.Onion
+		// Alias scopes the offer id; alias-less fallback endpoints fall back
+		// to the cached registry id (or onion hostname) for coordinator identity.
+		coordinatorID := coordinator.Alias
+		if coordinatorID == "" {
+			coordinatorID = robosatsCoordinatorID(onion)
+		}
 		reqURL := fmt.Sprintf("%s/api/book/?currency=%d&type=%d", onion, currencyID, offerType)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
@@ -1310,7 +1335,7 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 			if o.OfferID == "" {
 				continue
 			}
-			byID[o.OfferID] = o
+			byKey[coordinatorID+"\x00"+o.OfferID] = o
 		}
 		okCount++
 		fmt.Printf("[Robosats] Found %d %s offers (coordinator=%s status=%d response_type=%s)\n", len(offers), direction, onion, resp.StatusCode, responseType)
@@ -1321,8 +1346,8 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 		return nil
 	}
 
-	offers := make([]offer, 0, len(byID))
-	for _, o := range byID {
+	offers := make([]offer, 0, len(byKey))
+	for _, o := range byKey {
 		offers = append(offers, o)
 	}
 	sort.Slice(offers, func(i, j int) bool { return offers[i].OfferID < offers[j].OfferID })
@@ -1416,6 +1441,7 @@ func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice 
 			CounterpartyStakeBTC: &stakeBTC,
 			CounterpartyStakePct: &stakePct,
 			VenueNodeName:        alias,
+			VenueCoordinatorID:   alias,
 		}
 		// Bond is skin-in-the-game on this offer (security_deposit_*), not a
 		// maker reputation track record. Leave the rating Unavailable().
@@ -1650,6 +1676,14 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 			// under another pubkey missed and died on a duplicate-key INSERT.
 			query := "SELECT id FROM offers WHERE exchange = ? AND fiat_currency = ? AND offer_id = ?"
 			args := []any{exchange, fiat, o.OfferID}
+			if exchange == "mostro" && o.VenueNodePubKey != "" {
+				query += " AND venue_node_pubkey = ?"
+				args = append(args, o.VenueNodePubKey)
+			}
+			if exchange == "robosats" && o.VenueCoordinatorID != "" {
+				query += " AND venue_coordinator_id = ?"
+				args = append(args, o.VenueCoordinatorID)
+			}
 			err := tx.QueryRow(query, args...).Scan(&existingID)
 			found = err == nil
 		} else {
@@ -1735,6 +1769,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				maker_id = COALESCE(?, maker_id),
 				venue_node_pubkey = COALESCE(?, venue_node_pubkey),
 				venue_node_name = COALESCE(?, venue_node_name),
+				venue_coordinator_id = COALESCE(?, venue_coordinator_id),
 				source_event_id = COALESCE(?, source_event_id),
 				source_event_created_at = COALESCE(?, source_event_created_at),
 				venue_protocol_version = ?
@@ -1747,7 +1782,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
 				nilIfEmptyRawMessage(o.SellerRatingSignals),
-				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion), existingID,
+				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.VenueCoordinatorID), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion), existingID,
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		} else {
 			// Concurrent cycles (or a lookup miss) can still race another
@@ -1762,8 +1797,8 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				 security_deposit_btc, security_deposit_pct,
 				 counterparty_stake_btc, counterparty_stake_pct,
 				 seller_rating_score, seller_rating_confidence, seller_rating_raw, seller_rating_signals, maker_id,
-				 venue_node_pubkey, venue_node_name, source_event_id, source_event_created_at, venue_protocol_version)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?, ?)
+				 venue_node_pubkey, venue_node_name, venue_coordinator_id, source_event_id, source_event_created_at, venue_protocol_version)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (exchange, fiat_currency, offer_id) WHERE offer_id IS NOT NULL DO UPDATE SET
 				last_seen = CURRENT_TIMESTAMP,
 				price_type = ?,
@@ -1785,6 +1820,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				maker_id = COALESCE(?, offers.maker_id),
 				venue_node_pubkey = COALESCE(?, offers.venue_node_pubkey),
 				venue_node_name = COALESCE(?, offers.venue_node_name),
+				venue_coordinator_id = COALESCE(?, offers.venue_coordinator_id),
 				source_event_id = COALESCE(?, offers.source_event_id),
 				source_event_created_at = COALESCE(?, offers.source_event_created_at),
 				venue_protocol_version = ?
@@ -1797,13 +1833,13 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
 				nilIfEmptyRawMessage(o.SellerRatingSignals),
-				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion),
+				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.VenueCoordinatorID), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion),
 				o.PriceType, o.Price, o.BTCMin, o.BTCMax, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
 				nilIfEmptyRawMessage(o.SellerRatingSignals),
-				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion),
+				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.VenueCoordinatorID), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion),
 			).Scan(&live.ID, &live.FirstSeen, &live.LastSeen)
 		}
 		if upsertErr != nil {

@@ -18,6 +18,7 @@ func TestLegacyStrictServerRejectsContractViolationForEveryJSONSuccess(t *testin
 	}{
 		{name: "getApiCexPermissions", method: "GET", path: "/api/cex_permissions", status: 200},
 		{name: "putApiCexPermissionsProvider", method: "PUT", path: "/api/cex_permissions/1", status: 200},
+		{name: "postApiExecutionQuotes", method: "POST", path: "/api/execution-quotes", status: 200},
 		{name: "getApiLiveOffers", method: "GET", path: "/api/live_offers", status: 200},
 		{name: "getApiLiveOffersCounts", method: "GET", path: "/api/live_offers/counts", status: 200},
 		{name: "getApiLiveOffersIdLifecycle", method: "GET", path: "/api/live_offers/1/lifecycle", status: 200},

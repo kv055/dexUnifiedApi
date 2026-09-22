@@ -159,6 +159,15 @@ func (response legacyPutApiCexPermissionsProviderResponse) VisitPutApiCexPermiss
 	return response.server.serveLegacy(w, response.request)
 }
 
+type legacyPostApiExecutionQuotesResponse struct {
+	server  *LegacyStrictServer
+	request *legacyRequest
+}
+
+func (response legacyPostApiExecutionQuotesResponse) VisitPostApiExecutionQuotesResponse(w http.ResponseWriter) error {
+	return response.server.serveLegacy(w, response.request)
+}
+
 type legacyGetApiLiveOffersResponse struct {
 	server  *LegacyStrictServer
 	request *legacyRequest
@@ -217,6 +226,13 @@ func (server *LegacyStrictServer) PutApiCexPermissionsProvider(ctx context.Conte
 		return nil, err
 	}
 	return legacyPutApiCexPermissionsProviderResponse{server: server, request: request}, nil
+}
+func (server *LegacyStrictServer) PostApiExecutionQuotes(ctx context.Context, _ PostApiExecutionQuotesRequestObject) (PostApiExecutionQuotesResponseObject, error) {
+	request, err := legacyRequestFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return legacyPostApiExecutionQuotesResponse{server: server, request: request}, nil
 }
 func (server *LegacyStrictServer) GetApiLiveOffers(ctx context.Context, _ GetApiLiveOffersRequestObject) (GetApiLiveOffersResponseObject, error) {
 	request, err := legacyRequestFromContext(ctx)

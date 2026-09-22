@@ -31,6 +31,13 @@ RUN git apply --3way /tmp/offerinfo-witness.patch
 COPY bisq-patches/payment-accounts-sepa-delete.patch /tmp/payment-accounts-sepa-delete.patch
 RUN git apply --3way /tmp/payment-accounts-sepa-delete.patch
 
+# QuoteTakeOffer and version-2 GuardedTakeOffer use a single price/funding
+# snapshot and enforce the deadline after the asynchronous availability check.
+# Automated execution requires the versioned GetTakeCapabilities RPC;
+# an older daemon must fail preflight rather than fall back to unrestricted take.
+COPY bisq-patches/quote-guarded-take.patch /tmp/quote-guarded-take.patch
+RUN git apply --3way /tmp/quote-guarded-take.patch
+
 # Cache mount keeps gradle's dependency + wrapper caches across builds; without
 # it every patch/version change re-downloads all deps and compiles cold (the
 # dominant cost since the switch to building the daemon from source).
