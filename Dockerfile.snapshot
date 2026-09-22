@@ -14,7 +14,9 @@ COPY dexUnifiedApi/bisq_grpc/go/ ./bisq_grpc/go/
 COPY dexUnifiedApi/cmd/snapshot/ ./cmd/snapshot/
 COPY dexUnifiedApi/internal/ ./internal/
 COPY dexUnifiedApi/db/ ./db/
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o snapshot ./cmd/snapshot
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags="-s -w" -o snapshot ./cmd/snapshot
 
 # Stage 2: Minimal runtime
 FROM alpine:3.21
