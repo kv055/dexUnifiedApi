@@ -1,6 +1,12 @@
 FROM eclipse-temurin:21-jdk-jammy AS bisq2-builder
 
 ARG BISQ2_VERSION=2.1.11
+# Pinned source commit for v${BISQ2_VERSION} (the upstream tag at pin time).
+# Upstream tags are mutable: cloning the floating tag reuses a stale cached
+# layer while the tag content moves on, so the build must fetch this exact
+# commit (changing it also busts the clone layer cache). Keep BISQ2_VERSION
+# and BISQ2_COMMIT in sync when bumping.
+ARG BISQ2_COMMIT=505e4f48a46afd3bf87918aa4869acbceb965f03
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -8,8 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 --branch "v${BISQ2_VERSION}" --recurse-submodules --shallow-submodules \
-    https://github.com/bisq-network/bisq2.git /src/bisq2
+RUN git init -q /src/bisq2 && \
+    git -C /src/bisq2 remote add origin https://github.com/bisq-network/bisq2.git && \
+    git -C /src/bisq2 fetch --depth 1 origin "${BISQ2_COMMIT}" && \
+    git -C /src/bisq2 checkout -q --detach FETCH_HEAD && \
+    git -C /src/bisq2 submodule update --init --recursive --depth 1
 
 WORKDIR /src/bisq2
 

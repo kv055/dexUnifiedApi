@@ -3,6 +3,13 @@
 FROM eclipse-temurin:21-jdk-jammy AS bisq-builder
 
 ARG BISQ_VERSION=1.10.8
+# Pinned source commit for v${BISQ_VERSION} (peeled from the upstream tag).
+# The tag is mutable upstream: cloning the floating tag reuses a stale cached
+# layer while patches move on, so the build must fetch this exact commit
+# (changing it also busts the clone layer cache). Bump BISQ_VERSION and
+# BISQ_COMMIT together via the Bisq version bump workflow; the
+# bisq-patches-apply job verifies patches against this same commit.
+ARG BISQ_COMMIT=1b5f317641e04368cd56d2c09af4860fac970136
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -10,14 +17,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 --branch "v${BISQ_VERSION}" --recurse-submodules --shallow-submodules \
-    https://github.com/bisq-network/bisq.git /src/bisq
+RUN git init -q /src/bisq && \
+    git -C /src/bisq remote add origin https://github.com/bisq-network/bisq.git && \
+    git -C /src/bisq fetch --depth 1 origin "${BISQ_COMMIT}" && \
+    git -C /src/bisq checkout -q --detach FETCH_HEAD && \
+    git -C /src/bisq submodule update --init --recursive --depth 1
 
 WORKDIR /src/bisq
 
 # Surface each maker's account-signing sign-state + account-age-witness date on
 # the gRPC getOffers response (stock OfferInfo strips it), for seller-rating
-# ingestion. If a future BISQ_VERSION refactors the touched files, this apply
+# ingestion. If a future BISQ_COMMIT refactors the touched files, this apply
 # fails and the build stops here — rebase bisq-patches/offerinfo-witness.patch.
 COPY bisq-patches/offerinfo-witness.patch /tmp/offerinfo-witness.patch
 RUN git apply --3way /tmp/offerinfo-witness.patch
@@ -25,7 +35,7 @@ RUN git apply --3way /tmp/offerinfo-witness.patch
 # Add two PaymentAccounts gRPC methods the stock daemon lacks: CreateSepaPaymentAccount
 # (builds a SEPA account server-side from discrete fields — the generic CreatePaymentAccount
 # json path cannot round-trip SEPA on this build) and DeletePaymentAccount (surfaces the
-# existing core User.removePaymentAccount). If a future BISQ_VERSION refactors the touched
+# existing core User.removePaymentAccount). If a future BISQ_COMMIT refactors the touched
 # files, this apply fails and the build stops here — rebase
 # bisq-patches/payment-accounts-sepa-delete.patch.
 COPY bisq-patches/payment-accounts-sepa-delete.patch /tmp/payment-accounts-sepa-delete.patch
