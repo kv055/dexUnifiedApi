@@ -109,7 +109,7 @@ func TestRecordFetchResultTracksZeroOfferExchange(t *testing.T) {
 		t.Fatalf("bisq ids len = %d, want 0", len(ids))
 	}
 
-	payload, total, err := buildSnapshotLogPayload(exchangeData, nil, newFetchTimings())
+	payload, total, err := buildSnapshotLogPayload(exchangeData, nil, newFetchTimings(), snapshotLogDetail{})
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}
@@ -117,21 +117,15 @@ func TestRecordFetchResultTracksZeroOfferExchange(t *testing.T) {
 		t.Fatalf("total = %d, want 0", total)
 	}
 
-	var got map[string]struct {
-		Count int      `json:"count"`
-		IDs   []string `json:"ids"`
+	bisq := decodeSnapshotExchangeEntry(t, payload, "bisq")
+	if bisq.Count != 0 {
+		t.Fatalf("bisq count = %d, want 0", bisq.Count)
 	}
-	if err := json.Unmarshal(payload, &got); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	if got["bisq"].Count != 0 {
-		t.Fatalf("bisq count = %d, want 0", got["bisq"].Count)
-	}
-	if got["bisq"].IDs == nil {
+	if bisq.IDs == nil {
 		t.Fatal("bisq ids = nil, want empty JSON array")
 	}
-	if len(got["bisq"].IDs) != 0 {
-		t.Fatalf("bisq ids len = %d, want 0", len(got["bisq"].IDs))
+	if len(bisq.IDs) != 0 {
+		t.Fatalf("bisq ids len = %d, want 0", len(bisq.IDs))
 	}
 }
 
@@ -174,7 +168,7 @@ func TestSnapshotLogKeepsHardFailedExchangeAtZero(t *testing.T) {
 	recordFetchResult(exchangeData, "hodlhodl", &fetchResult{Offers: []offer{{OfferID: "h1"}}})
 
 	offline := offlineExchangeNames(fetchers, exchangeData)
-	payload, total, err := buildSnapshotLogPayload(exchangeData, offline, newFetchTimings())
+	payload, total, err := buildSnapshotLogPayload(exchangeData, offline, newFetchTimings(), snapshotLogDetail{})
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}
@@ -182,16 +176,8 @@ func TestSnapshotLogKeepsHardFailedExchangeAtZero(t *testing.T) {
 		t.Fatalf("total = %d, want 1", total)
 	}
 
-	var got map[string]struct {
-		Count   int      `json:"count"`
-		IDs     []string `json:"ids"`
-		Offline bool     `json:"offline"`
-		Status  string   `json:"status"`
-	}
-	if err := json.Unmarshal(payload, &got); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	bisq, ok := got["bisq"]
+	entries := decodeSnapshotExchangeEntries(t, payload, "bisq", "hodlhodl")
+	bisq, ok := entries["bisq"]
 	if !ok {
 		t.Fatal("bisq missing from snapshot log payload — dex_exchange_up series would vanish")
 	}
@@ -207,8 +193,8 @@ func TestSnapshotLogKeepsHardFailedExchangeAtZero(t *testing.T) {
 	if bisq.IDs == nil || len(bisq.IDs) != 0 {
 		t.Fatalf("bisq ids = %#v, want empty JSON array", bisq.IDs)
 	}
-	if got["hodlhodl"].Count != 1 || got["hodlhodl"].Offline {
-		t.Fatalf("hodlhodl = %+v, want count 1 online", got["hodlhodl"])
+	if entries["hodlhodl"].Count != 1 || entries["hodlhodl"].Offline {
+		t.Fatalf("hodlhodl = %+v, want count 1 online", entries["hodlhodl"])
 	}
 }
 
@@ -223,7 +209,7 @@ func TestRecordFetchResultTracksOfferIDs(t *testing.T) {
 	if ok := recordFetchResult(exchangeData, "bisq", result); !ok {
 		t.Fatal("recordFetchResult returned false for successful result")
 	}
-	payload, total, err := buildSnapshotLogPayload(exchangeData, nil, newFetchTimings())
+	payload, total, err := buildSnapshotLogPayload(exchangeData, nil, newFetchTimings(), snapshotLogDetail{})
 	if err != nil {
 		t.Fatalf("buildSnapshotLogPayload: %v", err)
 	}
@@ -231,21 +217,161 @@ func TestRecordFetchResultTracksOfferIDs(t *testing.T) {
 		t.Fatalf("total = %d, want 2", total)
 	}
 
-	var got map[string]struct {
-		Count int      `json:"count"`
-		IDs   []string `json:"ids"`
-	}
-	if err := json.Unmarshal(payload, &got); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	if got["bisq"].Count != 2 {
-		t.Fatalf("bisq count = %d, want 2", got["bisq"].Count)
+	bisq := decodeSnapshotExchangeEntry(t, payload, "bisq")
+	if bisq.Count != 2 {
+		t.Fatalf("bisq count = %d, want 2", bisq.Count)
 	}
 	wantIDs := []string{"a", "b"}
 	for i, want := range wantIDs {
-		if got["bisq"].IDs[i] != want {
-			t.Fatalf("bisq ids[%d] = %q, want %q", i, got["bisq"].IDs[i], want)
+		if bisq.IDs[i] != want {
+			t.Fatalf("bisq ids[%d] = %q, want %q", i, bisq.IDs[i], want)
 		}
+	}
+}
+
+// snapshotExchangeEntry mirrors one per-exchange object in the snapshot_log
+// payload. The payload also carries markets/skipped_currencies keys, so tests
+// decode the envelope first and then the named exchange entry — a flat decode
+// would choke on the array-valued skipped_currencies key.
+type snapshotExchangeEntry struct {
+	Count   int      `json:"count"`
+	IDs     []string `json:"ids"`
+	Offline bool     `json:"offline"`
+	Status  string   `json:"status"`
+}
+
+func decodeSnapshotPayload(t *testing.T, payload []byte) map[string]json.RawMessage {
+	t.Helper()
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	return envelope
+}
+
+func decodeSnapshotExchangeEntry(t *testing.T, payload []byte, name string) snapshotExchangeEntry {
+	t.Helper()
+	return decodeSnapshotExchangeEntries(t, payload, name)[name]
+}
+
+func decodeSnapshotExchangeEntries(t *testing.T, payload []byte, names ...string) map[string]snapshotExchangeEntry {
+	t.Helper()
+	envelope := decodeSnapshotPayload(t, payload)
+	out := make(map[string]snapshotExchangeEntry, len(names))
+	for _, name := range names {
+		raw, ok := envelope[name]
+		if !ok {
+			continue
+		}
+		var entry snapshotExchangeEntry
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			t.Fatalf("unmarshal %s entry: %v", name, err)
+		}
+		out[name] = entry
+	}
+	return out
+}
+
+// The per-market breakdown must record every attempted market — including
+// complete-but-empty books (the "fetched, book empty" proof) and failed
+// censuses — plus the currencies skipped for lack of a reference price,
+// while leaving the per-exchange summary (and its total) untouched.
+func TestSnapshotLogPayloadIncludesMarketBreakdown(t *testing.T) {
+	exchangeData := make(exchangeSnapshotData)
+	recordFetchResult(exchangeData, "bisq2", &fetchResult{Offers: []offer{{OfferID: "x"}}})
+
+	timings := newFetchTimings()
+	timings.addStatus("bisq2", fetchStatusComplete)
+	timings.addStatus("bisq2", fetchStatusIncomplete)
+
+	detail := snapshotLogDetail{
+		Markets: map[liveMarket]marketOutcome{
+			{exchange: "bisq2", fiat: "EUR", direction: "ask"}: {Count: 1, Status: fetchStatusComplete, DurationMS: 300},
+			{exchange: "bisq2", fiat: "USD", direction: "ask"}: {Count: 0, Status: fetchStatusComplete, DurationMS: 280},
+			{exchange: "bisq", fiat: "EUR", direction: "bid"}:  {Count: 0, Status: fetchStatusFailed, DurationMS: 12},
+		},
+		SkippedCurrencies: []string{"NOK"},
+	}
+	payload, total, err := buildSnapshotLogPayload(exchangeData, nil, timings, detail)
+	if err != nil {
+		t.Fatalf("buildSnapshotLogPayload: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1", total)
+	}
+
+	envelope := decodeSnapshotPayload(t, payload)
+
+	var markets map[string]struct {
+		Count      int    `json:"count"`
+		Status     string `json:"status"`
+		DurationMS int64  `json:"duration_ms"`
+	}
+	if err := json.Unmarshal(envelope["markets"], &markets); err != nil {
+		t.Fatalf("unmarshal markets: %v", err)
+	}
+	want := map[string]struct {
+		count    int
+		status   string
+		duration int64
+	}{
+		"bisq2/EUR/ask": {1, "complete", 300},
+		"bisq2/USD/ask": {0, "complete", 280},
+		"bisq/EUR/bid":  {0, "failed", 12},
+	}
+	if len(markets) != len(want) {
+		t.Fatalf("markets = %#v, want %d entries", markets, len(want))
+	}
+	for key, w := range want {
+		got, ok := markets[key]
+		if !ok {
+			t.Fatalf("markets missing %q: %#v", key, markets)
+		}
+		if got.Count != w.count || got.Status != w.status || got.DurationMS != w.duration {
+			t.Fatalf("markets[%q] = %+v, want count=%d status=%q duration=%d", key, got, w.count, w.status, w.duration)
+		}
+	}
+
+	var skipped []string
+	if err := json.Unmarshal(envelope["skipped_currencies"], &skipped); err != nil {
+		t.Fatalf("unmarshal skipped_currencies: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != "NOK" {
+		t.Fatalf("skipped_currencies = %#v, want [NOK]", skipped)
+	}
+
+	// Exchange summary keeps its exact shape for dbmetrics.
+	bisq2 := decodeSnapshotExchangeEntry(t, payload, "bisq2")
+	if bisq2.Count != 1 {
+		t.Fatalf("bisq2 count = %d, want 1", bisq2.Count)
+	}
+}
+
+// With no market detail the payload still carries empty markets and skipped
+// objects so consumers can rely on the keys' presence.
+func TestSnapshotLogPayloadDefaultsEmptyMarketDetail(t *testing.T) {
+	exchangeData := make(exchangeSnapshotData)
+	recordFetchResult(exchangeData, "bisq", &fetchResult{})
+
+	payload, _, err := buildSnapshotLogPayload(exchangeData, nil, newFetchTimings(), snapshotLogDetail{})
+	if err != nil {
+		t.Fatalf("buildSnapshotLogPayload: %v", err)
+	}
+	envelope := decodeSnapshotPayload(t, payload)
+
+	var markets map[string]any
+	if err := json.Unmarshal(envelope["markets"], &markets); err != nil {
+		t.Fatalf("unmarshal markets: %v", err)
+	}
+	if markets == nil || len(markets) != 0 {
+		t.Fatalf("markets = %#v, want empty object", markets)
+	}
+	var skipped []string
+	if err := json.Unmarshal(envelope["skipped_currencies"], &skipped); err != nil {
+		t.Fatalf("unmarshal skipped_currencies: %v", err)
+	}
+	if skipped == nil || len(skipped) != 0 {
+		t.Fatalf("skipped_currencies = %#v, want empty array", skipped)
 	}
 }
 

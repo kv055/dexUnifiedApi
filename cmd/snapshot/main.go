@@ -236,6 +236,27 @@ type liveMarket struct {
 	direction string
 }
 
+// marketOutcome is one market job's census result for a single cycle: how
+// many offers were persisted, the final census status, and the fetch effort.
+type marketOutcome struct {
+	Count      int
+	Status     fetchStatus
+	DurationMS int64
+}
+
+func marketOutcomeKey(m liveMarket) string {
+	return m.exchange + "/" + m.fiat + "/" + m.direction
+}
+
+// snapshotLogDetail carries per-cycle diagnostics that do not fit the
+// per-exchange summary: the census outcome of every attempted market job and
+// the fiat currencies skipped for lack of a reference price. Serialized as
+// additive top-level keys; per-exchange entries keep their exact shape.
+type snapshotLogDetail struct {
+	Markets           map[liveMarket]marketOutcome
+	SkippedCurrencies []string
+}
+
 type livePayload struct {
 	ID                 int64    `json:"id"`
 	Exchange           string   `json:"exchange"`
@@ -350,7 +371,7 @@ func fetchBisqCurrency(ctx context.Context, direction, currency string, btcPrice
 		offers = append(offers, mapped)
 	}
 
-	fmt.Printf("[Bisq] Found %d %s offers\n", len(offers), direction)
+	fmt.Printf("[Bisq] Found %d %s %s offers\n", len(offers), currency, direction)
 	return completeFetch(float64(btcPrice), offers)
 }
 
@@ -577,7 +598,7 @@ func fetchBisq2Currency(ctx context.Context, direction, currency string, btcPric
 		offers = append(offers, newOffer)
 	}
 
-	fmt.Printf("[Bisq2] Found %d %s offers\n", len(offers), direction)
+	fmt.Printf("[Bisq2] Found %d %s %s offers\n", len(offers), currency, direction)
 	return completeFetch(float64(btcPrice), offers)
 }
 
@@ -984,7 +1005,7 @@ func peachResult(all []peachOffer, direction, currency string, btcPrice int, com
 		}
 		offers = append(offers, mapped)
 	}
-	fmt.Printf("[PeachBitcoin] Found %d %s offers\n", len(offers), direction)
+	fmt.Printf("[PeachBitcoin] Found %d %s %s offers\n", len(offers), currency, direction)
 	if complete {
 		return completeFetch(float64(btcPrice), offers)
 	}
@@ -1338,7 +1359,7 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 			byKey[coordinatorID+"\x00"+o.OfferID] = o
 		}
 		okCount++
-		fmt.Printf("[Robosats] Found %d %s offers (coordinator=%s status=%d response_type=%s)\n", len(offers), direction, onion, resp.StatusCode, responseType)
+		fmt.Printf("[Robosats] Found %d %s %s offers (coordinator=%s status=%d response_type=%s)\n", len(offers), currency, direction, onion, resp.StatusCode, responseType)
 	}
 
 	if okCount == 0 {
@@ -2053,7 +2074,7 @@ func (t *fetchTimings) captureStatus(exchange string) fetchStatus {
 	return fetchStatusComplete
 }
 
-func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string, timings *fetchTimings) ([]byte, int, error) {
+func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string, timings *fetchTimings, detail snapshotLogDetail) ([]byte, int, error) {
 	exchanges := make(map[string]any)
 	total := 0
 	for ex, ids := range exchangeData {
@@ -2090,12 +2111,32 @@ func buildSnapshotLogPayload(exchangeData exchangeSnapshotData, offline []string
 			entry["failed_fetches"] = fails
 		}
 	}
+	// Per-market census outcomes. A "count": 0 entry with status "complete"
+	// proves the book was fetched and empty; a market with no entry at all
+	// was never attempted (unsupported combo or skipped currency — see
+	// skipped_currencies). dbmetrics iterates this payload with jsonb_each,
+	// so its scan explicitly selects keys carrying "count"; these additive
+	// keys keep that scan intact (see scanSnapshotLog).
+	markets := make(map[string]any, len(detail.Markets))
+	for m, o := range detail.Markets {
+		markets[marketOutcomeKey(m)] = map[string]any{
+			"count":       o.Count,
+			"status":      string(o.Status),
+			"duration_ms": o.DurationMS,
+		}
+	}
+	exchanges["markets"] = markets
+	skipped := detail.SkippedCurrencies
+	if skipped == nil {
+		skipped = []string{}
+	}
+	exchanges["skipped_currencies"] = skipped
 	jsonBytes, err := json.Marshal(exchanges)
 	return jsonBytes, total, err
 }
 
-func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData, offline []string, timings *fetchTimings, cycle time.Duration) {
-	jsonBytes, total, err := buildSnapshotLogPayload(exchangeData, offline, timings)
+func writeSnapshotLog(sdb *dbutil.DB, exchangeData exchangeSnapshotData, offline []string, timings *fetchTimings, detail snapshotLogDetail, cycle time.Duration) {
+	jsonBytes, total, err := buildSnapshotLogPayload(exchangeData, offline, timings, detail)
 	if err != nil {
 		slog.Error("snapshot log encode error", "err", err)
 		return
@@ -2129,12 +2170,18 @@ func main() {
 	robosatsCoordinators = loadRobosatsCoordinators(ctx, clearnetClient(), registryURL, defaultRobosatsFederationCachePath, robosatsFederationRefreshInterval(), robosatsCoordinators)
 
 	refPrices := make(map[string]int, len(fiat.Enabled))
+	var skippedCurrencies []string
 	for _, currency := range fiat.Enabled {
 		if price := fetchReferencePrice(strings.ToLower(currency)); price > 0 {
 			refPrices[currency] = price
 			slog.InfoContext(ctx, "reference price", "fiat", currency, "price", price)
 		} else {
-			slog.WarnContext(ctx, "could not get reference price; skipping currency", "fiat", currency)
+			// Error, not warning: every market job for this fiat is
+			// dropped below, so this is a coverage outage for the
+			// currency, not a routine miss. Also recorded in the
+			// snapshot_log skipped_currencies key.
+			slog.ErrorContext(ctx, "could not get reference price; skipping currency", "fiat", currency)
+			skippedCurrencies = append(skippedCurrencies, currency)
 		}
 	}
 	if len(refPrices) == 0 {
@@ -2225,6 +2272,7 @@ func main() {
 	confirmedMarkets := make(map[liveMarket]struct{})
 	liveOffers := make([]livePayload, 0)
 	timings := newFetchTimings()
+	marketOutcomes := make(map[liveMarket]marketOutcome)
 	serverURL := os.Getenv("SERVER_INTERNAL_URL")
 	if serverURL == "" {
 		serverURL = "http://localhost:5010"
@@ -2244,6 +2292,7 @@ func main() {
 			if status == fetchStatusFailed {
 				timings.failures[f.name]++
 				timings.addStatus(f.name, fetchStatusFailed)
+				marketOutcomes[job.market] = marketOutcome{Status: fetchStatusFailed, DurationMS: fetched.duration.Milliseconds()}
 				continue
 			}
 			before := len(result.Offers)
@@ -2253,9 +2302,11 @@ func main() {
 			}
 			if !recordFetchResult(exchangeData, f.name, result) {
 				timings.addStatus(f.name, fetchStatusFailed)
+				marketOutcomes[job.market] = marketOutcome{Status: fetchStatusFailed, DurationMS: fetched.duration.Milliseconds()}
 				continue
 			}
 			confirm := false
+			persistedCount := 0
 			if len(result.Offers) == 0 {
 				confirm = status == fetchStatusComplete
 			} else {
@@ -2269,10 +2320,12 @@ func main() {
 					status = fetchStatusIncomplete
 				} else {
 					liveOffers = append(liveOffers, persisted...)
+					persistedCount = len(persisted)
 					confirm = status == fetchStatusComplete
 				}
 			}
 			timings.addStatus(f.name, status)
+			marketOutcomes[job.market] = marketOutcome{Count: persistedCount, Status: status, DurationMS: fetched.duration.Milliseconds()}
 			if confirm {
 				confirmedMarkets[job.market] = struct{}{}
 			}
@@ -2312,7 +2365,10 @@ func main() {
 	stage(ctx, "snapshot.analyze_closed_offers", func() { analyzeClosedOffers(sdb) })
 	stage(ctx, "snapshot.prune_order_lifecycle", func() { pruneOrderLifecycle(sdb) })
 
-	writeSnapshotLog(sdb, exchangeData, offline, timings, time.Since(cycleStart))
+	writeSnapshotLog(sdb, exchangeData, offline, timings, snapshotLogDetail{
+		Markets:           marketOutcomes,
+		SkippedCurrencies: skippedCurrencies,
+	}, time.Since(cycleStart))
 	total := 0
 	names := make([]string, 0, len(exchangeData))
 	for name, ids := range exchangeData {

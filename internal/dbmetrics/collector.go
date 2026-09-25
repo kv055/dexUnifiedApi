@@ -339,12 +339,16 @@ func (c *Collector) scanSnapshotLog(ctx context.Context, s *snapshot) {
 		ORDER BY timestamp DESC LIMIT 1`).Scan(scanNull(&s.cycleDuration))
 
 	// Per-exchange counts + fetch timings from the latest run's JSONB payload.
+	// The payload also carries additive diagnostic keys (markets breakdown,
+	// skipped_currencies) that have no "count" — skip them so a NULL cast
+	// cannot abort the whole scan.
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT key, (value->>'count')::float8,
 		       COALESCE((value->>'duration_ms')::float8, -1),
 		       COALESCE((value->>'failed_fetches')::float8, -1)
 		FROM snapshot_log, jsonb_each(exchanges)
-		WHERE id = (SELECT id FROM snapshot_log ORDER BY timestamp DESC LIMIT 1)`)
+		WHERE id = (SELECT id FROM snapshot_log ORDER BY timestamp DESC LIMIT 1)
+		  AND (value->>'count') IS NOT NULL`)
 	if err != nil {
 		logErr("snapshot_log exchanges", err)
 		return

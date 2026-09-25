@@ -83,6 +83,13 @@ does not carry the authoritative book; the unified API reloads rows where
 
 Writes per-exchange offer IDs, summed market-fetch effort, aggregate census
 status, hard-failure count, and total cycle wall time to `snapshot_log`.
+Two additive top-level keys carry per-market diagnostics: `markets` maps each
+attempted `exchange/fiat/direction` job to its persisted offer count, final
+census status, and fetch duration (a `count: 0` entry with status `complete`
+proves the book was fetched and empty; a missing entry was never attempted),
+and `skipped_currencies` lists fiats dropped for lack of a reference price.
+Per-exchange entries keep their exact shape because `dbmetrics` derives
+`dex_exchange_up` from them via `jsonb_each`.
 
 ## Failure Behavior
 

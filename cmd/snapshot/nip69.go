@@ -79,7 +79,7 @@ func fetchNIP69CurrencyFrom(ctx context.Context, platform string, relays []strin
 		}
 		offers = append(offers, mapped)
 	}
-	fmt.Printf("[%s] Found %d %s offers\n", displayNIP69(platform), len(offers), direction)
+	fmt.Printf("[%s] Found %d %s %s offers\n", displayNIP69(platform), len(offers), currency, direction)
 	if !book.complete && len(offers) == 0 {
 		return nil
 	}
