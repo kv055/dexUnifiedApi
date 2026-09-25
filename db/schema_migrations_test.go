@@ -558,3 +558,69 @@ func TestEnsureUnifiedSchemaRejectsLegacyEnumNormalizationCollisions(t *testing.
 		t.Fatal("legacy exchange constraint was not restored by rollback")
 	}
 }
+
+// Legacy prod databases converted offers.exchange and snapshots.exchange to
+// the dex_provider enum but kept the varchar-era CHECK constraints, which
+// whitelist only the five pre-mostro providers. Every mostro write since has
+// failed with SQLSTATE 23514 even though the enum allows 'mostro'. This
+// models that state and asserts the repair migration drops the stale checks
+// while the enum keeps enforcing the allowlist.
+func TestEnsureUnifiedSchemaDropsStaleProviderExchangeChecks(t *testing.T) {
+	db := testdb.OpenUninitialized(t)
+	if _, err := db.Exec(`
+		CREATE TYPE dex_provider AS ENUM ('bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin', 'mostro');
+		CREATE TYPE trade_direction AS ENUM ('bid', 'ask');
+		CREATE TYPE fiat_currency AS ENUM ('EUR', 'USD', 'GBP', 'AUD', 'CHF', 'SEK', 'NOK', 'CAD');
+		CREATE TABLE offers (
+			id BIGSERIAL PRIMARY KEY,
+			exchange dex_provider NOT NULL,
+			CONSTRAINT offers_exchange_check CHECK (
+				(exchange)::text = ANY (ARRAY['bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin'])
+			)
+		);
+		CREATE TABLE snapshots (
+			id BIGSERIAL PRIMARY KEY,
+			exchange dex_provider NOT NULL,
+			fiat_currency fiat_currency NOT NULL,
+			direction trade_direction NOT NULL,
+			btc_price DOUBLE PRECISION NOT NULL CHECK (btc_price > 0),
+			CONSTRAINT snapshots_exchange_check CHECK (
+				(exchange)::text = ANY (ARRAY['bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin'])
+			)
+		);
+	`); err != nil {
+		t.Fatalf("create legacy exchange tables: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO snapshots (exchange, fiat_currency, direction, btc_price) VALUES ('mostro', 'EUR', 'ask', 100000)`); err == nil {
+		t.Fatal("stale snapshots check accepted mostro before migration")
+	}
+	markExistingSchemaFilesApplied(t, db)
+	markExistingMigrationFilesAppliedExcept(t, db, "20260925200000_drop_stale_provider_exchange_checks.sql")
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("apply stale exchange check repair: %v", err)
+	}
+
+	for _, table := range []string{"offers", "snapshots"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pg_constraint WHERE conname = $1`, table+"_exchange_check").Scan(&count); err != nil {
+			t.Fatalf("count %s constraint: %v", table, err)
+		}
+		if count != 0 {
+			t.Errorf("stale %s_exchange_check constraint still present", table)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO snapshots (exchange, fiat_currency, direction, btc_price) VALUES ('mostro', 'EUR', 'ask', 100000), ('mostro', 'USD', 'bid', 100000)`); err != nil {
+		t.Errorf("mostro snapshots rejected after repair: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO offers (exchange) VALUES ('mostro')`); err != nil {
+		t.Errorf("mostro offers rejected after repair: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO snapshots (exchange, fiat_currency, direction, btc_price) VALUES ('kraken', 'EUR', 'ask', 100000)`); err == nil {
+		t.Error("unknown exchange was accepted: enum enforcement lost")
+	}
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("reapply schema after repair: %v", err)
+	}
+}
