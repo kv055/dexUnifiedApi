@@ -97,6 +97,48 @@ func TestFetchRobosatsNotFoundObjectIsEmptyBook(t *testing.T) {
 	}
 }
 
+// Live coordinators answer HTTP 404 with a not_found JSON body when they
+// hold no orders for the market. That is a complete empty book, not a failed
+// fetch: the market must stay complete when every coordinator answers this
+// way or with a real book.
+func TestFetchRobosats404NotFoundIsEmptyBook(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "gone.test":
+			return jsonResponse(http.StatusNotFound, `{"not_found":"No orders found, be the first to make one"}`), nil
+		default:
+			return jsonResponse(http.StatusOK, `[{
+			"id": 9,
+			"price": 62000,
+			"premium": 0,
+			"amount": 500,
+			"min_amount": 0,
+			"max_amount": 0,
+			"payment_method": "SEPA",
+			"bond_size": 3
+		}]`), nil
+		}
+	})}
+
+	result := fetchRobosatsCurrencyFrom(
+		context.Background(),
+		"ask",
+		"NOK",
+		62000,
+		client,
+		[]robosatsCoordinator{{Alias: "bazaar", Onion: "http://gone.test"}, {Alias: "lake", Onion: "http://book.test"}},
+	)
+	if result == nil {
+		t.Fatal("result = nil, want book despite 404 not_found peer")
+	}
+	if len(result.Offers) != 1 || result.Offers[0].OfferID != "lake:9" {
+		t.Fatalf("offers = %#v, want namespaced order lake:9", result.Offers)
+	}
+	if result.status() != fetchStatusComplete {
+		t.Fatalf("status = %q, want complete when 404 carries not_found", result.status())
+	}
+}
+
 func TestFetchRobosatsUnionsCoordinatorsAndKeepsGoingAfterNotFound(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Host {

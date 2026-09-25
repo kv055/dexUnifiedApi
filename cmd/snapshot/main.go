@@ -1339,6 +1339,15 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 			continue
 		}
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			// Coordinators answer HTTP 404 with a not_found JSON body when
+			// they hold no orders for the market. That is a complete empty
+			// book, not a failed fetch: only bodies that do not decode as
+			// not_found count against the census.
+			if _, responseType, err := decodeRobosatsBook(body); err == nil && responseType == "not_found" {
+				okCount++
+				fmt.Printf("[Robosats] Found 0 %s %s offers (coordinator=%s status=%d response_type=%s)\n", currency, direction, onion, resp.StatusCode, responseType)
+				continue
+			}
 			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=http_error, trying next...\n", onion, resp.StatusCode)
 			failCount++
 			continue
