@@ -177,6 +177,52 @@ func TestEnsureUnifiedSchemaAppliesSupportedRoutingProfilesMigration(t *testing.
 	}
 }
 
+// The app_settings table is deploy-managed through the privileged schema
+// runner because the dex_monitor role holds no CREATE privilege: the monitor
+// must never depend on creating it at runtime (SQLSTATE 42501 took down a
+// deploy). This asserts the migration provides exactly the columns the
+// monitor's store expects.
+func TestEnsureUnifiedSchemaCreatesAppSettings(t *testing.T) {
+	db := testdb.Open(t)
+
+	rows, err := db.Query(`
+		SELECT column_name, data_type, is_nullable, column_default
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'app_settings'
+	`)
+	if err != nil {
+		t.Fatalf("read app_settings columns: %v", err)
+	}
+	defer rows.Close()
+	got := make(map[string]string)
+	for rows.Next() {
+		var name, dataType, nullable string
+		var def *string
+		if err := rows.Scan(&name, &dataType, &nullable, &def); err != nil {
+			t.Fatalf("scan app_settings column: %v", err)
+		}
+		got[name] = dataType
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate app_settings columns: %v", err)
+	}
+	want := map[string]string{
+		"key":        "text",
+		"updated_by": "text",
+		"updated_at": "timestamp with time zone",
+		"value":      "text",
+		"encrypted":  "boolean",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("app_settings columns = %#v, want %d columns", got, len(want))
+	}
+	for name, typ := range want {
+		if got[name] != typ {
+			t.Fatalf("app_settings.%s type = %q, want %q (all columns: %#v)", name, got[name], typ, got)
+		}
+	}
+}
+
 func TestNewMigrationFilenamesUseTimestamps(t *testing.T) {
 	entries, err := os.ReadDir("migrations")
 	if err != nil {
