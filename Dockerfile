@@ -32,6 +32,10 @@ USER appuser
 
 EXPOSE 5010
 
+# Deploy and local tooling run `./server migrate` only on images carrying this
+# label: older binaries ignore the argument and start a second API server.
+LABEL dexarbtrading.unified-api.migrate="1"
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:5010/health || exit 1
 

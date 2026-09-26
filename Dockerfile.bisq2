@@ -68,7 +68,10 @@ RUN useradd -m -s /bin/sh appuser && \
 # REST API port
 EXPOSE 8090
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
+# Allow more cold-start margin: run #227 was still unready after six minutes.
+# This accommodates slow bootstrap; healthcheck output is needed to diagnose
+# future failures rather than assuming every timeout is a false positive.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=480s --retries=3 \
     CMD /usr/bin/timeout 3s /bin/bash -lc '</dev/tcp/127.0.0.1/8090'
 
 ENTRYPOINT ["/usr/local/bin/bisq2-startup.sh"]

@@ -3,15 +3,36 @@ package dbutil
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 //go:embed schema/*.sql migrations/*.sql
 var schemaFiles embed.FS
+
+// migrationLockRetry bounds how long one migration waits for table locks.
+// Migrations run while the previous release still serves traffic, and
+// PostgreSQL queues every later query on a table behind a waiting exclusive
+// lock request, so a long wait would stall the live release.
+type migrationLockRetry struct {
+	timeout  time.Duration
+	attempts int
+	delay    time.Duration
+}
+
+var defaultMigrationLockRetry = migrationLockRetry{
+	timeout:  5 * time.Second,
+	attempts: 10,
+	delay:    2 * time.Second,
+}
 
 var baselineMigrationFiles = []string{
 	"28_transactional_liquidity_target_direction.sql",
@@ -24,6 +45,32 @@ var baselineMigrationFiles = []string{
 	"34_payment_method_chat_template_directions.sql",
 	"34_transactional_liquidity_lightning_source.sql",
 	"35_cex_provider_fee_units.sql",
+}
+
+// CheckUnifiedSchema verifies this binary's schema history without applying DDL.
+// Additional recorded migrations are allowed so an older binary can roll back
+// onto a database with newer, backward-compatible migrations.
+func CheckUnifiedSchema(db *DB) error {
+	for _, dir := range []string{"schema", "migrations"} {
+		table := "schema_migrations"
+		if dir == "migrations" {
+			table = "migration_migrations"
+		}
+		applied, err := appliedFiles(db, table)
+		if err != nil {
+			return err
+		}
+		entries, err := schemaFiles.ReadDir(dir)
+		if err != nil {
+			return fmt.Errorf("read %s directory: %w", dir, err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") && !applied[entry.Name()] {
+				return fmt.Errorf("unapplied database file: %s/%s", dir, entry.Name())
+			}
+		}
+	}
+	return nil
 }
 
 // EnsureUnifiedSchema applies the base schema and initialized forward-only
@@ -41,7 +88,7 @@ func EnsureUnifiedSchema(db *DB) error {
 		return err
 	}
 
-	if err := applyDir(db, schemaFiles, "schema", "schema_migrations", applied); err != nil {
+	if err := applyDir(db, schemaFiles, "schema", "schema_migrations", applied, defaultMigrationLockRetry); err != nil {
 		return err
 	}
 	return ensureUnifiedMigrations(db)
@@ -67,13 +114,13 @@ func ensureUnifiedMigrations(db *DB) error {
 	if err != nil {
 		return err
 	}
-	return applyDir(db, schemaFiles, "migrations", "migration_migrations", applied)
+	return applyDir(db, schemaFiles, "migrations", "migration_migrations", applied, defaultMigrationLockRetry)
 }
 
 // applyDir reads .sql files from an embedded directory, sorts them, and applies
 // any that haven't been recorded in its migration tracking table yet.
-func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[string]bool) error {
-	entries, err := fsys.ReadDir(dir)
+func applyDir(db *DB, fsys fs.FS, dir, migrationTable string, applied map[string]bool, retry migrationLockRetry) error {
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return fmt.Errorf("read %s directory: %w", dir, err)
 	}
@@ -97,39 +144,64 @@ func applyDir(db *DB, fsys embed.FS, dir, migrationTable string, applied map[str
 			return fmt.Errorf("read %s/%s: %w", dir, filename, err)
 		}
 
-		tx, err := db.DB.Begin()
+		for attempt := 1; ; attempt++ {
+			err = applyFile(db, dir, migrationTable, filename, string(sqlBytes), retry.timeout)
+			if err == nil || attempt >= retry.attempts || !isLockConflict(err) {
+				break
+			}
+			slog.Warn("database migration lock conflict; retrying",
+				"file", dir+"/"+filename, "attempt", attempt, "attempts", retry.attempts, "err", err)
+			time.Sleep(retry.delay)
+		}
 		if err != nil {
-			return fmt.Errorf("begin %s/%s: %w", dir, filename, err)
-		}
-		if dir == "migrations" && filename == legacyVarcharEnumRepairFile {
-			if err := prepareLegacyVarcharEnumRepair(tx); err != nil {
-				_ = tx.Rollback()
-				return fmt.Errorf("prepare %s/%s: %w", dir, filename, err)
-			}
-		}
-
-		if _, err := tx.Exec(string(sqlBytes)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
-		}
-		if dir == "migrations" && filename == legacyVarcharEnumRepairFile {
-			if err := finalizeLegacyVarcharEnumRepair(tx); err != nil {
-				_ = tx.Rollback()
-				return fmt.Errorf("finalize %s/%s: %w", dir, filename, err)
-			}
-		}
-		if _, err := tx.Exec(`INSERT INTO `+migrationTable+` (filename) VALUES ($1)`, filename); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record %s/%s: %w", dir, filename, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit %s/%s: %w", dir, filename, err)
+			return err
 		}
 
 		applied[filename] = true
 	}
 
 	return nil
+}
+
+// applyFile applies one SQL file and records it in the same transaction, so a
+// failed attempt leaves neither schema changes nor a tracking row behind.
+func applyFile(db *DB, dir, migrationTable, filename, sqlText string, lockTimeout time.Duration) error {
+	tx, err := db.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("begin %s/%s: %w", dir, filename, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(fmt.Sprintf(`SET LOCAL lock_timeout = '%dms'`, lockTimeout.Milliseconds())); err != nil {
+		return fmt.Errorf("set lock timeout for %s/%s: %w", dir, filename, err)
+	}
+	if dir == "migrations" && filename == legacyVarcharEnumRepairFile {
+		if err := prepareLegacyVarcharEnumRepair(tx); err != nil {
+			return fmt.Errorf("prepare %s/%s: %w", dir, filename, err)
+		}
+	}
+	if _, err := tx.Exec(sqlText); err != nil {
+		return fmt.Errorf("apply %s/%s: %w", dir, filename, err)
+	}
+	if dir == "migrations" && filename == legacyVarcharEnumRepairFile {
+		if err := finalizeLegacyVarcharEnumRepair(tx); err != nil {
+			return fmt.Errorf("finalize %s/%s: %w", dir, filename, err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO `+migrationTable+` (filename) VALUES ($1)`, filename); err != nil {
+		return fmt.Errorf("record %s/%s: %w", dir, filename, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit %s/%s: %w", dir, filename, err)
+	}
+	return nil
+}
+
+// isLockConflict reports a lock_timeout expiry or a deadlock abort. PostgreSQL
+// rolls back the whole transaction in both cases, so the file can be retried.
+func isLockConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
 }
 
 const legacyVarcharEnumRepairFile = "20260830153000_repair_legacy_varchar_enums.sql"

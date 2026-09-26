@@ -172,26 +172,18 @@ func runningUnderGoTest() bool {
 	return strings.HasSuffix(os.Args[0], ".test") || strings.HasSuffix(os.Args[0], ".test.exe")
 }
 
-func main() {
-	logging.Init(serviceName)
-	tpShutdown, err := tracing.Init(context.Background(), serviceName)
+// prepareDatabase reconciles roles before authenticating as the application.
+// Startup retains this step so rollback can restore the previous passwords.
+// Schema migrations and seeds run only through the migrate subcommand.
+func prepareDatabase() (adminDB, appDB *dbutil.DB, err error) {
+	adminDB, err = dbutil.Open(adminDatabaseURL)
 	if err != nil {
-		slog.Warn("tracing init failed; continuing without traces", "err", err)
+		return nil, nil, fmt.Errorf("failed to open admin database: %w", err)
 	}
-	defer func() { _ = tpShutdown(context.Background()) }()
-
-	adminDB, err := dbutil.Open(adminDatabaseURL)
-	if err != nil {
-		slog.Error("failed to open admin database", "err", err)
-		os.Exit(1)
-	}
-	defer adminDB.Close()
-
 	if err := adminDB.Ping(); err != nil {
-		slog.Error("failed to ping admin database", "err", err)
-		os.Exit(1)
+		adminDB.Close()
+		return nil, nil, fmt.Errorf("failed to ping admin database: %w", err)
 	}
-
 	if err := dbutil.EnsureAppRoles(adminDB, dbutil.RoleBootstrapConfig{
 		DatabaseName:           config.EnvOrDefault("POSTGRES_DB", "dexarb"),
 		UnifiedAPIPassword:     config.RequireEnv("POSTGRES_UNIFIED_API_PASSWORD"),
@@ -200,26 +192,74 @@ func main() {
 		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
 		GrafanaROPassword:      config.EnvOrDefault("POSTGRES_GRAFANA_RO_PASSWORD", ""),
 	}); err != nil {
-		slog.Error("database admin setup error", "err", err)
-		os.Exit(1)
+		adminDB.Close()
+		return nil, nil, fmt.Errorf("database admin setup error: %w", err)
+	}
+	appDB, err = dbutil.Open(databaseURL)
+	if err != nil {
+		adminDB.Close()
+		return nil, nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	if err := appDB.Ping(); err != nil {
+		adminDB.Close()
+		appDB.Close()
+		return nil, nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+	return adminDB, appDB, nil
+}
+
+// runMigrate applies roles, schema and seeds before candidate app activation.
+// DDL uses the existing schema owner to preserve ownership and default grants.
+func runMigrate() error {
+	adminDB, appDB, err := prepareDatabase()
+	if err != nil {
+		return err
+	}
+	defer adminDB.Close()
+	defer appDB.Close()
+	if err := dbutil.EnsureUnifiedSchema(appDB); err != nil {
+		return fmt.Errorf("schema migration error: %w", err)
+	}
+	if err := dbutil.SeedPaymentMethods(appDB); err != nil {
+		return fmt.Errorf("payment methods seed error: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	logging.Init(serviceName)
+	tpShutdown, err := tracing.Init(context.Background(), serviceName)
+	if err != nil {
+		slog.Warn("tracing init failed; continuing without traces", "err", err)
+	}
+	defer func() { _ = tpShutdown(context.Background()) }()
+
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := runMigrate(); err != nil {
+			slog.Error("database migration failed", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("database migration complete")
+		return
 	}
 
-	db, err = dbutil.Open(databaseURL)
+	adminDB, appDB, err := prepareDatabase()
 	if err != nil {
-		slog.Error("failed to open database", "err", err)
+		slog.Error("database setup error", "err", err)
 		os.Exit(1)
 	}
+	defer adminDB.Close()
+	db = appDB
 	defer db.Close()
+	if err := dbutil.CheckUnifiedSchema(db); err != nil {
+		slog.Error("database schema is not ready; run ./server migrate before startup", "err", err)
+		os.Exit(1)
+	}
 
 	// Shared by HTTP handlers, the snapshot-push ingest, account-health checks and the
 	// dbmetrics poller. 4 was too small and caused contention; Postgres allows 100.
 	db.SetMaxOpenConns(12)
 	db.SetMaxIdleConns(4)
-
-	if err := db.Ping(); err != nil {
-		slog.Error("failed to ping database", "err", err)
-		os.Exit(1)
-	}
 
 	// One orchestrator serves every CEX: it picks the cheapest non-excluded CEX
 	// internally via the cextrading engine. The map is kept (the shared instance
@@ -232,14 +272,6 @@ func main() {
 	}
 	tradeRouteOptimizer = tradecost.NewTradeRouteOptimizer(tradeCostEstimators)
 
-	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
-		slog.Error("schema init error", "err", err)
-		os.Exit(1)
-	}
-	if err := dbutil.SeedPaymentMethods(db); err != nil {
-		slog.Error("payment methods seed error", "err", err)
-		os.Exit(1)
-	}
 	credentialStore := exchangecredentials.NewStore(db.DB)
 
 	// Dashboard login session: unified-api only VALIDATES the shared dex_session

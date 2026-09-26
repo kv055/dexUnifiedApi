@@ -12,10 +12,23 @@ On startup the server:
 2. Connects to Postgres as the admin role.
 3. Ensures application roles exist for the unified API, monitor, MM controller, and fiat controller.
 4. Opens the unified API database connection.
-5. Applies the unified schema files.
+5. Checks that the required schema and migration files have already been applied; fails with a migration instruction if any are missing.
 6. Starts CEX price feeds and trade-cost estimators.
 7. Starts periodic Bisq account-health checks.
 8. Serves public and internal HTTP endpoints on `LISTEN_ADDR`.
+
+The `./server migrate` command bootstraps roles, then applies schema and payment-method seeds as `dex_unified_api`, preserving schema ownership and default grants. Deploy runs it before activating app containers, but only on images carrying the `dexarbtrading.unified-api.migrate` label from the `Dockerfile`: older binaries ignore the argument and start a full server. Startup still reconciles role passwords so rollback can restore the previous credentials, but neither the API nor snapshot worker applies schema migrations at startup. Migrations must remain backward-compatible with the previous release because rollback restores code and environment, not database contents.
+
+The previous release keeps serving while migrations run. Each migration file therefore waits at most 5 seconds for a table lock (`lock_timeout`) and is retried up to 10 times after a lock timeout or deadlock, instead of queueing live queries behind a pending exclusive lock.
+
+Every new file in `db/migrations/` must stay backward-compatible with the previous release, because rollback restores code but never the database. Follow expand/contract: one deploy only *adds* (nullable columns, tables, indexes, widened types), and a later deploy *removes* what the expand replaced. `DROP TABLE` and `DROP COLUMN` are never safe in the same deploy that stops using them. Each new file must end with a compat trailer stating its rollback story:
+
+```sql
+-- compat: backward-compatible
+-- rollback: old code ignores the new nullable premium_bps column
+```
+
+`TestNewMigrationsDeclareRollbackCompatibility` enforces the trailer, fails on drops, and warns on renames, `ALTER COLUMN TYPE`, and `NOT NULL` adds without a surviving default. The check lints file shape only; it cannot prove old queries keep working, so think through the previous release's statements before shipping.
 
 The snapshot worker is a separate binary/container. It talks to Bisq, HodlHodl, RoboSats, Tor, and price providers, writes snapshots to Postgres, and pushes the latest live offers to the API's internal endpoint.
 
@@ -153,9 +166,10 @@ PG_BACKUP_UPLOAD=false docker compose run --rm postgres-backup /app/pgbackup
 
 ## Local Development
 
-Run the API directly:
+With Postgres running and `.env` configured, migrate before running the API:
 
 ```bash
+go run ./cmd/server migrate
 go run ./cmd/server
 ```
 

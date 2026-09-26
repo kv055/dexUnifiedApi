@@ -2232,12 +2232,8 @@ func main() {
 		slog.ErrorContext(ctx, "failed to ping database", "err", err)
 		os.Exit(1)
 	}
-	if err := dbutil.EnsureUnifiedSchema(sdb); err != nil {
-		slog.ErrorContext(ctx, "failed to initialize schema", "err", err)
-		os.Exit(1)
-	}
-	if err := dbutil.SeedPaymentMethods(sdb); err != nil {
-		slog.ErrorContext(ctx, "failed to seed payment methods", "err", err)
+	if err := dbutil.CheckUnifiedSchema(sdb); err != nil {
+		slog.ErrorContext(ctx, "database schema is not ready; run the unified-api migrate command before startup", "err", err)
 		os.Exit(1)
 	}
 	// Canonicalization must run against the live payment_methods table, not the
