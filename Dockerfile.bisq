@@ -2,14 +2,14 @@
 
 FROM eclipse-temurin:21-jdk-jammy AS bisq-builder
 
-ARG BISQ_VERSION=1.10.8
+ARG BISQ_VERSION=1.10.9
 # Pinned source commit for v${BISQ_VERSION} (peeled from the upstream tag).
 # The tag is mutable upstream: cloning the floating tag reuses a stale cached
 # layer while patches move on, so the build must fetch this exact commit
 # (changing it also busts the clone layer cache). Bump BISQ_VERSION and
 # BISQ_COMMIT together via the Bisq version bump workflow; the
 # bisq-patches-apply job verifies patches against this same commit.
-ARG BISQ_COMMIT=1b5f317641e04368cd56d2c09af4860fac970136
+ARG BISQ_COMMIT=a01e2f92650a86f7a0cd467f54702ac93ef9b123
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -71,7 +71,7 @@ FROM eclipse-temurin:21-jre-jammy AS java-runtime
 
 FROM eclipse-temurin:21-jdk-jammy AS bisq-seed-helper-build
 
-ARG BISQ_VERSION=1.10.8
+ARG BISQ_VERSION=1.10.9
 
 COPY bisqseed/ExtractBisqSeed.java /src/ExtractBisqSeed.java
 COPY --from=bisq-builder /opt/bisq /opt/bisq
@@ -84,7 +84,7 @@ RUN mkdir -p /build && \
 
 FROM debian:bookworm-slim
 
-ARG BISQ_VERSION=1.10.8
+ARG BISQ_VERSION=1.10.9
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BISQ_VERSION=${BISQ_VERSION}
 ENV MALLOC_ARENA_MAX=4
