@@ -147,7 +147,7 @@ func fetchPeachUserReputation(ctx context.Context, userID string) (peachUserRepu
 	if resp.StatusCode != http.StatusOK {
 		return rep, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err := json.Unmarshal(body, &rep); err != nil {
 		return rep, err
 	}

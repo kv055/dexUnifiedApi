@@ -40,7 +40,7 @@ type executionQuoteResponse struct {
 
 func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 	var req executionQuoteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -157,7 +157,14 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		route.FiatAmount = fiatAmount
 		route.BTCAmount = btcAmount
 	}
-	maxBond := int64(math.Ceil(math.Max(0, bd.Capital.SecurityDepositBTC) * 1e8))
+	// Guard the float->satoshi conversions: an out-of-range float would
+	// otherwise wrap int64 and persist a corrupt bond/escrow amount.
+	bondBTC := bd.Capital.SecurityDepositBTC
+	if math.IsNaN(bondBTC) || math.IsInf(bondBTC, 0) || bondBTC < 0 || bondBTC > 21_000_000 || btcAmount > 21_000_000 {
+		http.Error(w, "amount is outside the possible bitcoin supply", http.StatusBadRequest)
+		return
+	}
+	maxBond := int64(math.Ceil(math.Max(0, bondBTC) * 1e8))
 	maxEscrow := int64(math.Ceil(btcAmount * 1e8))
 	if native != nil {
 		maxBond, maxEscrow = native.MaxBondSat, native.MaxEscrowSat

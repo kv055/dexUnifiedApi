@@ -391,7 +391,7 @@ func main() {
 	handler := tracing.WrapHandler(
 		corsMiddleware(metricsReg.Middleware(
 			sessionMgr.LoadAndSave(
-				sessionMgr.Gate(sessionProtected)(tracing.RouteNamer(mux)),
+				sessionMgr.Gate(sessionProtected)(tracing.RouteNamer(limitRequestBody(mux))),
 			),
 		)),
 		serviceName,
@@ -427,6 +427,22 @@ func main() {
 }
 
 // --- Middleware ---
+
+// limitRequestBody caps the body of state-changing requests at
+// maxInternalBodyBytes so a client cannot stream an unbounded body into the
+// JSON decoders (generated handlers included). Handlers that need a stricter
+// limit apply their own MaxBytesReader on top.
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, maxInternalBodyBytes)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
