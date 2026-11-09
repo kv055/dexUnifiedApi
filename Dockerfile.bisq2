@@ -1,28 +1,54 @@
+# syntax=docker/dockerfile:1
+
 FROM eclipse-temurin:21-jdk-jammy AS bisq2-builder
 
-ARG BISQ2_VERSION=2.1.11
+ARG BISQ2_VERSION=2.1.15
 # Pinned source commit for v${BISQ2_VERSION} (the upstream tag at pin time).
 # Upstream tags are mutable: cloning the floating tag reuses a stale cached
 # layer while the tag content moves on, so the build must fetch this exact
 # commit (changing it also busts the clone layer cache). Keep BISQ2_VERSION
 # and BISQ2_COMMIT in sync when bumping.
-ARG BISQ2_COMMIT=505e4f48a46afd3bf87918aa4869acbceb965f03
+ARG BISQ2_COMMIT=cfe8ab251f2b6579f29e9955036afc33ba36861e
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     ca-certificates \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git init -q /src/bisq2 && \
     git -C /src/bisq2 remote add origin https://github.com/bisq-network/bisq2.git && \
-    git -C /src/bisq2 fetch --depth 1 origin "${BISQ2_COMMIT}" && \
+    for attempt in 1 2 3 4 5; do \
+      git -C /src/bisq2 fetch --depth 1 origin "${BISQ2_COMMIT}" && break; \
+      [ "$attempt" = 5 ] && exit 1; sleep 15; \
+    done && \
     git -C /src/bisq2 checkout -q --detach FETCH_HEAD && \
     git -C /src/bisq2 submodule update --init --recursive --depth 1
 
 WORKDIR /src/bisq2
 
-RUN ./gradlew --no-daemon :apps:api-app:installDist -x test
+# Cache mount keeps the gradle distribution, provisioned JDK toolchain and
+# dependencies across builds, so a version bump does not re-download them all.
+# Network hardening. Upstream's wrapper gives up on the distribution download
+# after 10s without data (networkTimeout=10000): on the CI runner's link that
+# killed both bisq builds on 2026-10-18 ("gradle-*-bin.zip failed: timeout").
+# Raise that limit, fetch the distribution in its own retried step (cheap, and
+# a retry never re-runs a compile), and give dependency downloads longer
+# timeouts plus more of Gradle's built-in retries.
+RUN --mount=type=cache,target=/root/.gradle \
+    sed -i '/^networkTimeout=/d' gradle/wrapper/gradle-wrapper.properties && \
+    echo 'networkTimeout=120000' >> gradle/wrapper/gradle-wrapper.properties && \
+    for attempt in 1 2 3 4 5; do \
+      ./gradlew --no-daemon --version >/dev/null && break; \
+      [ "$attempt" = 5 ] && exit 1; \
+      echo "gradle distribution download failed (attempt $attempt), retrying" >&2; sleep 20; \
+    done && \
+    ./gradlew --no-daemon \
+      -Dorg.gradle.internal.http.connectionTimeout=120000 \
+      -Dorg.gradle.internal.http.socketTimeout=120000 \
+      -Dorg.gradle.internal.repository.max.retries=6 \
+      -Dorg.gradle.internal.repository.initial.backoff=2000 \
+      :apps:api-app:installDist -x test
 
 RUN install_dir=apps/api-app/build/install/api-app && \
     if [ ! -d "$install_dir/lib" ]; then \
@@ -36,14 +62,14 @@ FROM eclipse-temurin:21-jre-jammy AS java-runtime
 
 FROM debian:bookworm-slim
 
-ARG BISQ2_VERSION=2.1.11
+ARG BISQ2_VERSION=2.1.15
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BISQ2_VERSION=${BISQ2_VERSION}
 ENV MALLOC_ARENA_MAX=4
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     ca-certificates \
     libcups2 \
     libfontconfig1 \

@@ -57,6 +57,14 @@ ensure_account_row_in_database
 # pairing), NOT a static password — our Go clients cannot satisfy it. The
 # security boundary is the Docker bridge network plus the loopback-only 8090
 # publish in docker-compose.yml; bind.host=0.0.0.0 below is container-internal.
+#
+# Since v2.1.15 two more overrides are required, or the API is unusable here:
+#  - accessTransportType=CLEAR: with the default TOR the API ignores bind.host
+#    and listens on 127.0.0.1 only (where its onion service connects), so
+#    sibling containers get connection refused. This only changes how the API
+#    is reached; the P2P network still runs over Tor.
+#  - supportSessionHandling=false: the new default true installs the session
+#    filter even with authorizationRequired=false, so every REST call is 401.
 su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -Xmx2g \
   -XX:+ExitOnOutOfMemoryError \
@@ -64,10 +72,12 @@ su -s /bin/sh appuser -c "exec '$JAVA_BIN' \
   -XX:ReservedCodeCacheSize=128m \
   -XX:MaxDirectMemorySize=128m \
   -XX:+UseG1GC \
+  -Dapplication.api.accessTransportType=CLEAR \
   -Dapplication.api.server.restEnabled=true \
   -Dapplication.api.server.bind.host=0.0.0.0 \
   -Dapplication.api.server.bind.port=8090 \
   -Dapplication.api.server.security.authorizationRequired=false \
+  -Dapplication.api.server.security.supportSessionHandling=false \
   -cp '/opt/bisq2/lib/*' \
   bisq.api_app.ApiApp \
   --data-dir='$APP_DIR'" &

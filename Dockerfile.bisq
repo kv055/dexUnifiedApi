@@ -12,14 +12,17 @@ ARG BISQ_VERSION=1.10.11
 ARG BISQ_COMMIT=ea9d5dff90c99ac462f2b0a7bf9ef92683956619
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     ca-certificates \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git init -q /src/bisq && \
     git -C /src/bisq remote add origin https://github.com/bisq-network/bisq.git && \
-    git -C /src/bisq fetch --depth 1 origin "${BISQ_COMMIT}" && \
+    for attempt in 1 2 3 4 5; do \
+      git -C /src/bisq fetch --depth 1 origin "${BISQ_COMMIT}" && break; \
+      [ "$attempt" = 5 ] && exit 1; sleep 15; \
+    done && \
     git -C /src/bisq checkout -q --detach FETCH_HEAD && \
     git -C /src/bisq submodule update --init --recursive --depth 1
 
@@ -51,8 +54,26 @@ RUN git apply --3way /tmp/quote-guarded-take.patch
 # Cache mount keeps gradle's dependency + wrapper caches across builds; without
 # it every patch/version change re-downloads all deps and compiles cold (the
 # dominant cost since the switch to building the daemon from source).
+# Network hardening. Upstream's wrapper gives up on the distribution download
+# after 10s without data (networkTimeout=10000): on the CI runner's link that
+# killed both bisq builds on 2026-10-18 ("gradle-*-bin.zip failed: timeout").
+# Raise that limit, fetch the distribution in its own retried step (cheap, and
+# a retry never re-runs a compile), and give dependency downloads longer
+# timeouts plus more of Gradle's built-in retries.
 RUN --mount=type=cache,target=/root/.gradle \
-    ./gradlew --no-daemon :daemon:installDist -x test
+    sed -i '/^networkTimeout=/d' gradle/wrapper/gradle-wrapper.properties && \
+    echo 'networkTimeout=120000' >> gradle/wrapper/gradle-wrapper.properties && \
+    for attempt in 1 2 3 4 5; do \
+      ./gradlew --no-daemon --version >/dev/null && break; \
+      [ "$attempt" = 5 ] && exit 1; \
+      echo "gradle distribution download failed (attempt $attempt), retrying" >&2; sleep 20; \
+    done && \
+    ./gradlew --no-daemon \
+      -Dorg.gradle.internal.http.connectionTimeout=120000 \
+      -Dorg.gradle.internal.http.socketTimeout=120000 \
+      -Dorg.gradle.internal.repository.max.retries=6 \
+      -Dorg.gradle.internal.repository.initial.backoff=2000 \
+      :daemon:installDist -x test
 
 RUN if [ -d daemon/build/install/daemon/lib ]; then \
       src=daemon/build/install/daemon/lib; \
@@ -91,7 +112,7 @@ ENV MALLOC_ARENA_MAX=4
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     ca-certificates \
     libcups2 \
     libfontconfig1 \
