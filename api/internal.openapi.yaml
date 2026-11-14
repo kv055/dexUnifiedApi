@@ -4,8 +4,8 @@ info:
   version: 1.0.0
   description: Private service and operational contract. This handwritten specification is the source of truth.
   contact:
-    name: dexArbTrading maintainers
-    url: https://github.com/kv055/dexArbTrading
+    name: dexPendulum maintainers
+    url: https://github.com/kv055/dexPendulum
 servers:
   - url: http://localhost:5010
 tags:

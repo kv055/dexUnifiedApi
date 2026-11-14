@@ -1,6 +1,6 @@
 # dexUnifiedApi
 
-`dexUnifiedApi` owns the shared runtime substrate for dexArbTrading: Postgres schema setup, live offer ingestion, Bisq snapshot support, payment notification collection, account-health checks, and logical database backups.
+`dexUnifiedApi` owns the shared runtime substrate for dexPendulum: Postgres schema setup, live offer ingestion, Bisq snapshot support, payment notification collection, account-health checks, and logical database backups.
 
 It is the service that other components depend on when they need a stable database schema or a single API for current DEX offer state.
 
