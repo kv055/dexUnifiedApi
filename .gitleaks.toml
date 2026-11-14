@@ -1,4 +1,4 @@
-title = "dexArbTrading Gitleaks configuration"
+title = "dexPendulum Gitleaks configuration"
 
 [extend]
 useDefault = true
