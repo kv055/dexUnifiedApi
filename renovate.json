@@ -1,0 +1,4 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Opts this repo into the self-hosted Renovate bot. The shared dependency policy is applied by the bot (dexPendulum renovate/shared.json); add only repo-specific rules here."
+}
