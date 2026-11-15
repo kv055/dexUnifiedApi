@@ -1,0 +1,51 @@
+name: CI
+
+# Checks this service the way the root pipeline builds it. Services import
+# ../commons, so they only build inside a root (dexPendulum) checkout: check
+# out the root repo at develop, put the commit under test into this service's
+# submodule and run the root's scripts/service-ci.sh (Go tests, frontend for
+# dexMonitor, image builds). Identical in all four service repos except
+# SERVICE; the Gitea twin lives in .gitea/workflows/ci.yml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Service checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SERVICE: dexUnifiedApi
+    steps:
+      - name: Check out the root repo (develop) with submodules
+        uses: actions/checkout@v5
+        with:
+          repository: kv055/dexPendulum
+          ref: develop
+          submodules: recursive
+
+      - name: Put the commit under test into the submodule
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          git -C "$SERVICE" fetch --no-tags --depth=1 origin "$SHA"
+          git -C "$SERVICE" checkout --detach FETCH_HEAD
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.SERVICE }}/go.mod
+          cache-dependency-path: ${{ env.SERVICE }}/go.sum
+      - name: Service checks
+        run: bash scripts/service-ci.sh "$SERVICE"

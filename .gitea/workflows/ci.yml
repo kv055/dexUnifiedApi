@@ -1,0 +1,54 @@
+name: CI
+
+# Gitea twin of .github/workflows/ci.yml: checks this service the way the root
+# pipeline builds it (services import ../commons, so they only build inside a
+# root dexPendulum checkout). Check out the root repo at develop, fetch the
+# submodules from this Gitea instance, put the commit under test into this
+# service's submodule and run the root's scripts/service-ci.sh.
+# REGISTRY_URL / REGISTRY_TOKEN are owner-level Actions secrets (the repos are
+# private); Go/npm caches are persistent runner volumes, so tarball caching is
+# off; frontend unit tests get the slow-runner timeout.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Service checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SERVICE: dexUnifiedApi
+    steps:
+      - name: Check out the root repo (develop)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/dexPendulum
+          ref: develop
+          token: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: Fetch submodules from Gitea and put the commit under test in place
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          REG_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          host="${REGISTRY_URL#*://}"; scheme="${REGISTRY_URL%%://*}"
+          git config --global url."${scheme}://x-access-token:${REG_TOKEN}@${host}/${OWNER}/".insteadOf "https://github.com/kv055/"
+          git submodule update --init --recursive
+          git -C "$SERVICE" fetch --no-tags --depth=1 origin "$SHA"
+          git -C "$SERVICE" checkout --detach FETCH_HEAD
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.SERVICE }}/go.mod
+          cache: false
+      - name: Service checks
+        env:
+          VITEST_ARGS: --testTimeout=30000
+        run: bash scripts/service-ci.sh "$SERVICE"
