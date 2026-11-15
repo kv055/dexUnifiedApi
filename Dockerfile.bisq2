@@ -43,7 +43,12 @@ RUN --mount=type=cache,target=/root/.gradle \
       [ "$attempt" = 5 ] && exit 1; \
       echo "gradle distribution download failed (attempt $attempt), retrying" >&2; sleep 20; \
     done && \
+    # Bounded heap/workers: the Gitea runner's Docker-in-Docker is capped at
+    # 4 GB for every CI job together, and an unbounded Gradle daemon was
+    # OOM-killed there (2.4 GB RSS while configuring projects).
     ./gradlew --no-daemon \
+      -Dorg.gradle.jvmargs="-Xmx1536m -XX:MaxMetaspaceSize=512m" \
+      --max-workers=2 \
       -Dorg.gradle.internal.http.connectionTimeout=120000 \
       -Dorg.gradle.internal.http.socketTimeout=120000 \
       -Dorg.gradle.internal.repository.max.retries=6 \
