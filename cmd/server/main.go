@@ -616,6 +616,7 @@ func runInternalLiveRefresh(ctx context.Context, offers []LiveOffer) {
 	outOffers := hub.computeOutOffers(price, liveSubscription{cex: defaultCEX})
 	writeLifecycleEntries(ctx, outOffers)
 	go resolveAndApplyPeachRatings(context.Background(), refreshedOffers, outOffers)
+	go resolveAndApplyHodlHodlReviews(context.Background(), refreshedOffers, outOffers)
 	fmt.Printf("[LiveHub] refreshed with %d live offers from PostgreSQL\n", len(refreshedOffers))
 }
 

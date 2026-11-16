@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,9 +37,22 @@ const (
 	// peachUncachedFetchCap bounds how many cache-miss HTTP lookups run in one
 	// snapshot cycle (sequential). Cached makers are not counted.
 	peachUncachedFetchCap = 15
+
+	// peachProfileMaxBytes and peachRatingsMaxBytes cap response bodies. The
+	// ratings list is one entry (~300 B) per rating received, so a 1000-trade
+	// maker returns ~300 KB.
+	peachProfileMaxBytes = 1 << 20
+	peachRatingsMaxBytes = 8 << 20
+
+	// peachRatingBurstWindow is the rolling window for max_ratings_24h: many
+	// ratings packed into one day hints at farmed reputation.
+	peachRatingBurstWindow = 24 * time.Hour
 )
 
 var peachHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// peachAPIBaseURL is a var so tests can point the fetchers at httptest.
+var peachAPIBaseURL = "https://api.peachbitcoin.com"
 
 // peachUserReputation is the maker profile returned by GET /v1/user/:id.
 type peachUserReputation struct {
@@ -57,13 +72,89 @@ type peachUserReputation struct {
 	} `json:"disputes"`
 }
 
-// peachMakerRating is the score plus same-payload extras from one user GET.
+// peachRating is one entry of GET /v1/user/:id/ratings. The signature is not
+// decoded: it does not cover the date (one rater's repeat ratings of the same
+// user carry an identical signature), so it cannot vouch for the history.
+type peachRating struct {
+	CreationDate string  `json:"creationDate"`
+	Timestamp    int64   `json:"timestamp"` // epoch millis, same instant as CreationDate
+	Rating       float64 `json:"rating"`    // +1 or -1
+	RatedBy      string  `json:"ratedBy"`   // rater's public key
+}
+
+// peachRatingStats summarizes a maker's rating history into anti-farming
+// signals. It feeds seller_rating_signals only, not the 0-100 score.
+type peachRatingStats struct {
+	Fetched         int
+	DistinctRaters  int
+	TopRaterRatings int // ratings left by the single most frequent rater
+	FirstAt, LastAt time.Time
+	MaxIn24h        int // most ratings inside any rolling 24h window
+	// BeforeAccountCreation counts ratings dated before the account's
+	// creationDate. Both dates come from Peach's server, so a non-zero value
+	// means inconsistent data rather than manipulation by the maker.
+	BeforeAccountCreation int
+}
+
+// peachMakerRating is the score plus extras from the user and ratings GETs.
 type peachMakerRating struct {
 	score   sellerrating.Score
 	signals json.RawMessage
 }
 
-func mapPeachSignals(r peachUserReputation, now time.Time) json.RawMessage {
+func peachRatingTime(r peachRating) (time.Time, bool) {
+	if r.Timestamp > 0 {
+		return time.UnixMilli(r.Timestamp).UTC(), true
+	}
+	return parsePeachCreationDate(r.CreationDate)
+}
+
+// summarizePeachRatings computes rater diversity, burst and consistency
+// signals from a maker's rating list. accountCreated is ignored when
+// haveCreated is false. Pure — unit-testable.
+func summarizePeachRatings(ratings []peachRating, accountCreated time.Time, haveCreated bool) peachRatingStats {
+	st := peachRatingStats{Fetched: len(ratings)}
+	byRater := make(map[string]int, len(ratings))
+	times := make([]time.Time, 0, len(ratings))
+	for _, r := range ratings {
+		if r.RatedBy != "" {
+			byRater[r.RatedBy]++
+		}
+		t, ok := peachRatingTime(r)
+		if !ok {
+			continue
+		}
+		times = append(times, t)
+		if haveCreated && t.Before(accountCreated) {
+			st.BeforeAccountCreation++
+		}
+	}
+	st.DistinctRaters = len(byRater)
+	for _, n := range byRater {
+		if n > st.TopRaterRatings {
+			st.TopRaterRatings = n
+		}
+	}
+	if len(times) == 0 {
+		return st
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+	st.FirstAt, st.LastAt = times[0], times[len(times)-1]
+	start := 0
+	for end := range times {
+		for times[end].Sub(times[start]) >= peachRatingBurstWindow {
+			start++
+		}
+		if n := end - start + 1; n > st.MaxIn24h {
+			st.MaxIn24h = n
+		}
+	}
+	return st
+}
+
+// mapPeachSignals builds the Peach seller_rating_signals blob. ratings is nil
+// when the ratings lookup failed; the profile fields are still recorded.
+func mapPeachSignals(r peachUserReputation, ratings *peachRatingStats, now time.Time) json.RawMessage {
 	blob := map[string]any{
 		"source":          "peach",
 		"creation_date":   r.CreationDate,
@@ -84,6 +175,21 @@ func mapPeachSignals(r peachUserReputation, now time.Time) json.RawMessage {
 			days = 0
 		}
 		blob["account_age_days"] = days
+	}
+	if ratings != nil {
+		blob["ratings_fetched"] = ratings.Fetched
+		blob["distinct_raters"] = ratings.DistinctRaters
+		blob["top_rater_ratings"] = ratings.TopRaterRatings
+		if ratings.Fetched > 0 {
+			share := float64(ratings.TopRaterRatings) / float64(ratings.Fetched)
+			blob["top_rater_share"] = math.Round(share*1000) / 1000
+		}
+		blob["max_ratings_24h"] = ratings.MaxIn24h
+		blob["ratings_before_account_creation"] = ratings.BeforeAccountCreation
+		if !ratings.FirstAt.IsZero() {
+			blob["first_rating_at"] = ratings.FirstAt.UTC().Format(time.RFC3339)
+			blob["last_rating_at"] = ratings.LastAt.UTC().Format(time.RFC3339)
+		}
 	}
 	b, err := json.Marshal(blob)
 	if err != nil {
@@ -134,24 +240,54 @@ func mapPeachReputation(r peachUserReputation) sellerrating.Score {
 // context (for the per-call timeout).
 func fetchPeachUserReputation(ctx context.Context, userID string) (peachUserReputation, error) {
 	var rep peachUserReputation
-	reqURL := "https://api.peachbitcoin.com/v1/user/" + url.PathEscape(userID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	err := fetchPeachJSON(ctx, "/v1/user/"+url.PathEscape(userID), peachProfileMaxBytes, &rep)
+	return rep, err
+}
+
+// fetchPeachUserRatings fetches every rating a maker has received (public, no
+// auth). The endpoint returns the full list unpaginated.
+func fetchPeachUserRatings(ctx context.Context, userID string) ([]peachRating, error) {
+	var ratings []peachRating
+	err := fetchPeachJSON(ctx, "/v1/user/"+url.PathEscape(userID)+"/ratings", peachRatingsMaxBytes, &ratings)
+	return ratings, err
+}
+
+func fetchPeachJSON(ctx context.Context, path string, maxBytes int64, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, peachAPIBaseURL+path, nil)
 	if err != nil {
-		return rep, err
+		return err
 	}
 	resp, err := peachHTTPClient.Do(req)
 	if err != nil {
-		return rep, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return rep, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err := json.Unmarshal(body, &rep); err != nil {
-		return rep, err
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return err
 	}
-	return rep, nil
+	if int64(len(body)) > maxBytes {
+		return fmt.Errorf("response exceeds %d bytes", maxBytes)
+	}
+	return json.Unmarshal(body, out)
+}
+
+// fetchPeachRatingStats fetches and summarizes a maker's ratings. A failure is
+// logged and yields nil so the profile-based score is still applied.
+func fetchPeachRatingStats(ctx context.Context, makerID string, rep peachUserReputation) *peachRatingStats {
+	fctx, cancel := context.WithTimeout(ctx, peachUserFetchTimeout)
+	ratings, err := fetchPeachUserRatings(fctx, makerID)
+	cancel()
+	if err != nil {
+		fmt.Printf("[PeachReputation] ratings fetch failed for %s: %v\n", makerID, err)
+		return nil
+	}
+	created, ok := parsePeachCreationDate(rep.CreationDate)
+	st := summarizePeachRatings(ratings, created, ok)
+	return &st
 }
 
 // peachReputationCache is a small in-memory per-maker cache. The server is
@@ -208,7 +344,7 @@ func (c *peachReputationCache) Resolve(ctx context.Context, makerID string) (pea
 	}
 	rating := peachMakerRating{
 		score:   mapPeachReputation(rep),
-		signals: mapPeachSignals(rep, now),
+		signals: mapPeachSignals(rep, fetchPeachRatingStats(ctx, makerID, rep), now),
 	}
 	c.mu.Lock()
 	c.entries[makerID] = peachCacheEntry{rating: rating, fetchedAt: now}
@@ -221,9 +357,15 @@ func (c *peachReputationCache) Resolve(ctx context.Context, makerID string) (pea
 // Peach offers are included so the monitor can show a rating on the whole book.
 // Pure — unit-testable.
 func peachMakersWithID(outOffers []liveOutOffer, makerByID map[int64]string) map[int64]string {
+	return exchangeMakersWithID(peachExchangeName, outOffers, makerByID)
+}
+
+// exchangeMakersWithID returns offerID→makerID for every live offer of the
+// given exchange that carries a maker id. Pure.
+func exchangeMakersWithID(exchange string, outOffers []liveOutOffer, makerByID map[int64]string) map[int64]string {
 	out := make(map[int64]string)
 	for _, o := range outOffers {
-		if o.Exchange != peachExchangeName {
+		if o.Exchange != exchange {
 			continue
 		}
 		if mid := makerByID[o.ID]; mid != "" {
@@ -233,9 +375,9 @@ func peachMakersWithID(outOffers []liveOutOffer, makerByID map[int64]string) map
 	return out
 }
 
-// pickPeachFetchQueue returns uncached maker IDs to fetch this cycle, at most
-// cap, first-seen order, de-duplicated. Cached makers are skipped. Pure.
-func pickPeachFetchQueue(orderedMakers []string, isCached func(string) bool, cap int) []string {
+// pickUncachedFetchQueue returns uncached maker IDs to fetch this cycle, at
+// most cap, first-seen order, de-duplicated. Cached makers are skipped. Pure.
+func pickUncachedFetchQueue(orderedMakers []string, isCached func(string) bool, cap int) []string {
 	out := make([]string, 0, cap)
 	seen := make(map[string]struct{})
 	for _, id := range orderedMakers {
@@ -287,7 +429,7 @@ func resolveAndApplyPeachRatings(ctx context.Context, offers []LiveOffer, outOff
 		}
 	}
 
-	toFetch := pickPeachFetchQueue(ordered, func(id string) bool {
+	toFetch := pickUncachedFetchQueue(ordered, func(id string) bool {
 		_, ok := ratingByMaker[id]
 		return ok
 	}, peachUncachedFetchCap)

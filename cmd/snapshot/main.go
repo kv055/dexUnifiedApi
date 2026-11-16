@@ -157,8 +157,8 @@ type offer struct {
 	// the venue has nothing extra (RoboSats, Bisq 1).
 	SellerRatingSignals json.RawMessage `json:"seller_rating_signals,omitempty"`
 	// MakerID is the exchange's seller identity, sent to the unified-api server
-	// so it can look up a per-maker reputation for live Peach offers (the
-	// listing omits the rating).
+	// so it can look up per-maker data the listing omits: the Peach rating and
+	// rating history, and the Hodl Hodl review history (minimum account age).
 	MakerID              string    `json:"maker_id,omitempty"`
 	VenueNodePubKey      string    `json:"venue_node_pubkey,omitempty"`
 	VenueNodeName        string    `json:"venue_node_name,omitempty"`
@@ -285,8 +285,8 @@ type livePayload struct {
 	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw,omitempty"`
 	SellerRatingSignals    json.RawMessage `json:"seller_rating_signals,omitempty"`
-	// MakerID lets the server look up a per-maker reputation for live Peach
-	// offers (its listing omits the rating).
+	// MakerID lets the server look up per-maker data for live Peach and Hodl
+	// Hodl offers that their listings omit.
 	MakerID              string     `json:"maker_id,omitempty"`
 	VenueNodePubKey      string     `json:"venue_node_pubkey,omitempty"`
 	VenueNodeName        string     `json:"venue_node_name,omitempty"`
@@ -664,6 +664,9 @@ func mapBisq2Signals(rep bisq2Reputation, offerFiatMax *int, bitcoinRails []stri
 // so it MUST stay a pointer — a bare float64 would decode null to 0.0,
 // indistinguishable from a genuinely terrible rating.
 type hodlHodlTrader struct {
+	// Login is the trader's public handle; it keys the server-side review
+	// lookup (hodlhodl.com/reviews?user=<login>).
+	Login                     string   `json:"login"`
 	TradesCount               int      `json:"trades_count"`
 	Rating                    *float64 `json:"rating"`
 	StrongHodler              bool     `json:"strong_hodler"`
@@ -682,6 +685,7 @@ type hodlHodlTrader struct {
 // maker's reputation instead of rejecting the entire order book.
 func (t *hodlHodlTrader) UnmarshalJSON(data []byte) error {
 	var raw struct {
+		Login                     string          `json:"login"`
 		TradesCount               int             `json:"trades_count"`
 		Rating                    json.RawMessage `json:"rating"`
 		StrongHodler              bool            `json:"strong_hodler"`
@@ -696,6 +700,7 @@ func (t *hodlHodlTrader) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	t.Login = strings.TrimSpace(raw.Login)
 	t.TradesCount = raw.TradesCount
 	t.StrongHodler = raw.StrongHodler
 	t.DaysSinceLastTrade = raw.DaysSinceLastTrade

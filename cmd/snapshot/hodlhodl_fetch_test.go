@@ -86,6 +86,9 @@ func TestFetchHodlHodlMapsSuccessfulOffer(t *testing.T) {
 	if signals["source"] != "hodlhodl" || signals["trades_count"] != float64(10) || signals["online_status"] != "online" {
 		t.Fatalf("seller_rating_signals = %s, want hodlhodl extras", got.SellerRatingSignals)
 	}
+	if got.MakerID != "satsseller" {
+		t.Fatalf("MakerID = %q, want trimmed trader login satsseller", got.MakerID)
+	}
 }
 
 func TestFetchHodlHodlRejectsResponseReadFailure(t *testing.T) {
@@ -375,6 +378,7 @@ func hodlHodlSampleOffer(id string) map[string]any {
 			{"payment_method_name": "SEPA"},
 		},
 		"trader": map[string]any{
+			"login":                        " satsseller ",
 			"trades_count":                 10,
 			"rating":                       0.98,
 			"strong_hodler":                true,

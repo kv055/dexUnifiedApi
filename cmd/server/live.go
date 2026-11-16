@@ -89,8 +89,8 @@ type LiveOffer struct {
 	SellerRatingConfidence *string         `json:"seller_rating_confidence"`
 	SellerRatingRaw        json.RawMessage `json:"seller_rating_raw"`
 	SellerRatingSignals    json.RawMessage `json:"seller_rating_signals"`
-	// MakerID is the exchange's seller identity, used to look up a per-maker
-	// reputation for live Peach offers (its listing omits the rating).
+	// MakerID is the exchange's seller identity, used to look up per-maker data
+	// the listing omits: Peach reputation and ratings, Hodl Hodl review history.
 	MakerID string `json:"maker_id,omitempty"`
 	// VenueNodePubKey scopes a Mostro order id to its coordinator. The source
 	// event fields preserve the signed quote selected by execution.

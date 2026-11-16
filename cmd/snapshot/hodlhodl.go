@@ -250,6 +250,7 @@ func mapHodlHodlOffer(raw hodlHodlOfferJSON, direction, currency string) (offer,
 	}
 	applyRating(&mapped, mapHodlHodlTrader(raw.Trader))
 	mapped.SellerRatingSignals = mapHodlHodlSignals(raw.Trader)
+	mapped.MakerID = raw.Trader.Login
 	return mapped, hodlHodlMapped
 }
 
