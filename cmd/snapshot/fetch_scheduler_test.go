@@ -191,6 +191,9 @@ func TestHTTPMarketFetchersUseParentContext(t *testing.T) {
 	if result := fetchPeachBitcoinCurrencyFrom(ctx, client, "https://peach.test", "ask", "EUR", 60000); result != nil {
 		t.Fatalf("Peach result = %#v, want failed fetch", result)
 	}
+	if result := fetchNoonesCurrencyFrom(ctx, client, "https://noones.test", staticNoonesToken("test-token"), "ask", "EUR", 60000); result != nil {
+		t.Fatalf("Noones result = %#v, want failed fetch", result)
+	}
 	if result := fetchRobosatsCurrencyFrom(ctx, "ask", "EUR", 60000, client, []robosatsCoordinator{{Onion: "http://robosats.test"}}); result != nil {
 		t.Fatalf("RoboSats result = %#v, want failed fetch", result)
 	}
