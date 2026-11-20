@@ -14,7 +14,7 @@ import (
 )
 
 func staticNoonesToken(token string) noonesTokenSource {
-	return func(context.Context) (string, error) { return token, nil }
+	return func(context.Context, string) (string, error) { return token, nil }
 }
 
 // noonesOfferJSON builds one listing row. Prices and margins are quoted and
@@ -187,14 +187,24 @@ func TestMapNoonesOffer(t *testing.T) {
 			status:    noonesSkipMalformed,
 		},
 		{
-			name: "inactive offer malformed",
+			name: "inactive offer skipped as inactive",
 			mutate: func(o *noonesOffer) {
 				active := false
 				o.Active = &active
 			},
 			direction: "ask",
 			currency:  "EUR",
-			status:    noonesSkipMalformed,
+			status:    noonesSkipInactive,
+		},
+		{
+			name: "blocked offer skipped as inactive",
+			mutate: func(o *noonesOffer) {
+				blocked := true
+				o.IsBlocked = &blocked
+			},
+			direction: "ask",
+			currency:  "EUR",
+			status:    noonesSkipInactive,
 		},
 		{
 			name: "missing payment method malformed",
@@ -421,8 +431,140 @@ func TestFetchNoonesCurrencyFromAPIErrorEnvelope(t *testing.T) {
 }
 
 func TestFetchNoonesCurrencyFromAuthFailure(t *testing.T) {
-	failingToken := func(context.Context) (string, error) { return "", fmt.Errorf("oauth down") }
+	failingToken := func(context.Context, string) (string, error) { return "", fmt.Errorf("oauth down") }
 	if result := fetchNoonesCurrencyFrom(context.Background(), clearnetClient(), "https://api.noones.test", failingToken, "ask", "EUR", 60000); result != nil {
 		t.Fatalf("result = %#v, want failed fetch", result)
+	}
+}
+
+func TestFetchNoonesCurrencyUsesVersionedEndpoint(t *testing.T) {
+	// The live gateway 404s the unprefixed /offer/all; only the /noones/v1
+	// route exists. Pin the production constant, not a test base URL.
+	var gotURL string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotURL = req.URL.String()
+		return jsonResponse(http.StatusOK, noonesListJSON(1, noonesOfferJSON("hash-1"))), nil
+	})}
+	result := fetchNoonesCurrencyFrom(context.Background(), client, noonesAPIBaseURL, staticNoonesToken("test-token"), "ask", "EUR", 60000)
+	if result == nil || result.status() != fetchStatusComplete {
+		t.Fatalf("result = %#v, want complete fetch", result)
+	}
+	if want := "https://api.noones.com/noones/v1/offer/all"; gotURL != want {
+		t.Fatalf("offer/all URL = %q, want %q", gotURL, want)
+	}
+}
+
+func TestFetchNoonesCurrencyFromRemintsTokenAfter401(t *testing.T) {
+	var rejectedSeen []string
+	token := func(_ context.Context, rejected string) (string, error) {
+		rejectedSeen = append(rejectedSeen, rejected)
+		if rejected == "revoked" {
+			return "fresh", nil
+		}
+		return "revoked", nil
+	}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Authorization") == "Bearer revoked" {
+			return jsonResponse(http.StatusUnauthorized, `{"error":"unauthorized_access"}`), nil
+		}
+		return jsonResponse(http.StatusOK, noonesListJSON(1, noonesOfferJSON("hash-1"))), nil
+	})}
+	result := fetchNoonesCurrencyFrom(context.Background(), client, "https://api.noones.test", token, "ask", "EUR", 60000)
+	if result == nil || result.status() != fetchStatusComplete || len(result.Offers) != 1 {
+		t.Fatalf("result = %#v, want complete fetch with 1 offer after re-mint", result)
+	}
+	if len(rejectedSeen) != 2 || rejectedSeen[0] != "" || rejectedSeen[1] != "revoked" {
+		t.Fatalf("token calls = %q, want [\"\" \"revoked\"]", rejectedSeen)
+	}
+}
+
+func TestFetchNoonesCurrencyFromPersistent401Fails(t *testing.T) {
+	// Bad credentials: one re-mint, then give up rather than loop.
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return jsonResponse(http.StatusUnauthorized, `{"error":"unauthorized_access"}`), nil
+	})}
+	if result := fetchNoonesCurrencyFrom(context.Background(), client, "https://api.noones.test", staticNoonesToken("bad"), "ask", "EUR", 60000); result != nil {
+		t.Fatalf("result = %#v, want failed fetch", result)
+	}
+	if calls != 2 {
+		t.Fatalf("offer/all calls = %d, want 2 (original + one retry)", calls)
+	}
+}
+
+func TestFetchNoonesCurrencyFromFollowsServerPageSize(t *testing.T) {
+	// The server ignored count=50 and applied limit=20: a fixed page size
+	// would read the first full 20-row page as short and confirm a truncated
+	// book. Paging must follow data.limit and step the offset by rows served.
+	pages := map[string]string{
+		"0":  fmt.Sprintf(`{"status":"success","data":{"count":20,"limit":"20","offset":0,"totalCount":"45","offers":[%s]}}`, strings.Join(noonesFullPageIDs("hash", 1, 20), ",")),
+		"20": fmt.Sprintf(`{"status":"success","data":{"count":20,"limit":"20","offset":20,"totalCount":"45","offers":[%s]}}`, strings.Join(noonesFullPageIDs("hash", 21, 40), ",")),
+		"40": fmt.Sprintf(`{"status":"success","data":{"count":5,"limit":"20","offset":40,"totalCount":"45","offers":[%s]}}`, strings.Join(noonesFullPageIDs("hash", 41, 45), ",")),
+	}
+	var offsets []string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		form, _ := url.ParseQuery(string(body))
+		offsets = append(offsets, form.Get("offset"))
+		page, ok := pages[form.Get("offset")]
+		if !ok {
+			t.Errorf("unexpected offset %q", form.Get("offset"))
+			return jsonResponse(http.StatusBadRequest, `{}`), nil
+		}
+		return jsonResponse(http.StatusOK, page), nil
+	})}
+	result := fetchNoonesCurrencyFrom(context.Background(), client, "https://api.noones.test", staticNoonesToken("test-token"), "ask", "EUR", 60000)
+	if result == nil || result.status() != fetchStatusComplete {
+		t.Fatalf("result = %#v, want complete fetch", result)
+	}
+	if len(result.Offers) != 45 {
+		t.Fatalf("offers = %d, want 45", len(result.Offers))
+	}
+	if strings.Join(offsets, ",") != "0,20,40" {
+		t.Fatalf("offsets = %v, want [0 20 40]", offsets)
+	}
+}
+
+func TestNoonesTokenCacheDropsOnlyTheRejectedToken(t *testing.T) {
+	prevID, prevSecret := noonesClientID, noonesClientSecret
+	noonesClientID, noonesClientSecret = "id", "secret"
+	t.Cleanup(func() { noonesClientID, noonesClientSecret = prevID, prevSecret })
+
+	var minted int
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		form, _ := url.ParseQuery(string(body))
+		if req.URL.Path != "/oauth2/token" || form.Get("grant_type") != "client_credentials" ||
+			form.Get("client_id") != "id" || form.Get("client_secret") != "secret" {
+			t.Errorf("unexpected token request %s %v", req.URL.Path, form)
+		}
+		minted++
+		// A short-lived token: the expiry margin must not expire it on arrival.
+		return jsonResponse(http.StatusOK, fmt.Sprintf(`{"access_token":"jwt-%d","expires_in":300}`, minted)), nil
+	})}
+	cache := &noonesTokenCache{}
+	ctx := context.Background()
+	get := func(rejected string) string {
+		t.Helper()
+		token, err := cache.get(ctx, client, "https://auth.noones.test", rejected)
+		if err != nil {
+			t.Fatalf("get(%q): %v", rejected, err)
+		}
+		return token
+	}
+
+	if got := get(""); got != "jwt-1" {
+		t.Fatalf("first get = %q, want jwt-1", got)
+	}
+	if got := get(""); got != "jwt-1" || minted != 1 {
+		t.Fatalf("cached get = %q after %d mints, want jwt-1 from cache", got, minted)
+	}
+	if got := get("jwt-1"); got != "jwt-2" {
+		t.Fatalf("get after rejecting jwt-1 = %q, want jwt-2", got)
+	}
+	// A second market that saw the same 401 must not re-mint again.
+	if got := get("jwt-1"); got != "jwt-2" || minted != 2 {
+		t.Fatalf("get with stale rejection = %q after %d mints, want jwt-2 from cache", got, minted)
 	}
 }

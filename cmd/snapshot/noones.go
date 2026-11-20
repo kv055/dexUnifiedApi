@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -22,17 +23,22 @@ import (
 // taker connector yet — the point is watching for premium offers.
 //
 // Wire format: an OAuth2 client-credentials JWT from auth.noones.com (default
-// lifetime 10 days), then POST offer/all on api.noones.com. The marketplace
-// caches offer/all results for one minute, so one cycle's pages are stable.
-// App-level errors return HTTP 200 with status:"error" — the envelope must be
-// checked, not the status code.
+// lifetime 10 days), then POST offer/all under api.noones.com/noones/v1. The
+// marketplace caches offer/all results for one minute, so one cycle's pages
+// are stable. App-level errors return HTTP 200 with status:"error" — the
+// envelope must be checked, not the status code.
 
 const (
-	noonesAPIBaseURL  = "https://api.noones.com"
+	// noonesAPIBaseURL carries the versioned /noones/v1 prefix (Paxful's was
+	// /paxful/v1): the gateway answers the unprefixed /offer/all with 404
+	// resource_not_found and the prefixed route with 401 without a token.
+	noonesAPIBaseURL  = "https://api.noones.com/noones/v1"
 	noonesAuthBaseURL = "https://auth.noones.com"
 
-	// noonesPageSize matches the marketplace's default listing size; the
-	// response echoes it back as data.limit.
+	// noonesPageSize is the page size we request. The response echoes the size
+	// the server actually applied as data.limit, which paging trusts instead,
+	// so an ignored or capped count can neither skip rows nor end the census
+	// early on a page that only looks short.
 	noonesPageSize = 50
 	// noonesMaxPages bounds a lying totalCount so a stuck book neither loops
 	// forever nor publishes a truncated result as authoritative.
@@ -59,9 +65,10 @@ func noonesConfigured() bool {
 
 // --- OAuth2 client-credentials token ---
 
-// noonesTokenSource mints a bearer token. The indirection keeps the fetcher
-// unit-testable without the auth endpoint.
-type noonesTokenSource func(ctx context.Context) (string, error)
+// noonesTokenSource mints a bearer token. A non-empty rejected is a token the
+// API just answered 401 to: the source must not hand it out again. The
+// indirection keeps the fetcher unit-testable without the auth endpoint.
+type noonesTokenSource func(ctx context.Context, rejected string) (string, error)
 
 // noonesTokenCache memoizes the JWT across the many markets of a cycle (and
 // across cycles, given the 10-day lifetime).
@@ -71,9 +78,16 @@ type noonesTokenCache struct {
 	expiresAt time.Time
 }
 
-func (c *noonesTokenCache) get(ctx context.Context, client *http.Client, authBaseURL string) (string, error) {
+// get returns the cached JWT, minting one when none is cached, it is near
+// expiry, or it is the rejected token. Comparing against rejected (rather than
+// clearing unconditionally) means concurrent markets that all saw the same
+// 401 re-mint once, not once each.
+func (c *noonesTokenCache) get(ctx context.Context, client *http.Client, authBaseURL, rejected string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if rejected != "" && c.token == rejected {
+		c.token = ""
+	}
 	if c.token != "" && time.Now().Before(c.expiresAt) {
 		return c.token, nil
 	}
@@ -82,7 +96,9 @@ func (c *noonesTokenCache) get(ctx context.Context, client *http.Client, authBas
 		return "", err
 	}
 	c.token = token
-	c.expiresAt = time.Now().Add(ttl - noonesTokenExpiryMargin)
+	// A short-lived token must still be cached for most of its life: a fixed
+	// one-hour margin would expire anything under an hour on arrival.
+	c.expiresAt = time.Now().Add(ttl - min(noonesTokenExpiryMargin, ttl/10))
 	return c.token, nil
 }
 
@@ -209,14 +225,20 @@ func (e *noonesAPIError) Error() string {
 type noonesListResponse struct {
 	Status string          `json:"status"`
 	Error  *noonesAPIError `json:"error"`
-	Data   struct {
-		Count      int           `json:"count"`
-		Limit      int           `json:"limit"`
-		Offset     int           `json:"offset"`
-		TotalCount int           `json:"totalCount"`
+	// The envelope's counters use the same tolerant decoding as offer rows: a
+	// quoted "50" here would otherwise fail the whole page, not just one row.
+	Data struct {
+		Count      noonesNumber  `json:"count"`
+		Limit      noonesNumber  `json:"limit"`
+		Offset     noonesNumber  `json:"offset"`
+		TotalCount noonesNumber  `json:"totalCount"`
 		Offers     []noonesOffer `json:"offers"`
 	} `json:"data"`
 }
+
+// errNoonesUnauthorized marks an HTTP 401 from the offer API: the cached JWT
+// was revoked or expired early, so the fetcher re-mints once and retries.
+var errNoonesUnauthorized = errors.New("unauthorized (HTTP 401)")
 
 type noonesMapStatus int
 
@@ -225,6 +247,9 @@ const (
 	noonesSkipUnsupported
 	noonesSkipMalformed
 	noonesSkipMismatch
+	// noonesSkipInactive is a well-formed row the listing flags as inactive or
+	// blocked: not takeable, but not a data-quality problem either.
+	noonesSkipInactive
 )
 
 type noonesFetchStats struct {
@@ -235,6 +260,7 @@ type noonesFetchStats struct {
 	unsupported int
 	malformed   int
 	mismatches  int
+	inactive    int
 }
 
 func fetchNoonesCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
@@ -242,8 +268,8 @@ func fetchNoonesCurrency(ctx context.Context, direction, currency string, btcPri
 		fmt.Println("[Noones] API credentials not configured (NOONES_CLIENT_ID / NOONES_CLIENT_SECRET)")
 		return nil
 	}
-	return fetchNoonesCurrencyFrom(ctx, clearnetClient(), noonesAPIBaseURL, func(ctx context.Context) (string, error) {
-		return noonesTokens.get(ctx, clearnetClient(), noonesAuthBaseURL)
+	return fetchNoonesCurrencyFrom(ctx, clearnetClient(), noonesAPIBaseURL, func(ctx context.Context, rejected string) (string, error) {
+		return noonesTokens.get(ctx, clearnetClient(), noonesAuthBaseURL, rejected)
 	}, direction, currency, btcPrice)
 }
 
@@ -252,7 +278,7 @@ func fetchNoonesCurrencyFrom(ctx context.Context, client *http.Client, apiBaseUR
 		fmt.Println("[Noones] Could not get reference price")
 		return nil
 	}
-	tokenValue, err := token(ctx)
+	tokenValue, err := token(ctx, "")
 	if err != nil {
 		fmt.Printf("[Noones] %s %s auth failed: %v\n", currency, direction, err)
 		return nil
@@ -263,6 +289,8 @@ func fetchNoonesCurrencyFrom(ctx context.Context, client *http.Client, apiBaseUR
 		seenIDs  = make(map[string]struct{})
 		stats    noonesFetchStats
 		complete bool
+		offset   int
+		reminted bool
 	)
 	for page := 0; page < noonesMaxPages; page++ {
 		if err := ctx.Err(); err != nil {
@@ -270,9 +298,22 @@ func fetchNoonesCurrencyFrom(ctx context.Context, client *http.Client, apiBaseUR
 			return noonesFetchResult(currency, direction, btcPrice, offers, stats, false)
 		}
 
-		offset := page * noonesPageSize
 		list, err := fetchNoonesPage(ctx, client, apiBaseURL, tokenValue, direction, currency, offset)
 		stats.pages++
+		if errors.Is(err, errNoonesUnauthorized) && !reminted {
+			// Without this the 10-day cache would keep serving a revoked JWT,
+			// failing every market until the worker restarts. One re-mint per
+			// market: a second 401 means the credentials themselves are bad.
+			reminted = true
+			fresh, tokenErr := token(ctx, tokenValue)
+			if tokenErr != nil {
+				fmt.Printf("[Noones] %s %s re-auth after 401 failed: %v\n", currency, direction, tokenErr)
+				return noonesFetchResult(currency, direction, btcPrice, offers, stats, false)
+			}
+			tokenValue = fresh
+			list, err = fetchNoonesPage(ctx, client, apiBaseURL, tokenValue, direction, currency, offset)
+			stats.pages++
+		}
 		if err != nil {
 			fmt.Printf("[Noones] %s %s page offset=%d: %v\n", currency, direction, offset, err)
 			return noonesFetchResult(currency, direction, btcPrice, offers, stats, false)
@@ -299,18 +340,28 @@ func fetchNoonesCurrencyFrom(ctx context.Context, client *http.Client, apiBaseUR
 				stats.unsupported++
 			case noonesSkipMismatch:
 				stats.mismatches++
+			case noonesSkipInactive:
+				stats.inactive++
 			default:
 				stats.malformed++
 			}
 		}
 
-		if len(list.Data.Offers) < noonesPageSize {
+		// Page by what the server applied, not what we asked for: if it ignored
+		// count and served a smaller default, a fixed 50 would read its first
+		// full page as short and confirm a truncated book as complete.
+		pageSize := noonesPageSize
+		if limit := int(list.Data.Limit.Float()); limit > 0 {
+			pageSize = limit
+		}
+		rows := len(list.Data.Offers)
+		if rows < pageSize {
 			// A short page is the end of the book. Mismatched rows keep the
 			// census incomplete, as with HodlHodl.
 			complete = stats.mismatches == 0
 			break
 		}
-		if totalCount := list.Data.TotalCount; totalCount > 0 && len(seenIDs) >= totalCount {
+		if totalCount := int(list.Data.TotalCount.Float()); totalCount > 0 && len(seenIDs) >= totalCount {
 			complete = stats.mismatches == 0
 			break
 		}
@@ -318,6 +369,7 @@ func fetchNoonesCurrencyFrom(ctx context.Context, client *http.Client, apiBaseUR
 			fmt.Printf("[Noones] %s %s repeated full page with no new offer ids at offset=%d\n", currency, direction, offset)
 			break
 		}
+		offset += rows
 	}
 
 	return noonesFetchResult(currency, direction, btcPrice, offers, stats, complete)
@@ -340,8 +392,8 @@ func noonesFetchResult(currency, direction string, btcPrice int, offers []offer,
 }
 
 func logNoonesFetch(currency, direction string, offers []offer, stats noonesFetchStats, status fetchStatus) {
-	fmt.Printf("[Noones] %s %s fetched=%d accepted=%d duplicates=%d unsupported=%d malformed=%d mismatches=%d pages=%d status=%s\n",
-		currency, direction, stats.raw, len(offers), stats.duplicates, stats.unsupported, stats.malformed, stats.mismatches, stats.pages, status)
+	fmt.Printf("[Noones] %s %s fetched=%d accepted=%d duplicates=%d unsupported=%d inactive=%d malformed=%d mismatches=%d pages=%d status=%s\n",
+		currency, direction, stats.raw, len(offers), stats.duplicates, stats.unsupported, stats.inactive, stats.malformed, stats.mismatches, stats.pages, status)
 }
 
 func fetchNoonesPage(ctx context.Context, client *http.Client, apiBaseURL, token, direction, currency string, offset int) (*noonesListResponse, error) {
@@ -376,6 +428,9 @@ func fetchNoonesPage(ctx context.Context, client *http.Client, apiBaseURL, token
 	resp.Body.Close()
 	if readErr != nil {
 		return nil, fmt.Errorf("response read error: %w", readErr)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, errNoonesUnauthorized
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return nil, fmt.Errorf("rate limited (HTTP 429)")
@@ -421,10 +476,10 @@ func mapNoonesOffer(o noonesOffer, direction, currency string) (offer, noonesMap
 		return offer{}, noonesSkipMalformed
 	}
 	if o.Active != nil && !*o.Active {
-		return offer{}, noonesSkipMalformed
+		return offer{}, noonesSkipInactive
 	}
 	if o.IsBlocked != nil && *o.IsBlocked {
-		return offer{}, noonesSkipMalformed
+		return offer{}, noonesSkipInactive
 	}
 
 	wantSide := externalOfferDirection(direction)
