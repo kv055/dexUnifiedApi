@@ -23,13 +23,13 @@ concurrency:
 jobs:
   check:
     name: Service checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       SERVICE: dexUnifiedApi
     steps:
       - name: Check out the root repo (develop) with submodules
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: kv055/dexPendulum
           ref: develop
@@ -43,7 +43,7 @@ jobs:
           git -C "$SERVICE" fetch --no-tags --depth=1 origin "$SHA"
           git -C "$SERVICE" checkout --detach FETCH_HEAD
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ env.SERVICE }}/go.mod
           cache-dependency-path: ${{ env.SERVICE }}/go.sum
