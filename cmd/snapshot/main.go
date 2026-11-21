@@ -104,8 +104,6 @@ func init() {
 	if torProxy == "" {
 		torProxy = "socks5h://127.0.0.1:9050"
 	}
-	noonesClientID = os.Getenv("NOONES_CLIENT_ID")
-	noonesClientSecret = os.Getenv("NOONES_CLIENT_SECRET")
 }
 
 func runningUnderGoTest() bool {
@@ -2288,13 +2286,6 @@ func main() {
 		{"robosats", fetchRobosatsCurrency},
 		{"peachbitcoin", fetchPeachBitcoinCurrency},
 		{"mostro", fetchMostroCurrency},
-	}
-	// Noones is snapshot-only (offer ingestion + inline maker reputation; no
-	// taker connector yet). Ingestion is opt-in on OAuth credentials, mirroring
-	// the taker controller's explicit-enable philosophy: an unconfigured venue
-	// is absent rather than a wall of per-market failures.
-	if noonesConfigured() {
-		fetchers = append(fetchers, exchFetcher{"noones", fetchNoonesCurrency})
 	}
 
 	exchangeData := make(exchangeSnapshotData)
