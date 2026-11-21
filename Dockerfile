@@ -1,5 +1,5 @@
 # Stage 1: Build Go binary
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 ARG GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOPROXY=${GOPROXY}
 RUN apk add --no-cache git
@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -ldflags="-s -w" -o server ./cmd/server
 
 # Stage 2: Minimal runtime
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache curl
 

@@ -1,5 +1,5 @@
 # Stage 1: Build Go binary
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 ARG GOPROXY=https://goproxy.io,https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 
@@ -11,7 +11,7 @@ COPY dexUnifiedApi/cmd/pgbackup/ ./cmd/pgbackup/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o pgbackup ./cmd/pgbackup
 
 # Stage 2: Backup runtime with PostgreSQL client tools and rclone
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates postgresql-client rclone
 
