@@ -624,3 +624,70 @@ func TestEnsureUnifiedSchemaDropsStaleProviderExchangeChecks(t *testing.T) {
 		t.Fatalf("reapply schema after repair: %v", err)
 	}
 }
+
+// Legacy VPS databases kept payment_methods.currencies / sources as TEXT[]
+// (the typed schema file is CREATE TABLE IF NOT EXISTS), so the snapshot
+// worker's popularity touch failed every cycle with SQLSTATE 42883
+// "operator does not exist: text[] || fiat_currency[]".
+func TestEnsureUnifiedSchemaConvertsLegacyPaymentMethodArrays(t *testing.T) {
+	const migration = "20261120180000_payment_methods_enum_arrays.sql"
+	db := testdb.OpenUninitialized(t)
+	if _, err := db.Exec(`
+		CREATE TYPE fiat_currency AS ENUM ('EUR', 'USD');
+		CREATE TYPE dex_provider AS ENUM ('bisq', 'robosats');
+		CREATE TABLE payment_methods (
+			id BIGSERIAL PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			popularity INTEGER NOT NULL DEFAULT 0,
+			sources TEXT[] NOT NULL DEFAULT '{}',
+			currencies TEXT[] NOT NULL DEFAULT '{}',
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		INSERT INTO payment_methods (name, sources, currencies) VALUES
+			('SEPA', '{robosats,bisq,bisq,legacy_venue}', '{USD,EUR,BRL,EUR}'),
+			('Wise', '{}', '{}');
+	`); err != nil {
+		t.Fatalf("create legacy payment_methods: %v", err)
+	}
+	markExistingSchemaFilesApplied(t, db)
+	markExistingMigrationFilesAppliedExcept(t, db, migration)
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("apply payment method array repair: %v", err)
+	}
+
+	for column, want := range map[string]string{"currencies": "fiat_currency[]", "sources": "dex_provider[]"} {
+		var got string
+		if err := db.QueryRow(`SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+			WHERE attrelid = 'payment_methods'::regclass AND attname = $1`, column).Scan(&got); err != nil {
+			t.Fatalf("read %s type: %v", column, err)
+		}
+		if got != want {
+			t.Errorf("payment_methods.%s type = %s, want %s", column, got, want)
+		}
+	}
+	var currencies, sources string
+	if err := db.QueryRow(`SELECT currencies::text, sources::text FROM payment_methods WHERE name = 'SEPA'`).Scan(&currencies, &sources); err != nil {
+		t.Fatalf("read converted arrays: %v", err)
+	}
+	if currencies != "{EUR,USD}" || sources != "{bisq,robosats}" {
+		t.Errorf("converted arrays = %s / %s, want {EUR,USD} / {bisq,robosats} (deduplicated, unknown values dropped)", currencies, sources)
+	}
+
+	// The snapshot worker's popularity touch (flushPaymentMethodTouches) now runs.
+	if _, err := db.Exec(`
+		UPDATE payment_methods SET
+			currencies = (SELECT COALESCE(array_agg(DISTINCT x), '{}'::fiat_currency[]) FROM unnest(currencies || $1::fiat_currency[]) AS x),
+			sources = (SELECT COALESCE(array_agg(DISTINCT x), '{}'::dex_provider[]) FROM unnest(sources || $2::dex_provider[]) AS x),
+			popularity = popularity + $3
+		WHERE name = $4`, "{USD}", "{robosats}", 2, "Wise"); err != nil {
+		t.Fatalf("popularity touch on converted table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO payment_methods (name) VALUES ('Revolut')`); err != nil {
+		t.Fatalf("insert relying on the typed default: %v", err)
+	}
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("reapply schema after payment method repair: %v", err)
+	}
+}
