@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1020,7 +1019,7 @@ func peachResult(all []peachOffer, direction, currency string, btcPrice int, com
 }
 
 func fetchRobosatsCurrency(ctx context.Context, direction, currency string, btcPrice int) *fetchResult {
-	return fetchRobosatsCurrencyFrom(ctx, direction, currency, btcPrice, torClient(), robosatsCoordinators)
+	return fetchRobosatsCurrencyWithMemo(ctx, direction, currency, btcPrice, torClient(), robosatsCoordinators, robosatsEmptyBooks)
 }
 
 // robosatsCoordinator is one federated order-book source: the onion API
@@ -1211,27 +1210,7 @@ func writeRobosatsFederationCache(path string, cache robosatsFederationCache) er
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".robosats-federation-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(body); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return writeFileAtomic(path, body)
 }
 
 func robosatsFederationRefreshInterval() time.Duration {
@@ -1305,6 +1284,13 @@ func decodeRobosatsBook(body []byte) ([]json.RawMessage, string, error) {
 }
 
 func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, btcPrice int, client *http.Client, coordinators []robosatsCoordinator) *fetchResult {
+	return fetchRobosatsCurrencyWithMemo(ctx, direction, currency, btcPrice, client, coordinators, nil)
+}
+
+// fetchRobosatsCurrencyWithMemo polls every coordinator's book for one market.
+// A nil memo probes every coordinator; otherwise coordinator books that keep
+// answering not_found are skipped for a while (see robosatsEmptyBookMemo).
+func fetchRobosatsCurrencyWithMemo(ctx context.Context, direction, currency string, btcPrice int, client *http.Client, coordinators []robosatsCoordinator, memo *robosatsEmptyBookMemo) *fetchResult {
 	currencyID := fiat.RoboSatsCurrencyID(currency)
 	if currencyID == 0 {
 		return nil
@@ -1317,6 +1303,8 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 	byKey := make(map[string]offer)
 	okCount := 0
 	failCount := 0
+	var skipped []string
+	defer memo.save()
 	for _, coordinator := range coordinators {
 		onion := coordinator.Onion
 		// Alias scopes the offer id; alias-less fallback endpoints fall back
@@ -1325,16 +1313,26 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 		if coordinatorID == "" {
 			coordinatorID = robosatsCoordinatorID(onion)
 		}
+		bookKey := robosatsEmptyBookKey(onion, currencyID, offerType)
+		if memo.shouldSkip(bookKey, time.Now()) {
+			// Census-safe: the book answered not_found on its last probes, so
+			// it holds no offer this run could close. Count it as empty.
+			okCount++
+			skipped = append(skipped, coordinatorID)
+			continue
+		}
 		reqURL := fmt.Sprintf("%s/api/book/?currency=%d&type=%d", onion, currencyID, offerType)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			fmt.Printf("[Robosats] coordinator=%s request build failed: %v, trying next...\n", onion, err)
+			memo.forget(bookKey)
 			failCount++
 			continue
 		}
 		resp, err := client.Do(req)
 		if err != nil {
 			fmt.Printf("[Robosats] coordinator=%s request failed: %v, trying next...\n", onion, err)
+			memo.forget(bookKey)
 			failCount++
 			continue
 		}
@@ -1342,6 +1340,7 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 		resp.Body.Close()
 		if readErr != nil {
 			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=read_error: %v, trying next...\n", onion, resp.StatusCode, readErr)
+			memo.forget(bookKey)
 			failCount++
 			continue
 		}
@@ -1352,10 +1351,12 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 			// not_found count against the census.
 			if _, responseType, err := decodeRobosatsBook(body); err == nil && responseType == "not_found" {
 				okCount++
+				memo.recordEmpty(bookKey, time.Now())
 				fmt.Printf("[Robosats] Found 0 %s %s offers (coordinator=%s status=%d response_type=%s)\n", currency, direction, onion, resp.StatusCode, responseType)
 				continue
 			}
 			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=http_error, trying next...\n", onion, resp.StatusCode)
+			memo.forget(bookKey)
 			failCount++
 			continue
 		}
@@ -1363,8 +1364,14 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 		rawOffers, responseType, err := decodeRobosatsBook(body)
 		if err != nil {
 			fmt.Printf("[Robosats] coordinator=%s status=%d response_type=%s: %v, trying next...\n", onion, resp.StatusCode, responseType, err)
+			memo.forget(bookKey)
 			failCount++
 			continue
+		}
+		if len(rawOffers) == 0 {
+			memo.recordEmpty(bookKey, time.Now())
+		} else {
+			memo.forget(bookKey)
 		}
 
 		offers := parseRobosatsOffers(rawOffers, currency, btcPrice, coordinator.Alias)
@@ -1378,6 +1385,9 @@ func fetchRobosatsCurrencyFrom(ctx context.Context, direction, currency string, 
 		fmt.Printf("[Robosats] Found %d %s %s offers (coordinator=%s status=%d response_type=%s)\n", len(offers), currency, direction, onion, resp.StatusCode, responseType)
 	}
 
+	if len(skipped) > 0 {
+		fmt.Printf("[Robosats] Skipped %d recently empty %s %s books (coordinators=%s)\n", len(skipped), currency, direction, strings.Join(skipped, ","))
+	}
 	if okCount == 0 {
 		fmt.Println("[Robosats] All onion addresses failed")
 		return nil
