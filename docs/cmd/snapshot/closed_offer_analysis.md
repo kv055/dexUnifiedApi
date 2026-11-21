@@ -17,10 +17,15 @@ analyzes all lifecycle rows for that offer and updates the closed `offers` recor
 with averaged premium, trade cost, net premium, BTC profit, fiat profit, route,
 hedge, and size values.
 
-Grace is controlled by `CLOSED_OFFER_ANALYSIS_GRACE_CYCLES` (default `3`) times
-`SNAPSHOT_INTERVAL_MIN` (default `1` minute). Closed offers are not analyzed
-until `last_seen` is older than that window, which avoids marking short-lived
-flickers as `analyzed` before they reappear.
+Grace is `CLOSED_OFFER_ANALYSIS_GRACE_CYCLES` (default `3`) completed snapshot
+cycles, measured from `snapshot_log` (one row per finished run). Closed offers
+are not analyzed until `last_seen` is older than the end of the cycle before
+that window, which avoids marking short-lived flickers as `analyzed` before they
+reappear. `grace_cycles × SNAPSHOT_INTERVAL_MIN` minutes is only a floor and the
+fallback when `snapshot_log` has too little history: the worker runs one cycle
+per process, back to back, and a real pass (~3 min) is longer than
+`SNAPSHOT_INTERVAL_MIN` (`1`), which dexMonitor also uses as its default OHLC
+candle interval and so cannot be raised to match.
 
 When a previously analyzed offer becomes live again, the snapshot bulk `is_live`
 update in `main.go` clears `historical_analysis_status` and closure `avg_*`
@@ -47,7 +52,8 @@ calls `resetIgnoredClosedOffersWithLifecycle` so offers that were previously
 ignored can be retried after lifecycle rows arrive.
 
 The query selects closed offers where `is_live = FALSE`,
-`last_seen` is before the grace cutoff (`grace_cycles × SNAPSHOT_INTERVAL_MIN`),
+`last_seen` is before the grace cutoff (`closedOfferAnalysisGraceCutoff`: the
+older of the snapshot_log cycle bound and `grace_cycles × SNAPSHOT_INTERVAL_MIN`),
 and `historical_analysis_status` is either missing or `ignored_no_lifecycle`.
 Each row is converted into a `closedOfferRecord`, then passed to
 `analyzeSingleClosedOffer`.

@@ -108,7 +108,7 @@ Important variables:
 - `POSTGRES_MM_CONTROLLER_PASSWORD`
 - `POSTGRES_FIAT_CONTROLLER_PASSWORD`
 - `LISTEN_ADDR`
-- `SNAPSHOT_INTERVAL_MIN`
+- `SNAPSHOT_INTERVAL_MIN` (floor for the closed-offer grace window; the real cadence is one cycle per process)
 - `LIVE_OFFER_STALE_GRACE` (default `5m`; retain offers during source outages)
 - `CLOSED_OFFER_ANALYSIS_GRACE_CYCLES`
 - `TOR_PROXY_ADDR`

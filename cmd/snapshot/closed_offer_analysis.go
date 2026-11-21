@@ -29,7 +29,7 @@ type closedOfferRecord struct {
 func analyzeClosedOffers(sdb closedOfferDB) {
 	resetIgnoredClosedOffersWithLifecycle(sdb)
 
-	graceCutoff := closedOfferAnalysisGraceCutoff(time.Now())
+	graceCutoff := closedOfferAnalysisGraceCutoff(sdb, time.Now())
 
 	rows, err := sdb.Query(`
 		SELECT id, exchange, direction, price, btc_min, btc_max,
