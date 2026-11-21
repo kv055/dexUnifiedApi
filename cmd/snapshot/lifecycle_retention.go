@@ -5,8 +5,14 @@ import (
 	"time"
 )
 
+// defaultLifecycleRetentionDays bounds order_lifecycle (one row per live offer
+// per snapshot cycle). At ~1.4M rows/day (Nov 2026) 30 days settles near 42M
+// rows — more than the VPS disk holds next to everything else — while 14 days
+// settles near 20M. dexMonitor reads at most 168h of lifecycle history (its
+// longest preset), and closed offers keep their lifetime aggregates on the
+// offers row, so 14 days leaves a 2x margin over every reader.
 const (
-	defaultLifecycleRetentionDays   = 30
+	defaultLifecycleRetentionDays   = 14
 	lifecycleRetentionBatchSize     = 5000
 	lifecycleRetentionBudgetDefault = 20 * time.Second
 )

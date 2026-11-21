@@ -14,10 +14,10 @@ func TestLifecycleRetentionDisabledWhenDaysZero(t *testing.T) {
 	}
 }
 
-func TestLifecycleRetentionDefaultIsThirtyDays(t *testing.T) {
+func TestLifecycleRetentionDefaultIsFourteenDays(t *testing.T) {
 	t.Setenv("LIFECYCLE_RETENTION_DAYS", "")
-	if got := lifecycleRetention(); got != 30*24*time.Hour {
-		t.Fatalf("retention = %s, want 30 days", got)
+	if got := lifecycleRetention(); got != 14*24*time.Hour {
+		t.Fatalf("retention = %s, want 14 days", got)
 	}
 }
 
