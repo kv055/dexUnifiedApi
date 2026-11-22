@@ -3,6 +3,7 @@ package dbutil_test
 import (
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -78,9 +79,9 @@ func markExistingSchemaFilesApplied(t *testing.T, db *dbutil.DB) {
 }
 
 // markExistingMigrationFilesAppliedExcept models a legacy database that has
-// already applied every migration except the one under test. This keeps a
+// already applied every migration except the ones under test. This keeps a
 // focused migration test independent of unrelated forward migrations.
-func markExistingMigrationFilesAppliedExcept(t *testing.T, db *dbutil.DB, excluded string) {
+func markExistingMigrationFilesAppliedExcept(t *testing.T, db *dbutil.DB, excluded ...string) {
 	t.Helper()
 	if _, err := db.Exec(`CREATE TABLE migration_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		t.Fatalf("create migration_migrations: %v", err)
@@ -91,7 +92,7 @@ func markExistingMigrationFilesAppliedExcept(t *testing.T, db *dbutil.DB, exclud
 	}
 	for _, entry := range entries {
 		filename := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(filename, ".sql") || filename == excluded {
+		if entry.IsDir() || !strings.HasSuffix(filename, ".sql") || slices.Contains(excluded, filename) {
 			continue
 		}
 		if _, err := db.Exec(`INSERT INTO migration_migrations (filename) VALUES ($1)`, filename); err != nil {
@@ -628,9 +629,14 @@ func TestEnsureUnifiedSchemaDropsStaleProviderExchangeChecks(t *testing.T) {
 // Legacy VPS databases kept payment_methods.currencies / sources as TEXT[]
 // (the typed schema file is CREATE TABLE IF NOT EXISTS), so the snapshot
 // worker's popularity touch failed every cycle with SQLSTATE 42883
-// "operator does not exist: text[] || fiat_currency[]".
+// "operator does not exist: text[] || fiat_currency[]". The legacy table also
+// carries allowed-value CHECK constraints that the immutable conversion
+// migration cannot survive, so the backdated drop runs first.
 func TestEnsureUnifiedSchemaConvertsLegacyPaymentMethodArrays(t *testing.T) {
-	const migration = "20261120180000_payment_methods_enum_arrays.sql"
+	const (
+		dropChecks = "20261120175950_drop_payment_methods_legacy_allowed_checks.sql"
+		migration  = "20261120180000_payment_methods_enum_arrays.sql"
+	)
 	db := testdb.OpenUninitialized(t)
 	if _, err := db.Exec(`
 		CREATE TYPE fiat_currency AS ENUM ('EUR', 'USD');
@@ -655,7 +661,7 @@ func TestEnsureUnifiedSchemaConvertsLegacyPaymentMethodArrays(t *testing.T) {
 		t.Fatalf("create legacy payment_methods: %v", err)
 	}
 	markExistingSchemaFilesApplied(t, db)
-	markExistingMigrationFilesAppliedExcept(t, db, migration)
+	markExistingMigrationFilesAppliedExcept(t, db, dropChecks, migration)
 
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		t.Fatalf("apply payment method array repair: %v", err)
