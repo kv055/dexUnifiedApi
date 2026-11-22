@@ -238,15 +238,16 @@ func mapHodlHodlOffer(raw hodlHodlOfferJSON, direction, currency string) (offer,
 	}
 
 	mapped := offer{
-		OfferID:        id,
-		FiatCurrency:   currency,
-		Price:          price,
-		BTCMin:         &btcMin,
-		BTCMax:         &btcMax,
-		FiatMin:        &fiatMin,
-		FiatMax:        &fiatMax,
-		PaymentMethods: hodlHodlPaymentMethodNames(raw, direction),
-		PriceType:      normalizeHodlHodlPriceType(raw.PriceSource),
+		OfferID:            id,
+		FiatCurrency:       currency,
+		VolumeDenomination: fiatVolumeDenomination(currency),
+		Price:              price,
+		BTCMin:             &btcMin,
+		BTCMax:             &btcMax,
+		FiatMin:            &fiatMin,
+		FiatMax:            &fiatMax,
+		PaymentMethods:     hodlHodlPaymentMethodNames(raw, direction),
+		PriceType:          normalizeHodlHodlPriceType(raw.PriceSource),
 	}
 	applyRating(&mapped, mapHodlHodlTrader(raw.Trader))
 	mapped.SellerRatingSignals = mapHodlHodlSignals(raw.Trader)

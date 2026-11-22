@@ -876,6 +876,9 @@ func TestMapPeachOfferCarriesMakerID(t *testing.T) {
 	if got.MakerID != "maker-9" {
 		t.Fatalf("MakerID = %q, want %q", got.MakerID, "maker-9")
 	}
+	if got.VolumeDenomination != "BTC" {
+		t.Fatalf("VolumeDenomination = %q, want BTC", got.VolumeDenomination)
+	}
 }
 
 func TestEffectiveFiatMax(t *testing.T) {

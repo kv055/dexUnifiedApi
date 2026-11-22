@@ -27,6 +27,9 @@ func TestMapBisqOfferSellDirectionUsesBuyerDeposit(t *testing.T) {
 
 	got := mapBisqOffer(o, "ask", time.Now())
 
+	if got.VolumeDenomination != "BTC" {
+		t.Fatalf("VolumeDenomination = %q, want BTC", got.VolumeDenomination)
+	}
 	if got.OfferID != "offer-1" {
 		t.Fatalf("OfferID = %q, want offer-1", got.OfferID)
 	}

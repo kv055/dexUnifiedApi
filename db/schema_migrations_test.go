@@ -1,6 +1,7 @@
 package dbutil_test
 
 import (
+	"database/sql"
 	"os"
 	"regexp"
 	"slices"
@@ -716,5 +717,74 @@ func TestEnsureUnifiedSchemaConvertsLegacyPaymentMethodArrays(t *testing.T) {
 
 	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
 		t.Fatalf("reapply schema after payment method repair: %v", err)
+	}
+}
+
+// Offers record which unit the maker fixed their volume in. Existing rows are
+// backfilled from the venue, and the constraint keeps a fiat denomination equal
+// to the offer's own currency.
+func TestEnsureUnifiedSchemaBackfillsOfferVolumeDenomination(t *testing.T) {
+	db := testdb.OpenUninitialized(t)
+	if _, err := db.Exec(`
+		CREATE TYPE dex_provider AS ENUM ('bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin', 'mostro', 'noones');
+		CREATE TYPE fiat_currency AS ENUM ('EUR', 'USD', 'GBP', 'AUD', 'CHF', 'SEK', 'NOK', 'CAD');
+		CREATE TABLE offers (
+			id BIGSERIAL PRIMARY KEY,
+			exchange dex_provider NOT NULL,
+			fiat_currency fiat_currency NOT NULL
+		);
+		INSERT INTO offers (exchange, fiat_currency) VALUES
+			('bisq', 'EUR'), ('peachbitcoin', 'CHF'), ('hodlhodl', 'USD'),
+			('robosats', 'EUR'), ('bisq2', 'GBP'), ('mostro', 'CAD');
+	`); err != nil {
+		t.Fatalf("create legacy offers table: %v", err)
+	}
+	markExistingSchemaFilesApplied(t, db)
+	markExistingMigrationFilesAppliedExcept(t, db, "20261122120000_offer_volume_denomination.sql")
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("apply volume denomination migration: %v", err)
+	}
+
+	want := map[string]string{
+		"bisq":         "BTC",
+		"peachbitcoin": "BTC",
+		"hodlhodl":     "USD",
+		"robosats":     "EUR",
+		"bisq2":        "GBP",
+		"mostro":       "CAD",
+	}
+	rows, err := db.Query(`SELECT exchange::text, volume_denomination FROM offers`)
+	if err != nil {
+		t.Fatalf("read backfilled denominations: %v", err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var exchange string
+		var denomination sql.NullString
+		if err := rows.Scan(&exchange, &denomination); err != nil {
+			t.Fatalf("scan denomination: %v", err)
+		}
+		got[exchange] = denomination.String
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate denominations: %v", err)
+	}
+	for exchange, denomination := range want {
+		if got[exchange] != denomination {
+			t.Errorf("%s volume_denomination = %q, want %q", exchange, got[exchange], denomination)
+		}
+	}
+
+	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, volume_denomination) VALUES ('hodlhodl', 'EUR', 'USD')`); err == nil {
+		t.Error("fiat denomination differing from the offer currency was accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO offers (exchange, fiat_currency, volume_denomination) VALUES ('peachbitcoin', 'EUR', 'BTC'), ('hodlhodl', 'EUR', 'EUR'), ('robosats', 'USD', NULL)`); err != nil {
+		t.Errorf("valid denominations rejected: %v", err)
+	}
+
+	if err := dbutil.EnsureUnifiedSchema(db); err != nil {
+		t.Fatalf("reapply schema after denomination migration: %v", err)
 	}
 }

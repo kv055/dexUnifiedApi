@@ -134,6 +134,11 @@ type offer struct {
 	FiatMax        *int     `json:"fiat_max,omitempty"`
 	PaymentMethods []string `json:"payment_methods,omitempty"`
 	PriceType      *string  `json:"price_type,omitempty"`
+	// VolumeDenomination is the unit the maker fixed the offer's volume in:
+	// volumeDenominationBTC for a fixed bitcoin amount, or the fiat currency
+	// code for a fixed fiat amount. The other unit's min/max are only the
+	// conversion at the current price. Persisted as offers.volume_denomination.
+	VolumeDenomination string `json:"volume_denomination,omitempty"`
 	// SecurityDepositBTC/Pct are the deposit or bond the taker of this offer
 	// must lock, in BTC and as a fraction of the trade amount. Nil for
 	// exchanges with no deposit/bond concept (bisq2, hodlhodl, peachbitcoin).
@@ -267,6 +272,7 @@ type livePayload struct {
 	BTCMax             *float64 `json:"btc_max"`
 	FiatMin            *int64   `json:"fiat_min"`
 	FiatMax            *int64   `json:"fiat_max"`
+	VolumeDenomination string   `json:"volume_denomination,omitempty"`
 	PaymentMethods     []string `json:"payment_methods"`
 	OfferID            *string  `json:"offer_id"`
 	FirstSeen          string   `json:"first_seen"`
@@ -293,6 +299,15 @@ type livePayload struct {
 	SourceEventID        string     `json:"source_event_id,omitempty"`
 	SourceEventCreatedAt *time.Time `json:"source_event_created_at,omitempty"`
 	ProtocolVersion      int        `json:"protocol_version,omitempty"`
+}
+
+// volumeDenominationBTC marks offers whose maker fixed a bitcoin amount.
+const volumeDenominationBTC = "BTC"
+
+// fiatVolumeDenomination is the denomination of an offer whose maker fixed a
+// fiat amount: the offer's fiat currency code.
+func fiatVolumeDenomination(currency string) string {
+	return strings.ToUpper(strings.TrimSpace(currency))
 }
 
 func priceTypeFixed() *string    { s := "fixed"; return &s }
@@ -402,6 +417,7 @@ func mapBisqOffer(o *bisqgrpc.OfferInfo, direction string, now time.Time) offer 
 	newOffer := offer{
 		OfferID:              o.Id,
 		FiatCurrency:         "EUR",
+		VolumeDenomination:   volumeDenominationBTC,
 		Price:                price,
 		BTCMin:               &btcMin,
 		BTCMax:               &btcMax,
@@ -572,15 +588,16 @@ func fetchBisq2Currency(ctx context.Context, direction, currency string, btcPric
 		}
 
 		newOffer := offer{
-			OfferID:        o.ID,
-			FiatCurrency:   currency,
-			Price:          price,
-			BTCMin:         &btcMin,
-			BTCMax:         &btcMax,
-			FiatMin:        &fiatMin,
-			FiatMax:        &fiatMax,
-			PaymentMethods: methods,
-			PriceType:      pt,
+			OfferID:            o.ID,
+			FiatCurrency:       currency,
+			VolumeDenomination: fiatVolumeDenomination(currency),
+			Price:              price,
+			BTCMin:             &btcMin,
+			BTCMax:             &btcMax,
+			FiatMin:            &fiatMin,
+			FiatMax:            &fiatMax,
+			PaymentMethods:     methods,
+			PriceType:          pt,
 		}
 		rep := item.ReputationScore
 		repRaw, _ := json.Marshal(map[string]any{
@@ -894,15 +911,16 @@ func mapPeachOfferCurrency(o peachOffer, direction, currency string, btcPrice in
 	}
 
 	result := offer{
-		OfferID:        o.ID,
-		FiatCurrency:   currency,
-		Price:          price,
-		BTCMin:         &btcMin,
-		BTCMax:         &btcMax,
-		FiatMin:        &fiatMin,
-		FiatMax:        &fiatMax,
-		PaymentMethods: normalizeAllPeachMethods(methods),
-		PriceType:      priceTypeFixed(),
+		OfferID:            o.ID,
+		FiatCurrency:       currency,
+		VolumeDenomination: volumeDenominationBTC,
+		Price:              price,
+		BTCMin:             &btcMin,
+		BTCMax:             &btcMax,
+		FiatMin:            &fiatMin,
+		FiatMax:            &fiatMax,
+		PaymentMethods:     normalizeAllPeachMethods(methods),
+		PriceType:          priceTypeFixed(),
 		// Peach's offer listing has no seller rating; the maker id is carried to
 		// the unified-api server, which looks the rating up for live Peach offers
 		// (see cmd/server/peach_reputation.go).
@@ -1474,6 +1492,7 @@ func parseRobosatsOffers(rawOffers []json.RawMessage, currency string, btcPrice 
 		newOffer := offer{
 			OfferID:              offerID,
 			FiatCurrency:         currency,
+			VolumeDenomination:   fiatVolumeDenomination(currency),
 			Price:                price,
 			BTCMin:               &btcMin,
 			BTCMax:               &btcMax,
@@ -1754,6 +1773,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 			ReferencePrice:         btcPrice,
 			BTCMin:                 o.BTCMin,
 			BTCMax:                 o.BTCMax,
+			VolumeDenomination:     o.VolumeDenomination,
 			PriceType:              o.PriceType,
 			SecurityDepositBTC:     o.SecurityDepositBTC,
 			SecurityDepositPct:     o.SecurityDepositPct,
@@ -1801,6 +1821,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				btc_max = ?,
 				fiat_min = ?,
 				fiat_max = ?,
+				volume_denomination = COALESCE(?, volume_denomination),
 				payment_methods = ?,
 				offer_id = COALESCE(offer_id, ?),
 				security_deposit_btc = ?,
@@ -1822,7 +1843,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				RETURNING id,
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
-				o.PriceType, o.Price, o.BTCMin, o.BTCMax, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
+				o.PriceType, o.Price, o.BTCMin, o.BTCMax, o.FiatMin, o.FiatMax, nilIfEmpty(o.VolumeDenomination), nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
@@ -1838,12 +1859,12 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 			// unchanged.
 			upsertErr = tx.QueryRow(`INSERT INTO offers
 				(exchange, fiat_currency, direction, btc_min, btc_max,
-				 fiat_min, fiat_max, payment_methods, offer_id, price_type, price,
+				 fiat_min, fiat_max, volume_denomination, payment_methods, offer_id, price_type, price,
 				 security_deposit_btc, security_deposit_pct,
 				 counterparty_stake_btc, counterparty_stake_pct,
 				 seller_rating_score, seller_rating_confidence, seller_rating_raw, seller_rating_signals, maker_id,
 				 venue_node_pubkey, venue_node_name, venue_coordinator_id, source_event_id, source_event_created_at, venue_protocol_version)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (exchange, fiat_currency, offer_id) WHERE offer_id IS NOT NULL DO UPDATE SET
 				last_seen = CURRENT_TIMESTAMP,
 				price_type = ?,
@@ -1852,6 +1873,7 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 				btc_max = ?,
 				fiat_min = ?,
 				fiat_max = ?,
+				volume_denomination = COALESCE(?, offers.volume_denomination),
 				payment_methods = ?,
 				offer_id = COALESCE(offers.offer_id, ?),
 				security_deposit_btc = ?,
@@ -1873,13 +1895,13 @@ func saveSnapshotPersisted(sdb *dbutil.DB, exchange, fiat, direction string, btc
 					to_char(first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
 					to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
 				exchange, fiat, direction, o.BTCMin, o.BTCMax,
-				o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
+				o.FiatMin, o.FiatMax, nilIfEmpty(o.VolumeDenomination), nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID), o.PriceType, o.Price,
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
 				nilIfEmptyRawMessage(o.SellerRatingSignals),
 				nilIfEmpty(o.MakerID), nilIfEmpty(o.VenueNodePubKey), nilIfEmpty(o.VenueNodeName), nilIfEmpty(o.VenueCoordinatorID), nilIfEmpty(o.SourceEventID), nilIfZeroTime(o.SourceEventCreatedAt), nilIfZeroInt(o.ProtocolVersion),
-				o.PriceType, o.Price, o.BTCMin, o.BTCMax, o.FiatMin, o.FiatMax, nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
+				o.PriceType, o.Price, o.BTCMin, o.BTCMax, o.FiatMin, o.FiatMax, nilIfEmpty(o.VolumeDenomination), nilIfEmptySlice(o.PaymentMethods), nilIfEmpty(o.OfferID),
 				o.SecurityDepositBTC, o.SecurityDepositPct,
 				o.CounterpartyStakeBTC, o.CounterpartyStakePct,
 				o.SellerRatingScore, o.SellerRatingConfidence, nilIfEmptyRawMessage(o.SellerRatingRaw),
