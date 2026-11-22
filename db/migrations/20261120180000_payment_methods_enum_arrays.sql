@@ -34,7 +34,6 @@ $$;
 DO $$
 DECLARE
     rec RECORD;
-    chk RECORD;
     current_type REGTYPE;
     dropped TEXT;
 BEGIN
@@ -70,27 +69,6 @@ BEGIN
             RAISE NOTICE 'payment_methods.%: dropping values outside %: %',
                 rec.column_name, rec.enum_type, dropped;
         END IF;
-
-        -- Legacy databases also carry allowed-value CHECK constraints such as
-        -- payment_methods_currencies_allowed_check
-        --   CHECK (currencies <@ ARRAY['EUR'::text, ...]).
-        -- Re-parsed after the ALTER below they compare fiat_currency[] <@ text[]
-        -- and abort the migration with SQLSTATE 42883 ("operator does not
-        -- exist: fiat_currency[] <@ text[]") — observed on the legacy VPS
-        -- database, which rolled back the whole release over it. The typed
-        -- column makes them redundant (enum membership already bounds values),
-        -- so drop every CHECK constraint referencing the column.
-        FOR chk IN
-            SELECT conname
-            FROM pg_constraint
-            WHERE conrelid = 'payment_methods'::regclass
-              AND contype = 'c'
-              AND pg_get_constraintdef(oid)
-                  ~ ('(^|[^[:alnum:]_])' || rec.column_name || '([^[:alnum:]_]|$)')
-        LOOP
-            EXECUTE format('ALTER TABLE payment_methods DROP CONSTRAINT %I', chk.conname);
-            RAISE NOTICE 'payment_methods: dropped legacy check constraint %', chk.conname;
-        END LOOP;
 
         -- The TEXT[] default cannot be cast to the enum array automatically.
         EXECUTE format('ALTER TABLE payment_methods ALTER COLUMN %I DROP DEFAULT', rec.column_name);
