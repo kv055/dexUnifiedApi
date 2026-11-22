@@ -646,6 +646,11 @@ func TestEnsureUnifiedSchemaConvertsLegacyPaymentMethodArrays(t *testing.T) {
 		INSERT INTO payment_methods (name, sources, currencies) VALUES
 			('SEPA', '{robosats,bisq,bisq,legacy_venue}', '{USD,EUR,BRL,EUR}'),
 			('Wise', '{}', '{}');
+		ALTER TABLE payment_methods
+			ADD CONSTRAINT payment_methods_currencies_allowed_check
+				CHECK (currencies <@ ARRAY['EUR', 'USD', 'GBP', 'AUD', 'CHF', 'SEK', 'NOK', 'CAD', 'BRL']::text[]),
+			ADD CONSTRAINT payment_methods_sources_allowed_check
+				CHECK (sources <@ ARRAY['bisq', 'bisq2', 'hodlhodl', 'robosats', 'peachbitcoin', 'legacy_venue']::text[]);
 	`); err != nil {
 		t.Fatalf("create legacy payment_methods: %v", err)
 	}
@@ -672,6 +677,22 @@ func TestEnsureUnifiedSchemaConvertsLegacyPaymentMethodArrays(t *testing.T) {
 	}
 	if currencies != "{EUR,USD}" || sources != "{bisq,robosats}" {
 		t.Errorf("converted arrays = %s / %s, want {EUR,USD} / {bisq,robosats} (deduplicated, unknown values dropped)", currencies, sources)
+	}
+
+	// The legacy allowed-value CHECK constraints are dropped: kept, they would
+	// re-parse after the ALTER as fiat_currency[] <@ text[] and abort the
+	// migration with SQLSTATE 42883 on every legacy database (the VPS release
+	// rolled back over exactly this).
+	var staleChecks int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM pg_constraint
+		WHERE conrelid = 'payment_methods'::regclass
+		  AND contype = 'c'
+		  AND conname IN ('payment_methods_currencies_allowed_check', 'payment_methods_sources_allowed_check')`).Scan(&staleChecks); err != nil {
+		t.Fatalf("count stale checks: %v", err)
+	}
+	if staleChecks != 0 {
+		t.Errorf("legacy allowed-value checks still present: %d", staleChecks)
 	}
 
 	// The snapshot worker's popularity touch (flushPaymentMethodTouches) now runs.
