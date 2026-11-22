@@ -14,8 +14,36 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     ca-certificates \
+    curl \
     git \
     && rm -rf /var/lib/apt/lists/*
+
+# Upstream v1.10.12 pins the Gradle Java toolchain to vendor AMAZON
+# (build-logic/commons/.../bisq.java-conventions.gradle: JvmVendorSpec.AMAZON)
+# and configures no toolchain download repositories, so the Temurin JDK baked
+# into the base image no longer satisfies toolchain resolution ("Cannot find a
+# Java installation ... matching vendor=Amazon Corretto"). Install the pinned
+# Corretto 21 build — the one upstream's gradle.properties declares as the
+# release minimum (releaseBuild.javaVersion=21.0.13.1) — and make it
+# JAVA_HOME, so Gradle both runs on it and resolves it as the build toolchain.
+# The checksum is pinned because corretto.aws serves an HTML fallback page
+# with HTTP 200 for unknown paths, which would otherwise fail the build late.
+# Re-pin alongside BISQ_COMMIT on the next bump.
+ARG CORRETTO_VERSION=21.0.13.1.2
+ARG CORRETTO_SHA256=2aaa2a9a43143b20ff0b28c8d0da27407b97dc40b160d9a2f60a26965815e948
+RUN for attempt in 1 2 3 4 5; do \
+      curl -fsSL --retry 5 -o /tmp/corretto.tar.gz \
+        "https://corretto.aws/downloads/resources/${CORRETTO_VERSION}/amazon-corretto-${CORRETTO_VERSION}-linux-x64.tar.gz" && break; \
+      [ "$attempt" = 5 ] && exit 1; \
+      echo "corretto download failed (attempt $attempt), retrying" >&2; sleep 15; \
+    done && \
+    echo "${CORRETTO_SHA256}  /tmp/corretto.tar.gz" | sha256sum -c - && \
+    mkdir -p /opt/corretto && \
+    tar -xzf /tmp/corretto.tar.gz -C /opt/corretto --strip-components=1 && \
+    rm /tmp/corretto.tar.gz && \
+    /opt/corretto/bin/java -version
+ENV JAVA_HOME=/opt/corretto
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 RUN git init -q /src/bisq && \
     git -C /src/bisq remote add origin https://github.com/bisq-network/bisq.git && \
