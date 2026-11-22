@@ -31,11 +31,11 @@ func TestRefreshLiveHubLoadsCompleteMultiFiatBookAndRetainsItOnFailure(t *testin
 			id, exchange, fiat_currency, direction, price, payment_methods,
 			offer_id, is_live, security_deposit_pct, seller_rating_score,
 			seller_rating_confidence, seller_rating_raw, seller_rating_signals,
-			counterparty_stake_btc, counterparty_stake_pct
+			counterparty_stake_btc, counterparty_stake_pct, volume_denomination
 		) VALUES
-			(1, 'bisq', 'EUR', 'bid', 61000, ARRAY['SEPA'], 'eur-1', TRUE, 0.15, 91, 'feedback_verified', '{"rating":0.95}'::jsonb, '{"source":"hodlhodl","trades_count":12}'::jsonb, 0.001, 0.05),
-			(2, 'hodlhodl', 'USD', 'ask', 67000, ARRAY['Wise'], 'usd-1', TRUE, NULL, 88, 'feedback_verified', '{"rating":0.9}'::jsonb, NULL, NULL, NULL),
-			(3, 'bisq', 'GBP', 'bid', 52000, ARRAY['Faster Payments'], 'closed-1', FALSE, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+			(1, 'bisq', 'EUR', 'bid', 61000, ARRAY['SEPA'], 'eur-1', TRUE, 0.15, 91, 'feedback_verified', '{"rating":0.95}'::jsonb, '{"source":"hodlhodl","trades_count":12}'::jsonb, 0.001, 0.05, 'BTC'),
+			(2, 'hodlhodl', 'USD', 'ask', 67000, ARRAY['Wise'], 'usd-1', TRUE, NULL, 88, 'feedback_verified', '{"rating":0.9}'::jsonb, NULL, NULL, NULL, 'USD'),
+			(3, 'bisq', 'GBP', 'bid', 52000, ARRAY['Faster Payments'], 'closed-1', FALSE, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'BTC')
 	`); err != nil {
 		t.Fatalf("insert offers: %v", err)
 	}
@@ -79,6 +79,9 @@ func TestRefreshLiveHubLoadsCompleteMultiFiatBookAndRetainsItOnFailure(t *testin
 	}
 	if offers[1].CounterpartyStakePct != nil {
 		t.Fatalf("USD counterparty stake pct = %v, want nil", offers[1].CounterpartyStakePct)
+	}
+	if offers[0].VolumeDenomination != "BTC" || offers[1].VolumeDenomination != "USD" {
+		t.Fatalf("volume denominations = %q/%q, want BTC/USD", offers[0].VolumeDenomination, offers[1].VolumeDenomination)
 	}
 
 	if err := testDB.Close(); err != nil {
@@ -373,6 +376,7 @@ func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
 		SellerRatingConfidence: &conf,
 		SellerRatingSignals:    json.RawMessage(`{"source":"hodlhodl","trades_count":12}`),
 		CounterpartyStakePct:   &stakePct,
+		VolumeDenomination:     "BTC",
 	}}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/live_offers?cex=kraken", nil)
@@ -394,6 +398,12 @@ func TestLiveOffersRESTIncludesSellerRating(t *testing.T) {
 	}
 	if _, ok := raw[0]["seller_rating_signals"]; !ok {
 		t.Fatalf("seller_rating_signals missing from live offers API response: %s", rec.Body.String())
+	}
+	var limits struct {
+		VolumeDenomination string `json:"volume_denomination"`
+	}
+	if err := json.Unmarshal(raw[0]["volume_limits"], &limits); err != nil || limits.VolumeDenomination != "BTC" {
+		t.Fatalf("volume_limits.volume_denomination = %q (err %v), want BTC: %s", limits.VolumeDenomination, err, rec.Body.String())
 	}
 }
 

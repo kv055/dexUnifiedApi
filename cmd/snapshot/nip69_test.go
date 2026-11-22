@@ -43,6 +43,9 @@ func TestMapNIP69EventFixedAndFloating(t *testing.T) {
 	if fixed.PriceType == nil || *fixed.PriceType != "fixed" {
 		t.Fatalf("price type = %v, want fixed", fixed.PriceType)
 	}
+	if fixed.VolumeDenomination != "EUR" {
+		t.Fatalf("VolumeDenomination = %q, want EUR", fixed.VolumeDenomination)
+	}
 	if len(fixed.PaymentMethods) != 2 {
 		t.Fatalf("methods = %#v", fixed.PaymentMethods)
 	}

@@ -63,6 +63,10 @@ type LiveOffer struct {
 	FiatMin *int64 `json:"fiat_min"`
 	// FiatMax is a fiat-denominated fiat max value.
 	FiatMax *int64 `json:"fiat_max"`
+	// VolumeDenomination is the unit the maker fixed the volume in: "BTC", or
+	// the fiat currency code. The other unit's min/max are only the conversion
+	// at the current price. Empty for offers persisted before it was recorded.
+	VolumeDenomination string `json:"volume_denomination,omitempty"`
 	// PaymentMethods lists the payment methods accepted by this offer.
 	PaymentMethods []string `json:"payment_methods"`
 	// OfferID is the offer id value for the live offer.
@@ -131,6 +135,8 @@ type liveOfferVolumeLimits struct {
 	BTCMax  *float64 `json:"btc_max"`
 	FiatMin *int64   `json:"fiat_min"`
 	FiatMax *int64   `json:"fiat_max"`
+	// VolumeDenomination names the fixed pair: "BTC" or the fiat code.
+	VolumeDenomination string `json:"volume_denomination,omitempty"`
 }
 
 type liveOfferBTCNetworkFee struct {
@@ -355,6 +361,7 @@ type liveOutOffer struct {
 	BTCMax                    *float64                      `json:"btc_max"`
 	FiatMin                   *int64                        `json:"fiat_min"`
 	FiatMax                   *int64                        `json:"fiat_max"`
+	VolumeDenomination        string                        `json:"volume_denomination,omitempty"`
 	PaymentMethods            []string                      `json:"payment_methods"`
 	OfferID                   *string                       `json:"offer_id"`
 	FirstSeen                 string                        `json:"first_seen"`
@@ -519,10 +526,11 @@ func buildLiveOfferAPI(o liveOutOffer, sub liveSubscription) liveOfferAPI {
 			RawPremiumPercent: o.RawPremiumPct,
 		},
 		VolumeLimits: liveOfferVolumeLimits{
-			BTCMin:  o.BTCMin,
-			BTCMax:  o.BTCMax,
-			FiatMin: o.FiatMin,
-			FiatMax: o.FiatMax,
+			BTCMin:             o.BTCMin,
+			BTCMax:             o.BTCMax,
+			FiatMin:            o.FiatMin,
+			FiatMax:            o.FiatMax,
+			VolumeDenomination: o.VolumeDenomination,
 		},
 		BTCNetworkFee: buildBTCLiveNetworkFee(o.CostBreakdown, requiredConfirmations),
 		Analysis: liveOfferAnalysis{
@@ -1198,6 +1206,7 @@ func (h *LiveHub) buildOutOffers(settings transactionalRoutingSettings) []liveOu
 			BTCMax:                    o.BTCMax,
 			FiatMin:                   o.FiatMin,
 			FiatMax:                   o.FiatMax,
+			VolumeDenomination:        o.VolumeDenomination,
 			PaymentMethods:            o.PaymentMethods,
 			OfferID:                   o.OfferID,
 			FirstSeen:                 o.FirstSeen,

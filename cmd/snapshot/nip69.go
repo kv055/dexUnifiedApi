@@ -220,6 +220,7 @@ func mapNIP69Event(event nostrreq.Event, platform, wantKind, currency string, bt
 	out := offer{
 		OfferID:              offerID,
 		FiatCurrency:         fiatCode,
+		VolumeDenomination:   fiatVolumeDenomination(fiatCode),
 		Price:                price,
 		BTCMin:               &btcMin,
 		BTCMax:               &btcMax,

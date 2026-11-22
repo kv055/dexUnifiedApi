@@ -409,6 +409,9 @@ func TestParseRobosatsOffersLeavesRatingUnavailable(t *testing.T) {
 	if offers[0].VenueNodeName != "temple" {
 		t.Fatalf("VenueNodeName = %q, want temple", offers[0].VenueNodeName)
 	}
+	if offers[0].VolumeDenomination != "EUR" {
+		t.Fatalf("VolumeDenomination = %q, want EUR", offers[0].VolumeDenomination)
+	}
 	bare := parseRobosatsOffers(raw, "EUR", 60000, "")
 	if len(bare) != 1 || bare[0].OfferID != "42" || bare[0].VenueNodeName != "" {
 		t.Fatalf("bare offers = %#v, want id 42 with no venue name", bare)

@@ -22,6 +22,10 @@ func TestMapHodlHodlOfferPrefersSatoshiLimits(t *testing.T) {
 	if got.FiatMin == nil || got.FiatMax == nil || *got.FiatMin != 300 || *got.FiatMax != 600 {
 		t.Fatalf("fiat = %v-%v, want truncated 300-600", ptrVal(got.FiatMin), ptrVal(got.FiatMax))
 	}
+	// Hodl Hodl makers fix a fiat amount; the sats are the current conversion.
+	if got.VolumeDenomination != "EUR" {
+		t.Fatalf("VolumeDenomination = %q, want EUR", got.VolumeDenomination)
+	}
 }
 
 func TestMapHodlHodlOfferDerivesBTCFromDecimalFiat(t *testing.T) {

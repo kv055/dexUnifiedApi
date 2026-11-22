@@ -18,6 +18,7 @@ func TestSharedServiceSchemaContract(t *testing.T) {
 	required := map[string][]string{
 		"offers": {
 			"id", "exchange", "offer_id", "venue_node_pubkey", "venue_node_name", "venue_coordinator_id", "source_event_id", "source_event_created_at", "venue_protocol_version",
+			"fiat_currency", "btc_min", "btc_max", "fiat_min", "fiat_max", "volume_denomination",
 		},
 		"mostro_identities": {
 			"id", "label", "encrypted_mnemonic", "next_trade_index", "is_active", "created_at", "updated_at",
