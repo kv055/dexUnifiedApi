@@ -177,6 +177,15 @@ func (response legacyGetInternalCexPermissionsResponse) VisitGetInternalCexPermi
 	return response.server.serveLegacy(w, response.request)
 }
 
+type legacyPostInternalExecutionQuotesResponse struct {
+	server  *LegacyStrictServer
+	request *legacyRequest
+}
+
+func (response legacyPostInternalExecutionQuotesResponse) VisitPostInternalExecutionQuotesResponse(w http.ResponseWriter) error {
+	return response.server.serveLegacy(w, response.request)
+}
+
 type legacyPostInternalLiveOffersResponse struct {
 	server  *LegacyStrictServer
 	request *legacyRequest
@@ -222,6 +231,13 @@ func (server *LegacyStrictServer) GetInternalCexPermissions(ctx context.Context,
 		return nil, err
 	}
 	return legacyGetInternalCexPermissionsResponse{server: server, request: request}, nil
+}
+func (server *LegacyStrictServer) PostInternalExecutionQuotes(ctx context.Context, _ PostInternalExecutionQuotesRequestObject) (PostInternalExecutionQuotesResponseObject, error) {
+	request, err := legacyRequestFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return legacyPostInternalExecutionQuotesResponse{server: server, request: request}, nil
 }
 func (server *LegacyStrictServer) PostInternalLiveOffers(ctx context.Context, _ PostInternalLiveOffersRequestObject) (PostInternalLiveOffersResponseObject, error) {
 	request, err := legacyRequestFromContext(ctx)

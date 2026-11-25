@@ -48,6 +48,9 @@ type PostInternalBisqRequoteJSONBody struct {
 	VolumeAsLong        int    `json:"volume_as_long"`
 }
 
+// PostInternalExecutionQuotesJSONBody defines parameters for PostInternalExecutionQuotes.
+type PostInternalExecutionQuotesJSONBody map[string]interface{}
+
 // PostInternalLiveOffersJSONBody defines parameters for PostInternalLiveOffers.
 type PostInternalLiveOffersJSONBody map[string]interface{}
 
@@ -59,6 +62,9 @@ type PostApiAccountsHealthCheckJSONRequestBody PostApiAccountsHealthCheckJSONBod
 
 // PostInternalBisqRequoteJSONRequestBody defines body for PostInternalBisqRequote for application/json ContentType.
 type PostInternalBisqRequoteJSONRequestBody PostInternalBisqRequoteJSONBody
+
+// PostInternalExecutionQuotesJSONRequestBody defines body for PostInternalExecutionQuotes for application/json ContentType.
+type PostInternalExecutionQuotesJSONRequestBody PostInternalExecutionQuotesJSONBody
 
 // PostInternalLiveOffersJSONRequestBody defines body for PostInternalLiveOffers for application/json ContentType.
 type PostInternalLiveOffersJSONRequestBody PostInternalLiveOffersJSONBody
@@ -161,6 +167,9 @@ type ServerInterface interface {
 	// GetInternalCexPermissions GET /internal/cex_permissions
 	// (GET /internal/cex_permissions)
 	GetInternalCexPermissions(w http.ResponseWriter, r *http.Request)
+	// PostInternalExecutionQuotes Create an authoritative execution quote for a custom trade size
+	// (POST /internal/execution-quotes)
+	PostInternalExecutionQuotes(w http.ResponseWriter, r *http.Request)
 	// PostInternalLiveOffers POST /internal/live_offers
 	// (POST /internal/live_offers)
 	PostInternalLiveOffers(w http.ResponseWriter, r *http.Request)
@@ -225,6 +234,20 @@ func (siw *ServerInterfaceWrapper) GetInternalCexPermissions(w http.ResponseWrit
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetInternalCexPermissions(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostInternalExecutionQuotes operation middleware
+func (siw *ServerInterfaceWrapper) PostInternalExecutionQuotes(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostInternalExecutionQuotes(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -386,6 +409,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/health", wrapper.GetHealth)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/internal/bisq/requote", wrapper.PostInternalBisqRequote)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/internal/cex_permissions", wrapper.GetInternalCexPermissions)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/internal/execution-quotes", wrapper.PostInternalExecutionQuotes)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/internal/live_offers", wrapper.PostInternalLiveOffers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/internal/payment_notifications", wrapper.PostInternalPaymentNotifications)
 
@@ -632,6 +656,59 @@ func (response GetInternalCexPermissionsdefaultTextResponse) VisitGetInternalCex
 	return err
 }
 
+type PostInternalExecutionQuotesRequestObject struct {
+	Body *PostInternalExecutionQuotesJSONRequestBody
+}
+
+type PostInternalExecutionQuotesResponseObject interface {
+	VisitPostInternalExecutionQuotesResponse(w http.ResponseWriter) error
+}
+
+type PostInternalExecutionQuotes200JSONResponse map[string]interface{}
+
+func (response PostInternalExecutionQuotes200JSONResponse) VisitPostInternalExecutionQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostInternalExecutionQuotesdefaultJSONResponse struct {
+	Body       map[string]interface{}
+	StatusCode int
+}
+
+func (response PostInternalExecutionQuotesdefaultJSONResponse) VisitPostInternalExecutionQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostInternalExecutionQuotesdefaultTextResponse struct {
+	Body       string
+	StatusCode int
+}
+
+func (response PostInternalExecutionQuotesdefaultTextResponse) VisitPostInternalExecutionQuotesResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(response.StatusCode)
+
+	_, err := w.Write([]byte(fmt.Sprint(response.Body)))
+	return err
+}
+
 type PostInternalLiveOffersRequestObject struct {
 	Body *PostInternalLiveOffersJSONRequestBody
 }
@@ -782,6 +859,9 @@ type StrictServerInterface interface {
 	// GetInternalCexPermissions GET /internal/cex_permissions
 	// (GET /internal/cex_permissions)
 	GetInternalCexPermissions(ctx context.Context, request GetInternalCexPermissionsRequestObject) (GetInternalCexPermissionsResponseObject, error)
+	// PostInternalExecutionQuotes Create an authoritative execution quote for a custom trade size
+	// (POST /internal/execution-quotes)
+	PostInternalExecutionQuotes(ctx context.Context, request PostInternalExecutionQuotesRequestObject) (PostInternalExecutionQuotesResponseObject, error)
 	// PostInternalLiveOffers POST /internal/live_offers
 	// (POST /internal/live_offers)
 	PostInternalLiveOffers(ctx context.Context, request PostInternalLiveOffersRequestObject) (PostInternalLiveOffersResponseObject, error)
@@ -942,6 +1022,37 @@ func (sh *strictHandler) GetInternalCexPermissions(w http.ResponseWriter, r *htt
 	}
 }
 
+// PostInternalExecutionQuotes operation middleware
+func (sh *strictHandler) PostInternalExecutionQuotes(w http.ResponseWriter, r *http.Request) {
+	var request PostInternalExecutionQuotesRequestObject
+
+	var body PostInternalExecutionQuotesJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PostInternalExecutionQuotes(ctx, request.(PostInternalExecutionQuotesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PostInternalExecutionQuotes")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PostInternalExecutionQuotesResponseObject); ok {
+		if err := validResponse.VisitPostInternalExecutionQuotesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // PostInternalLiveOffers operation middleware
 func (sh *strictHandler) PostInternalLiveOffers(w http.ResponseWriter, r *http.Request) {
 	var request PostInternalLiveOffersRequestObject
@@ -1015,25 +1126,28 @@ func (sh *strictHandler) PostInternalPaymentNotifications(w http.ResponseWriter,
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

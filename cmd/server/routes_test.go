@@ -28,6 +28,7 @@ func TestRegisterRoutes(t *testing.T) {
 		{http.MethodPut, "/api/cex_permissions/kraken", "PUT /api/cex_permissions/{provider}"},
 		{http.MethodGet, "/internal/ws/live_offers", "GET /internal/ws/live_offers"},
 		{http.MethodPost, "/api/execution-quotes", "POST /api/execution-quotes"},
+		{http.MethodPost, "/internal/execution-quotes", "POST /internal/execution-quotes"},
 		{http.MethodGet, "/health", "GET /health"},
 	}
 

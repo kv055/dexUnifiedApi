@@ -26,6 +26,10 @@ func registerRoutes(mux *http.ServeMux) {
 // directly on the generated StrictServerInterface instead of being added here.
 func registerLegacyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/execution-quotes", handleExecutionQuotes)
+	// dexMonitor's /api/execution-quotes proxy has already checked the browser
+	// session and calls service-to-service with X-Internal-Secret and no user
+	// cookie, so it must use this route, not the session-gated /api/ one above.
+	mux.Handle("POST /internal/execution-quotes", internalSecretGate(http.HandlerFunc(handleExecutionQuotes)))
 	mux.Handle("POST /internal/bisq/requote", internalSecretGate(http.HandlerFunc(handleBisqRequote)))
 	mux.HandleFunc("GET /api/live_offers", handleLiveOffersREST)
 	mux.HandleFunc("GET /api/live_offers/counts", handleLiveOffersCountsREST)

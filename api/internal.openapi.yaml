@@ -180,6 +180,43 @@ paths:
       description: GET /internal/cex_permissions
       security:
         - internalSecret: []
+  /internal/execution-quotes:
+    post:
+      operationId: postInternalExecutionQuotes
+      tags:
+        - live-offers
+      summary: Create an authoritative execution quote for a custom trade size
+      description: >-
+        Same handler as the session-gated POST /api/execution-quotes. dexMonitor's
+        dashboard proxy calls this route: it has already checked the browser
+        session and authenticates with X-Internal-Secret instead of a cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Error response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/plain:
+              schema:
+                type: string
+      security:
+        - internalSecret: []
   /internal/live_offers:
     post:
       operationId: postInternalLiveOffers
