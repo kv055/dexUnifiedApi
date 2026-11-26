@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"commons/apierror"
 	"commons/exchangecredentials"
 	"commons/fiat"
 	"commons/logging"
@@ -359,9 +360,9 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("bisq2 health: %w", err)
 			}
-			resp.Body.Close()
+			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("bisq2 health: unexpected status %d", resp.StatusCode)
+				return fmt.Errorf("bisq2 health: %w", apierror.FromResponse(resp, "the Bisq2 API"))
 			}
 			return nil
 		}),
@@ -1064,9 +1065,21 @@ func writeJSON(w http.ResponseWriter, data any) {
 	json.NewEncoder(w).Encode(data)
 }
 
+// apiErrorOptions keep unexpected causes out of responses: raw errors can leak
+// DB/driver internals. The cause is logged under the reference in the response.
+var apiErrorOptions = apierror.Options{Service: "the Unified API"}
+
 func writeError(w http.ResponseWriter, err error) {
-	// Log the real error server-side but return a generic message: raw err.Error()
-	// can leak DB/driver internals (table names, SQL state, connection details).
-	slog.Error("request failed", "err", err)
-	http.Error(w, "internal server error", http.StatusInternalServerError)
+	writeAPIError(w, http.StatusInternalServerError, err)
+}
+
+// writeAPIError answers with the shared {"error","code","detail","ref"} shape.
+func writeAPIError(w http.ResponseWriter, status int, err error) {
+	status, body, ref := apierror.Describe(err, status, apiErrorOptions)
+	if ref != "" || status >= http.StatusInternalServerError {
+		slog.Error("request failed", "status", status, "ref", ref, "code", body.Code, "err", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }

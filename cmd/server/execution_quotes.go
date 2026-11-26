@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/apierror"
 	"commons/tradecost"
 	"encoding/json"
 	"fmt"
@@ -41,26 +42,26 @@ type executionQuoteResponse struct {
 func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 	var req executionQuoteRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "invalid_request", "The quote request couldn't be read. Reload the page and try again.")
 		return
 	}
 	unit := strings.ToLower(strings.TrimSpace(req.Unit))
 	if unit != "btc" && unit != "fiat" {
-		http.Error(w, "unit must be btc or fiat", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "invalid_amount", "Choose BTC or fiat as the amount unit.")
 		return
 	}
 	amount, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(req.Amount), ",", "."), 64)
 	if err != nil || amount <= 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
-		http.Error(w, "amount must be a positive decimal", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "invalid_amount", "Enter an amount greater than zero, for example 0.005 or 150.")
 		return
 	}
 	offer := hub.offerByIdentity(req.OfferDBID, req.Exchange, req.OfferID, req.CoordinatorID)
 	if offer == nil {
-		http.Error(w, "offer is not currently live", http.StatusNotFound)
+		apiFail(w, http.StatusNotFound, "offer_not_live", "This offer is no longer in the live order book (it was taken, cancelled or expired). Pick another offer.")
 		return
 	}
 	if strings.EqualFold(offer.Exchange, "robosats") && strings.TrimSpace(offer.VenueCoordinatorID) == "" {
-		http.Error(w, "offer is missing coordinator identity; refresh it from source before trading", http.StatusConflict)
+		apiFail(w, http.StatusConflict, "offer_incomplete", "This RoboSats offer doesn't have its coordinator yet, so it can't be priced. Wait for the next order-book refresh (about a minute) and try again.")
 		return
 	}
 	paymentMethod := strings.TrimSpace(req.PaymentMethod)
@@ -68,7 +69,7 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		paymentMethod = offer.PaymentMethods[0]
 	}
 	if paymentMethod == "" {
-		http.Error(w, "payment_method is required", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "payment_method_required", "This offer accepts several payment methods. Choose one before requesting a quote.")
 		return
 	}
 	nativeID := ""
@@ -76,23 +77,23 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		nativeID = *offer.OfferID
 	}
 	if nativeID == "" {
-		http.Error(w, "native offer identity is missing", http.StatusConflict)
+		apiFail(w, http.StatusConflict, "offer_incomplete", "This offer doesn't have its venue order ID yet, so it can't be priced. Wait for the next order-book refresh and try again.")
 		return
 	}
 	if req.OfferID != "" && req.OfferID != nativeID || req.Exchange != "" && !strings.EqualFold(req.Exchange, offer.Exchange) || req.CoordinatorID != "" && req.CoordinatorID != offer.VenueCoordinatorID {
-		http.Error(w, "offer identity does not match", http.StatusConflict)
+		apiFail(w, http.StatusConflict, "offer_changed", "This offer changed in the order book since you opened it. Close it and open it again from the list.")
 		return
 	}
 	var native *roboNativeTerms
 	if strings.EqualFold(offer.Exchange, "robosats") {
 		if !strings.EqualFold(offer.Direction, "bid") {
-			http.Error(w, "only RoboSats bids are executable", http.StatusConflict)
+			apiFail(w, http.StatusConflict, "unsupported_route", "Only RoboSats offers where the maker buys bitcoin can be taken; this one sells bitcoin.")
 			return
 		}
 		req.Amount, req.Unit = strings.ReplaceAll(strings.TrimSpace(req.Amount), ",", "."), unit
 		native, err = loadRoboNativeTerms(r.Context(), req, offer, paymentMethod)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeAPIError(w, http.StatusConflict, err)
 			return
 		}
 	}
@@ -102,7 +103,7 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		offerPrice, err = strconv.ParseFloat(native.Price, 64)
 	}
 	if err != nil || offerPrice <= 0 || math.IsNaN(offerPrice) || math.IsInf(offerPrice, 0) {
-		http.Error(w, "offer price is unavailable", http.StatusConflict)
+		apiFail(w, http.StatusConflict, "offer_price_unavailable", "This offer has no usable price right now. Wait for the next order-book refresh and try again.")
 		return
 	}
 	var btcAmount, fiatAmount float64
@@ -116,7 +117,7 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 	if native != nil {
 		fiatAmount, err = strconv.ParseFloat(native.FiatAmount, 64)
 		if err != nil || fiatAmount <= 0 || math.IsInf(fiatAmount, 0) || math.IsNaN(fiatAmount) {
-			http.Error(w, "invalid native fiat amount", http.StatusConflict)
+			apiFail(w, http.StatusConflict, "robosats_terms_changed", "RoboSats returned an unusable fiat amount for this offer. Try again; if it keeps happening, pick another offer.")
 			return
 		}
 		btcAmount = float64(native.PrincipalSat) / 1e8
@@ -127,19 +128,19 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		offer.SecurityDepositPct = &pct
 	}
 	if offer.BTCMin != nil && btcAmount+1e-12 < *offer.BTCMin {
-		http.Error(w, "amount is below the offer minimum", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "amount_out_of_range", fmt.Sprintf("%s BTC is below this offer's minimum of %s BTC. Enter a larger amount.", formatBTCAmount(btcAmount), formatBTCAmount(*offer.BTCMin)))
 		return
 	}
 	if offer.BTCMax != nil && btcAmount-1e-12 > *offer.BTCMax {
-		http.Error(w, "amount is above the offer maximum", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "amount_out_of_range", fmt.Sprintf("%s BTC is above this offer's maximum of %s BTC. Enter a smaller amount.", formatBTCAmount(btcAmount), formatBTCAmount(*offer.BTCMax)))
 		return
 	}
 	if offer.FiatMin != nil && fiatAmount+0.005 < float64(*offer.FiatMin) {
-		http.Error(w, "amount is below the offer minimum", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "amount_out_of_range", fmt.Sprintf("%.2f %s is below this offer's minimum of %v %s. Enter a larger amount.", fiatAmount, offer.FiatCurrency, *offer.FiatMin, offer.FiatCurrency))
 		return
 	}
 	if offer.FiatMax != nil && fiatAmount-0.005 > float64(*offer.FiatMax) {
-		http.Error(w, "amount is above the offer maximum", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "amount_out_of_range", fmt.Sprintf("%.2f %s is above this offer's maximum of %v %s. Enter a smaller amount.", fiatAmount, offer.FiatCurrency, *offer.FiatMax, offer.FiatCurrency))
 		return
 	}
 
@@ -161,7 +162,7 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 	// otherwise wrap int64 and persist a corrupt bond/escrow amount.
 	bondBTC := bd.Capital.SecurityDepositBTC
 	if math.IsNaN(bondBTC) || math.IsInf(bondBTC, 0) || bondBTC < 0 || bondBTC > 21_000_000 || btcAmount > 21_000_000 {
-		http.Error(w, "amount is outside the possible bitcoin supply", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "invalid_amount", "That amount is larger than all bitcoin in existence. Check the amount and its unit (BTC or fiat).")
 		return
 	}
 	maxBond := int64(math.Ceil(math.Max(0, bondBTC) * 1e8))
@@ -178,7 +179,7 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if maxEscrow <= 0 {
-		http.Error(w, "escrow amount is invalid", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "invalid_amount", "This amount is too small to put anything in escrow. Enter a larger amount.")
 		return
 	}
 	bondFee, escrowFee := int64(0), int64(0)
@@ -198,7 +199,7 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 	routeJSON, _ := json.Marshal(route)
 	var quoteID string
 	if db == nil {
-		http.Error(w, "quotes are unavailable", http.StatusServiceUnavailable)
+		apiFail(w, http.StatusServiceUnavailable, "quotes_unavailable", "Quotes can't be saved because the Unified API has no database connection. Check the Postgres container and the Unified API log.")
 		return
 	}
 	err = db.QueryRowContext(r.Context(), `INSERT INTO execution_quotes
@@ -208,7 +209,8 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		offer.ID, strings.ToLower(offer.Exchange), nullIfBlank(offer.VenueCoordinatorID), nativeID, paymentMethod, unit, amount, fiatAmount, btcAmount, maxBond, maxEscrow, bondFee, escrowFee, string(routeJSON), expires, nativeJSON,
 	).Scan(&quoteID)
 	if err != nil {
-		writeError(w, fmt.Errorf("persist execution quote: %w", err))
+		writeAPIError(w, http.StatusInternalServerError, apierror.Wrap(fmt.Errorf("persist execution quote: %w", err), apierror.CodeDatabase,
+			"The quote couldn't be saved to the database, so it can't be confirmed. Try again; if it keeps failing, check the Postgres container."))
 		return
 	}
 	resp := executionQuoteResponse{
@@ -218,7 +220,7 @@ func handleExecutionQuotes(w http.ResponseWriter, r *http.Request) {
 		Executable: route != nil,
 	}
 	if route == nil {
-		resp.BlockedReason = "No executable route for this size"
+		resp.BlockedReason = noRouteReason(spot, hedge, settings.TradeMode)
 	}
 	writeJSON(w, resp)
 }
@@ -256,4 +258,30 @@ func (h *LiveHub) snapshotRoutingSettings() transactionalRoutingSettings {
 	h.routingSettingsMu.RLock()
 	defer h.routingSettingsMu.RUnlock()
 	return h.routingSettings
+}
+
+// noRouteReason explains why no exchange can carry a trade of this size.
+func noRouteReason(spotExcluded, hedgeExcluded []string, tradeMode string) string {
+	msg := "No exchange can carry this trade right now."
+	if len(spotExcluded) > 0 {
+		msg += " Buying is disabled on " + strings.Join(spotExcluded, ", ") + "."
+	}
+	if tradeMode != tradecost.TradeModeHedgelessDoubleCollateral && len(hedgeExcluded) > 0 {
+		msg += " Hedging is disabled on " + strings.Join(hedgeExcluded, ", ") + "."
+	}
+	msg += " Each trade needs an exchange with spot trading"
+	if tradeMode != tradecost.TradeModeHedgelessDoubleCollateral {
+		msg += " and hedging"
+	}
+	return msg + " enabled and its fees loaded. Check the exchange permissions under Trading Accounts, then reopen the offer."
+}
+
+// formatBTCAmount prints a BTC amount without trailing zeros.
+func formatBTCAmount(v float64) string {
+	return strconv.FormatFloat(tradecost.Round8(v), 'f', -1, 64)
+}
+
+// apiFail answers with an operator-facing error.
+func apiFail(w http.ResponseWriter, status int, code, message string) {
+	writeAPIError(w, status, apierror.New(code, message))
 }

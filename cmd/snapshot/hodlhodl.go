@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"commons/apierror"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -166,7 +167,7 @@ func fetchHodlHodlPage(ctx context.Context, client *http.Client, baseURL, direct
 		return nil, fmt.Errorf("rate limited (HTTP 429)")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return nil, apierror.FromBody(resp.StatusCode, body, "HodlHodl")
 	}
 	return parseHodlHodlOffersResponse(body)
 }

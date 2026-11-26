@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/apierror"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -263,7 +264,7 @@ func fetchPeachJSON(ctx context.Context, path string, maxBytes int64, out any) e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return apierror.FromResponse(resp, "Peach")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {

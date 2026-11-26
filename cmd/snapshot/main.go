@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/apierror"
 	"commons/fiat"
 	"commons/logging"
 	"commons/paymentmethods"
@@ -1098,7 +1099,7 @@ func fetchRobosatsFederationFrom(ctx context.Context, client *http.Client, regis
 		return nil, etag, true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", false, fmt.Errorf("federation registry returned HTTP %d", resp.StatusCode)
+		return nil, "", false, fmt.Errorf("RoboSats federation registry: %w", apierror.FromResponse(resp, "the RoboSats federation registry"))
 	}
 	body, err := readAllLimited(resp.Body)
 	if err != nil {

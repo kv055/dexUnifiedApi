@@ -1,6 +1,7 @@
 package main
 
 import (
+	"commons/apierror"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -96,7 +97,7 @@ func fetchHodlHodlReviewPage(ctx context.Context, login string, page int) (strin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return "", apierror.FromResponse(resp, "HodlHodl")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, hodlHodlReviewPageMaxBytes+1))
 	if err != nil {
