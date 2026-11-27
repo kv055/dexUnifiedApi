@@ -11,7 +11,31 @@ const (
 	roleMMController   = "dex_mm_controller"
 	roleFiatController = "dex_fiat_controller"
 	roleGrafanaRO      = "dex_grafana_ro"
+	roleMonitorPublic  = "dex_monitor_public"
 )
+
+// monitorPublicTables are the market tables the public monitor
+// (dexmonitor-public) reads in full. Nothing else is readable for that role.
+var monitorPublicTables = []string{
+	"offers",
+	"order_lifecycle",
+	"ohlc",
+	"snapshots",
+	"snapshot_log",
+	"payment_methods",
+	"mm_cex_provider_policies",
+}
+
+// monitorPublicColumns are the only columns of operator tables the public
+// monitor reads: the capability store needs which exchanges have an active,
+// recently checked key, never the key, secret, login or contact details.
+var monitorPublicColumns = []struct {
+	table   string
+	columns string
+}{
+	{table: "accounts", columns: "id, provider, category, is_active"},
+	{table: "api_keys", columns: "id, account_id, is_active, permissions, permissions_checked_at, permission_check_error"},
+}
 
 // RoleBootstrapConfig represents a role bootstrap config.
 type RoleBootstrapConfig struct {
@@ -29,6 +53,9 @@ type RoleBootstrapConfig struct {
 	// role. Optional: when empty the role is skipped entirely, so deploys work
 	// before the secret is provisioned.
 	GrafanaROPassword string
+	// MonitorPublicPassword is the password for the public monitor's
+	// restricted read role (dexmonitor-public). Optional like Grafana's.
+	MonitorPublicPassword string
 }
 
 // EnsureAppRoles ensures the required state exists.
@@ -104,7 +131,57 @@ func EnsureAppRoles(admin *DB, cfg RoleBootstrapConfig) error {
 		return fmt.Errorf("ensure trade_direction ownership: %w", err)
 	}
 
-	return ensureGrafanaRORole(admin, cfg)
+	if err := ensureGrafanaRORole(admin, cfg); err != nil {
+		return err
+	}
+	return ensureMonitorPublicRole(admin, cfg)
+}
+
+// ensureMonitorPublicRole creates/updates the public monitor's read role. It
+// is rebuilt from nothing on every reconciliation (REVOKE ALL, then explicit
+// grants), so a table added later is never readable by accident, unlike the
+// Grafana role's default privileges. Tables that do not exist yet (the first
+// bootstrap runs before the schema) are granted on the next reconciliation.
+func ensureMonitorPublicRole(admin *DB, cfg RoleBootstrapConfig) error {
+	if strings.TrimSpace(cfg.MonitorPublicPassword) == "" {
+		return nil
+	}
+	if err := ensureRole(admin, roleMonitorPublic, cfg.MonitorPublicPassword); err != nil {
+		return err
+	}
+
+	statements := []string{
+		fmt.Sprintf(`GRANT CONNECT ON DATABASE "%s" TO %s`, cfg.DatabaseName, roleMonitorPublic),
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, roleMonitorPublic),
+		// Also revokes column privileges, so the grants below are exact.
+		fmt.Sprintf(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %s`, roleMonitorPublic),
+		fmt.Sprintf(`REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %s`, roleMonitorPublic),
+	}
+	for _, table := range monitorPublicTables {
+		if tableExists(admin, table) {
+			statements = append(statements, fmt.Sprintf(`GRANT SELECT ON public.%s TO %s`, table, roleMonitorPublic))
+		}
+	}
+	for _, grant := range monitorPublicColumns {
+		if tableExists(admin, grant.table) {
+			statements = append(statements,
+				fmt.Sprintf(`GRANT SELECT (%s) ON public.%s TO %s`, grant.columns, grant.table, roleMonitorPublic))
+		}
+	}
+	for _, stmt := range statements {
+		if _, err := admin.DB.Exec(stmt); err != nil {
+			return fmt.Errorf("bootstrap public monitor role with %q: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+func tableExists(admin *DB, table string) bool {
+	var exists bool
+	if err := admin.DB.QueryRow(`SELECT to_regclass($1) IS NOT NULL`, "public."+table).Scan(&exists); err != nil {
+		return false
+	}
+	return exists
 }
 
 // ensureGrafanaRORole creates/updates the SELECT-only role Grafana's Postgres

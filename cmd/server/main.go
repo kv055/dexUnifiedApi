@@ -56,6 +56,10 @@ func sessionProtected(path string) bool {
 }
 
 var (
+	// publicListenAddr enables the read-only public listener (see
+	// public_listener.go). Empty means off.
+	publicListenAddr string
+
 	adminDatabaseURL          string
 	databaseURL               string
 	listenAddr                string
@@ -127,6 +131,7 @@ func setCexPrice(cex string, p float64) {
 // --- Init & Main ---
 
 func init() {
+	publicListenAddr = strings.TrimSpace(os.Getenv("PUBLIC_LISTEN_ADDR"))
 	// Under tests we run without a configured secret; allow insecure so the internal
 	// handler tests exercise the empty-secret path. In prod this is opt-in only.
 	allowInsecureInternal = runningUnderGoTest() ||
@@ -192,6 +197,7 @@ func prepareDatabase() (adminDB, appDB *dbutil.DB, err error) {
 		MMControllerPassword:   config.RequireEnv("POSTGRES_MM_CONTROLLER_PASSWORD"),
 		FiatControllerPassword: config.RequireEnv("POSTGRES_FIAT_CONTROLLER_PASSWORD"),
 		GrafanaROPassword:      config.EnvOrDefault("POSTGRES_GRAFANA_RO_PASSWORD", ""),
+		MonitorPublicPassword:  config.EnvOrDefault("POSTGRES_MONITOR_PUBLIC_PASSWORD", ""),
 	}); err != nil {
 		adminDB.Close()
 		return nil, nil, fmt.Errorf("database admin setup error: %w", err)
@@ -413,6 +419,10 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+	var publicSrv *http.Server
+	if publicListenAddr != "" {
+		publicSrv = startPublicListener(publicListenAddr, metricsReg.Middleware)
+	}
 
 	// Block until SIGINT/SIGTERM (e.g. docker stop), then drain in-flight
 	// requests and let the deferred tracer shutdown flush buffered spans.
@@ -424,6 +434,11 @@ func main() {
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("graceful shutdown failed", "err", err)
+	}
+	if publicSrv != nil {
+		if err := publicSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("public listener shutdown failed", "err", err)
+		}
 	}
 }
 
